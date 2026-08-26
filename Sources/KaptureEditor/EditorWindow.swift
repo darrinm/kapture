@@ -522,6 +522,17 @@ final class CanvasView: NSView, NSTextFieldDelegate {
 
     private func boundsOf(_ l: Annotation) -> CGRect {
         guard let first = l.points.first else { return .zero }
+        switch l.tool {
+        case .text:
+            guard let text = l.text else { break }
+            let size = (text as NSString).size(withAttributes:
+                [.font: NSFont.systemFont(ofSize: l.fontSize ?? 48, weight: .semibold)])
+            return CGRect(origin: first, size: size)
+        case .counter:
+            let r = max(l.strokeWidth * 4, 24)
+            return CGRect(x: first.x - r, y: first.y - r, width: r * 2, height: r * 2)
+        default: break
+        }
         guard l.points.count > 1 else {
             return CGRect(x: first.x - 30, y: first.y - 30, width: 60, height: 60)
         }
