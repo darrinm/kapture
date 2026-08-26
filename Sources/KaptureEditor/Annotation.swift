@@ -29,11 +29,13 @@ public struct Annotation: Codable, Identifiable {
     public var text: String?
     public var number: Int?           // counter
     public var fontSize: CGFloat?     // text, image-space
+    public var applied: Bool?         // crop: true once applied in-editor (canvas re-bases to its rect)
 
     public init(tool: Tool, points: [CGPoint], colorHex: String, strokeWidth: CGFloat,
                 text: String? = nil, number: Int? = nil, fontSize: CGFloat? = nil) {
         self.id = UUID(); self.tool = tool; self.points = points; self.colorHex = colorHex
         self.strokeWidth = strokeWidth; self.text = text; self.number = number; self.fontSize = fontSize
+        self.applied = nil
     }
 
     public var color: NSColor { NSColor(hex: colorHex) }

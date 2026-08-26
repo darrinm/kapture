@@ -90,6 +90,17 @@ final class EditorViewController: NSViewController {
     let canvas: CanvasView
     var idealSize: NSSize
     private var colorButtons: [NSButton] = []
+    private var railButtons: [NSButton] = []
+    private var widthLabel: NSTextField!
+    private var widthSlider: NSSlider!
+
+    /// Programmatic tool switch (e.g. after applying a crop): canvas, rail radio, and bars agree.
+    private func selectTool(_ tool: Tool) {
+        canvas.tool = tool
+        for b in railButtons { b.state = b.identifier?.rawValue == tool.rawValue ? .on : .off }
+        updateColorSelection()
+        updateOptionsBar()
+    }
 
     init(baseImage: CGImage, layers: [Annotation], onDone: @escaping ([Annotation], Bool) -> Void) {
         self.baseImage = baseImage
@@ -137,7 +148,9 @@ final class EditorViewController: NSViewController {
             NSLayoutConstraint.activate([b.widthAnchor.constraint(equalToConstant: 36),
                                          b.heightAnchor.constraint(equalToConstant: 32)])
             rail.addArrangedSubview(b)
+            railButtons.append(b)
         }
+        canvas.onCropApplied = { [weak self] in self?.selectTool(.select) }
 
         let options = NSStackView()
         options.orientation = .horizontal
@@ -159,13 +172,15 @@ final class EditorViewController: NSViewController {
             colorButtons.append(b)
         }
         updateColorSelection()
-        let widthSlider = NSSlider(value: Double(canvas.strokeWidth), minValue: 2, maxValue: 24,
-                                   target: self, action: #selector(widthChanged(_:)))
+        widthSlider = NSSlider(value: Double(canvas.strokeWidth), minValue: 2, maxValue: 24,
+                               target: self, action: #selector(widthChanged(_:)))
         widthSlider.translatesAutoresizingMaskIntoConstraints = false
         widthSlider.widthAnchor.constraint(equalToConstant: 120).isActive = true
-        options.addArrangedSubview(NSTextField(labelWithString: "Width"))
+        widthLabel = NSTextField(labelWithString: "Width")
+        options.addArrangedSubview(widthLabel)
         options.addArrangedSubview(widthSlider)
         options.addArrangedSubview(NSView())
+        updateOptionsBar()
 
         let done = NSButton(title: "Done", target: self, action: #selector(doneTapped))
         done.bezelStyle = .rounded
@@ -203,6 +218,7 @@ final class EditorViewController: NSViewController {
         canvas.tool = tool
         if tool == .select { canvas.selectMostRecent() }
         updateColorSelection()
+        updateOptionsBar()
         // radio behavior
         (sender.superview as? NSStackView)?.arrangedSubviews.compactMap { $0 as? NSButton }
             .forEach { $0.state = $0 === sender ? .on : .off }
@@ -220,6 +236,21 @@ final class EditorViewController: NSViewController {
         }
         updateColorSelection()
     }
+    /// The bottom row shows only what the selected tool can use: color for anything painted,
+    /// width for stroked/sized marks — nothing for crop (it has its own on-canvas affordance).
+    private func updateOptionsBar() {
+        let tool = canvas.tool
+        let showColor = tool != .crop
+        let showWidth: Bool
+        switch tool {
+        case .crop, .highlight, .text: showWidth = false
+        default: showWidth = true
+        }
+        colorButtons.forEach { $0.isHidden = !showColor }
+        widthLabel.isHidden = !showWidth
+        widthSlider.isHidden = !showWidth
+    }
+
     private func updateColorSelection() {
         let active = canvas.tool == .highlight ? canvas.highlightHex : canvas.colorHex
         for b in colorButtons {
@@ -273,6 +304,8 @@ final class CanvasView: NSView, NSTextFieldDelegate {
     private var undoStack: [[Annotation]] = []
     private var textField: NSTextField?
     private var pendingTextPos: CGPoint?
+    private var chipApplyRect: CGRect?    // view-space crop chips, refreshed each draw
+    private var chipRemoveRect: CGRect?
 
     init(image: CGImage, layers: [Annotation]) {
         self.image = image
@@ -284,18 +317,58 @@ final class CanvasView: NSView, NSTextFieldDelegate {
     required init?(coder: NSCoder) { fatalError() }
     override var acceptsFirstResponder: Bool { true }
 
-    // MARK: geometry — image rect aspect-fit in view; conversions view↔image space
+    // MARK: geometry — the canvas shows the VIEWPORT (full image, or the applied crop's rect)
+    // aspect-fit in the view; all annotation geometry stays in full-image space throughout.
+    private var cropLayerIndex: Int? { layers.lastIndex(where: { $0.tool == .crop }) }
+    var cropPending: Bool {
+        guard let i = cropLayerIndex else { return false }
+        return layers[i].applied != true
+    }
+    /// While the crop tool is active the full frame shows (for re-adjusting); otherwise an
+    /// applied crop re-bases the canvas to its rect.
+    private var viewport: CGRect {
+        guard tool != .crop, let i = cropLayerIndex, layers[i].applied == true else { return imageBounds }
+        let r = layers[i].rect.intersection(imageBounds)
+        return (r.width >= 1 && r.height >= 1) ? r : imageBounds
+    }
     private var imageRect: CGRect {
-        Tokens.aspectFit(CGSize(width: image.width, height: image.height), in: bounds)
+        Tokens.aspectFit(viewport.size, in: bounds)
     }
     private func toImage(_ p: CGPoint) -> CGPoint {
-        let r = imageRect
-        let scale = CGFloat(image.width) / r.width
-        return CGPoint(x: (p.x - r.minX) * scale, y: (r.maxY - p.y) * scale)   // flip to top-left space
+        let r = imageRect, vp = viewport
+        let scale = vp.width / r.width
+        return CGPoint(x: vp.minX + (p.x - r.minX) * scale,
+                       y: vp.minY + (r.maxY - p.y) * scale)   // flip to top-left space
+    }
+    private func toView(_ q: CGPoint) -> CGPoint {
+        let r = imageRect, vp = viewport
+        let scale = r.width / vp.width
+        return CGPoint(x: r.minX + (q.x - vp.minX) * scale,
+                       y: r.maxY - (q.y - vp.minY) * scale)
     }
 
     func selectMostRecent() {
-        selected = layers.last?.id
+        selected = layers.last(where: { !($0.tool == .crop && $0.applied == true) })?.id
+        needsDisplay = true
+    }
+
+    // MARK: crop apply/remove — in-editor, undoable (the flag lives in the layer stack)
+    var onCropApplied: (() -> Void)?
+
+    func applyCrop() {
+        guard let i = cropLayerIndex, layers[i].applied != true else { return }
+        pushUndo()
+        layers[i].applied = true
+        selected = nil
+        needsDisplay = true
+        onCropApplied?()
+    }
+
+    func removeCrop() {
+        guard cropLayerIndex != nil else { return }
+        pushUndo()
+        layers.removeAll { $0.tool == .crop }
+        selected = nil
         needsDisplay = true
     }
 
@@ -328,7 +401,10 @@ final class CanvasView: NSView, NSTextFieldDelegate {
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         commitPendingText()
-        let p = toImage(convert(event.locationInWindow, from: nil))
+        let viewPoint = convert(event.locationInWindow, from: nil)
+        if let a = chipApplyRect, a.contains(viewPoint) { applyCrop(); return }
+        if let x = chipRemoveRect, x.contains(viewPoint) { removeCrop(); return }
+        let p = toImage(viewPoint)
         switch tool {
         case .select:
             // double-click on a text layer re-opens it for editing
@@ -345,7 +421,7 @@ final class CanvasView: NSView, NSTextFieldDelegate {
                 dragOrigin = p
                 break
             }
-            selected = layers.last(where: { $0.hitTest(p) })?.id
+            selected = layers.last(where: { $0.hitTest(p) && !($0.tool == .crop && $0.applied == true) })?.id
             preGesture = selected != nil ? layers : nil   // snapshot; pushed only on actual move
             dragMode = .move
             dragOrigin = p
@@ -486,7 +562,11 @@ final class CanvasView: NSView, NSTextFieldDelegate {
     }
 
     override func keyDown(with event: NSEvent) {
-        if event.keyCode == 51, tool == .select, let sel = selected {   // delete
+        if event.keyCode == 36, tool == .crop, cropPending {            // return applies the crop
+            applyCrop()
+        } else if event.keyCode == 53, tool == .crop, cropLayerIndex != nil {   // esc removes it
+            removeCrop()
+        } else if event.keyCode == 51, tool == .select, let sel = selected {   // delete
             pushUndo()
             layers.removeAll { $0.id == sel }
             selected = nil
@@ -539,7 +619,7 @@ final class CanvasView: NSView, NSTextFieldDelegate {
     }
 
     private func beginText(atImagePoint p: CGPoint, viewPoint: CGPoint, initialText: String = "") {
-        let scale = imageRect.width / CGFloat(image.width)
+        let scale = imageRect.width / viewport.width
         if initialText.isEmpty { pendingFontSize = Annotation.defaultFontSize }
         let fontSize = max(11, pendingFontSize * scale)
         let height = ceil(fontSize * 1.4)
@@ -624,10 +704,14 @@ final class CanvasView: NSView, NSTextFieldDelegate {
     /// re-shadowing a 5K base on every annotation tweak is the expensive part of draw.
     private var baseComposite: CGImage?
     private var baseCompositeSize: CGSize = .zero
+    private var baseCompositeViewport: CGRect = .zero
     private let shadowPad: CGFloat = 20   // covers blur 12 + offset 2 on every side
 
-    private func baseComposite(for size: CGSize) -> CGImage? {
-        if let cached = baseComposite, baseCompositeSize == size { return cached }
+    private func baseComposite(for size: CGSize, viewport vp: CGRect) -> CGImage? {
+        if let cached = baseComposite, baseCompositeSize == size, baseCompositeViewport == vp {
+            return cached
+        }
+        let source = vp == imageBounds ? image : (image.cropping(to: vp) ?? image)
         let scale = window?.backingScaleFactor ?? 2
         let w = Int((size.width + shadowPad * 2) * scale)
         let h = Int((size.height + shadowPad * 2) * scale)
@@ -638,30 +722,37 @@ final class CanvasView: NSView, NSTextFieldDelegate {
         ctx.interpolationQuality = .high
         ctx.setShadow(offset: CGSize(width: 0, height: -2), blur: 12,
                       color: NSColor.black.withAlphaComponent(0.35).cgColor)
-        ctx.draw(image, in: CGRect(x: shadowPad, y: shadowPad, width: size.width, height: size.height))
+        ctx.draw(source, in: CGRect(x: shadowPad, y: shadowPad, width: size.width, height: size.height))
         baseComposite = ctx.makeImage()
         baseCompositeSize = size
+        baseCompositeViewport = vp
         return baseComposite
     }
 
     override func draw(_ dirty: NSRect) {
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
         let r = imageRect
+        let vp = viewport
         // checkerboard-free neutral surround already via layer background
-        if let composite = baseComposite(for: r.size) {
+        if let composite = baseComposite(for: r.size, viewport: vp) {
             ctx.draw(composite, in: r.insetBy(dx: -shadowPad, dy: -shadowPad))
         }
 
-        // map image space (top-left px) into the view's image rect
+        // map image space (top-left px) into the view's image rect through the viewport
+        let s = r.width / vp.width
         ctx.saveGState()
-        ctx.translateBy(x: r.minX, y: r.maxY)
-        ctx.scaleBy(x: r.width / CGFloat(image.width), y: -r.height / CGFloat(image.height))
+        ctx.translateBy(x: r.minX - vp.minX * s, y: r.maxY + vp.minY * s)
+        ctx.scaleBy(x: s, y: -s)
         for l in layers { l.draw(in: ctx) }
         if let d = draft { d.draw(in: ctx) }
-        // Crop preview: dim everything outside the crop rect, dashed border on it. The in-flight
-        // draft previews live; otherwise the committed crop layer shows what Done will keep.
-        if let crop = (draft?.tool == .crop ? draft : nil) ?? layers.last(where: { $0.tool == .crop }) {
-            let full = CGRect(x: 0, y: 0, width: CGFloat(image.width), height: CGFloat(image.height))
+        // Crop preview: dim everything outside the crop rect, dashed border on it — shown while
+        // the crop tool is active or the crop is still pending (applied crops re-base the view).
+        chipApplyRect = nil
+        chipRemoveRect = nil
+        let showCropChrome = tool == .crop || cropPending
+        if showCropChrome,
+           let crop = (draft?.tool == .crop ? draft : nil) ?? layers.last(where: { $0.tool == .crop }) {
+            let full = imageBounds
             let keep = crop.rect.intersection(full)
             if keep.width >= 1, keep.height >= 1 {
                 ctx.setFillColor(NSColor.black.withAlphaComponent(0.55).cgColor)
@@ -669,7 +760,7 @@ final class CanvasView: NSView, NSTextFieldDelegate {
                 ctx.fill(CGRect(x: 0, y: keep.maxY, width: full.width, height: full.height - keep.maxY))
                 ctx.fill(CGRect(x: 0, y: keep.minY, width: keep.minX, height: keep.height))
                 ctx.fill(CGRect(x: keep.maxX, y: keep.minY, width: full.width - keep.maxX, height: keep.height))
-                let px = CGFloat(image.width) / r.width
+                let px = 1 / s
                 ctx.setStrokeColor(NSColor.white.cgColor)
                 ctx.setLineWidth(1.5 * px)
                 ctx.setLineDash(phase: 0, lengths: [6 * px])
@@ -678,7 +769,7 @@ final class CanvasView: NSView, NSTextFieldDelegate {
             }
         }
         if let sel = selected, let l = layers.first(where: { $0.id == sel }) {
-            let px = CGFloat(image.width) / r.width   // 1 view point in image units
+            let px = 1 / s   // 1 view point in image units
             let handles = handlePositions(of: l)
             if l.tool == .freehand {
                 // halo along the stroke instead of a box
@@ -706,5 +797,42 @@ final class CanvasView: NSView, NSTextFieldDelegate {
             }
         }
         ctx.restoreGState()
+
+        // Apply/remove chips (view space), anchored under the crop rect's bottom-right corner.
+        if showCropChrome, draft == nil, let i = cropLayerIndex {
+            let crop = layers[i]
+            let corner = toView(CGPoint(x: crop.rect.maxX, y: crop.rect.maxY))
+            let pending = crop.applied != true
+            let applyW: CGFloat = pending ? 76 : 0
+            let removeW: CGFloat = pending ? 26 : 84
+            let chipH: CGFloat = 24, gap: CGFloat = 6
+            var y = corner.y - chipH - 8
+            if y < 4 { y = corner.y + 8 }   // no room below: place inside the rect
+            var x = corner.x - removeW
+            let removeRect = CGRect(x: x, y: y, width: removeW, height: chipH)
+            drawChip(pending ? "✕" : "✕ Remove crop", in: removeRect,
+                     fill: NSColor.black.withAlphaComponent(0.65))
+            chipRemoveRect = removeRect
+            if pending {
+                x -= applyW + gap
+                let applyRect = CGRect(x: x, y: y, width: applyW, height: chipH)
+                drawChip("✓ Apply ⏎", in: applyRect, fill: Tokens.accent)
+                chipApplyRect = applyRect
+            }
+        }
+    }
+
+    private func drawChip(_ label: String, in rect: CGRect, fill: NSColor) {
+        let path = NSBezierPath(roundedRect: rect, xRadius: rect.height / 2, yRadius: rect.height / 2)
+        fill.setFill()
+        path.fill()
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 11.5, weight: .semibold),
+            .foregroundColor: NSColor.white,
+        ]
+        let s = label as NSString
+        let size = s.size(withAttributes: attrs)
+        s.draw(at: CGPoint(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2),
+               withAttributes: attrs)
     }
 }
