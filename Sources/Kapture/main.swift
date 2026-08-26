@@ -16,7 +16,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Log.shell.error("store init failed: \(error)")
         }
 
-        Task { await ContentCache.shared.startWarming() }
+        // Only warm the content cache once permission exists — an unauthorized SCShareableContent
+        // call at launch triggers the OS permission dialog on top of our onboarding.
+        if ScreenshotService.hasPermission {
+            Task { await ContentCache.shared.startWarming() }
+        }
         HotkeyCenter.shared.handler = { action in
             switch action {
             case .area: CaptureCoordinator.shared.captureArea()

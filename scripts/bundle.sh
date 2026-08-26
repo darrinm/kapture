@@ -30,5 +30,10 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 PLIST
-codesign --force --deep -s - "$APP"
+# Prefer a real signing identity — a stable identity keeps TCC grants across rebuilds.
+# Ad-hoc (-) changes identity every build, which resets Screen Recording permission.
+SIGN_ID=$(security find-identity -v -p codesigning 2>/dev/null \
+  | grep -oE '"(Developer ID Application|Apple Development)[^"]*"' | head -1 | tr -d '"')
+codesign --force --deep -s "${SIGN_ID:--}" "$APP"
+echo "signed as: ${SIGN_ID:-ad-hoc}"
 echo "built $APP — run with: open $APP"
