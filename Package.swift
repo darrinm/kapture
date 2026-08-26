@@ -15,7 +15,7 @@ let package = Package(
             path: "Sources/KaptureCore"),
         .target(
             name: "KaptureCapture",
-            dependencies: ["KaptureCore"],
+            dependencies: ["KaptureCore", "KaptureDesign"],
             path: "Sources/KaptureCapture"),
         .target(
             name: "KaptureEditor",

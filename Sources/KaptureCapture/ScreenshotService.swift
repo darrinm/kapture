@@ -55,11 +55,26 @@ public enum ScreenshotService {
         return frame.image.cropping(to: px)
     }
 
+    /// Scale of the display the CG-global (top-left origin) rect mostly sits on —
+    /// mixed-DPI correctness for window captures, where NSScreen.main may be a different display.
+    static func displayScale(forCGGlobal r: CGRect) -> CGFloat {
+        let primaryMaxY = NSScreen.screens.first?.frame.maxY ?? 0
+        let nsRect = CGRect(x: r.origin.x, y: primaryMaxY - r.maxY, width: r.width, height: r.height)
+        let best = NSScreen.screens.max { a, b in
+            overlapArea(a.frame, nsRect) < overlapArea(b.frame, nsRect)
+        }
+        return best?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+    }
+    private static func overlapArea(_ a: CGRect, _ b: CGRect) -> CGFloat {
+        let i = a.intersection(b)
+        return i.isNull ? 0 : i.width * i.height
+    }
+
     /// Live single-window capture (transparent background, includes rounded corners).
     public static func captureWindow(_ window: SCWindow) async throws -> CGImage {
         let filter = SCContentFilter(desktopIndependentWindow: window)
         let config = SCStreamConfiguration()
-        let scale = NSScreen.main?.backingScaleFactor ?? 2
+        let scale = displayScale(forCGGlobal: window.frame)
         config.width = Int(window.frame.width * scale)
         config.height = Int(window.frame.height * scale)
         config.captureResolution = .best

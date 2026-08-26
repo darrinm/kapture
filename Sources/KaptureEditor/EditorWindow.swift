@@ -8,6 +8,7 @@ import KaptureDesign
 public final class EditorController {
     public static let shared = EditorController()
     private var windows: [String: NSWindow] = [:]   // capture id → window
+    private var closeObservers: [String: NSObjectProtocol] = [:]   // removed when the window closes
     public var library: Library?
     /// Called after Done flattens — the shell reopens the capture as an overlay card.
     public var onFlattened: ((String) -> Void)?
@@ -36,10 +37,13 @@ public final class EditorController {
         window.center()
         window.isReleasedWhenClosed = false
         windows[recordID] = window
-        NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window,
-                                               queue: .main) { [weak self] _ in
+        closeObservers[recordID] = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak self] _ in
             Task { @MainActor in
                 self?.windows[recordID] = nil
+                if let token = self?.closeObservers.removeValue(forKey: recordID) {
+                    NotificationCenter.default.removeObserver(token)
+                }
                 self?.onWindowClosed?()
             }
         }
@@ -50,20 +54,14 @@ public final class EditorController {
 
     private func save(recordID: String, base: CGImage, layers: [Annotation]) {
         guard let library else { return }
-        let w = base.width, h = base.height
-        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
-                                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return }
-        // image space is top-left; CGContext is bottom-left — flip once
-        ctx.translateBy(x: 0, y: CGFloat(h))
-        ctx.scaleBy(x: 1, y: -1)
-        ctx.draw(base, in: CGRect(x: 0, y: 0, width: w, height: h))   // draw() under flip renders upright
-        for layer in layers { layer.draw(in: ctx) }
-        guard let out = ctx.makeImage() else { return }
+        guard let out = AnnotationRenderer.flatten(base: base, layers: layers) else { return }
         let rep = NSBitmapImageRep(cgImage: out)
         guard let png = rep.representation(using: .png, properties: [:]) else { return }
-        try? library.applyEdit(recordID, flattenedPNG: png,
-                               layersJSON: AnnotationCodec.encode(layers), width: w, height: h)
+        do {
+            try library.applyEdit(recordID, flattenedPNG: png,
+                                  layersJSON: AnnotationCodec.encode(layers),
+                                  width: out.width, height: out.height)
+        } catch { Log.store.error("apply edit failed: \(error)") }
     }
 }
 
@@ -182,12 +180,11 @@ final class EditorViewController: NSViewController {
 
     @objc private func toolTapped(_ sender: NSButton) {
         guard let raw = sender.identifier?.rawValue, let tool = Tool(rawValue: raw) else { return }
+        canvas.commitPendingText()   // leaving the text tool commits the in-progress entry
         canvas.tool = tool
         if tool == .select { canvas.selectMostRecent() }
         updateColorSelection()
         // radio behavior
-        var v: NSView? = sender.superview
-        while v != nil, !(v is NSStackView) { v = v?.superview }
         (sender.superview as? NSStackView)?.arrangedSubviews.compactMap { $0 as? NSButton }
             .forEach { $0.state = $0 === sender ? .on : .off }
     }
@@ -220,7 +217,10 @@ final class EditorViewController: NSViewController {
         } else {
             canvas.strokeWidth = w
         }
-        sliderGestureActive = NSApp.currentEvent?.type != .leftMouseUp
+        // a gesture continues only through mouse tracking; keyboard changes are discrete
+        // (each records its own undo) and must not leave the flag stuck on
+        let type = NSApp.currentEvent?.type
+        sliderGestureActive = type == .leftMouseDown || type == .leftMouseDragged
     }
     @objc private func copyTapped() {
         canvas.commitPendingText()
@@ -250,6 +250,7 @@ final class CanvasView: NSView, NSTextFieldDelegate {
     private var draft: Annotation?
     private var selected: UUID?
     private var dragOrigin: CGPoint?
+    private var preGesture: [Annotation]?   // gesture-start snapshot; pushed on first real mutation
     private var undoStack: [[Annotation]] = []
     private var textField: NSTextField?
     private var pendingTextPos: CGPoint?
@@ -303,15 +304,8 @@ final class CanvasView: NSView, NSTextFieldDelegate {
     }
 
     func compositeImage() -> NSImage? {
-        let w = image.width, h = image.height
-        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
-                                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
-        ctx.translateBy(x: 0, y: CGFloat(h)); ctx.scaleBy(x: 1, y: -1)
-        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
-        for l in layers { l.draw(in: ctx) }
-        guard let out = ctx.makeImage() else { return nil }
-        return NSImage(cgImage: out, size: NSSize(width: w, height: h))
+        guard let out = AnnotationRenderer.flatten(base: image, layers: layers) else { return nil }
+        return NSImage(cgImage: out, size: NSSize(width: out.width, height: out.height))
     }
 
     // MARK: input
@@ -330,13 +324,13 @@ final class CanvasView: NSView, NSTextFieldDelegate {
             // a handle on the already-selected layer wins over re-selection
             if let sel = selected, let layer = layers.first(where: { $0.id == sel }),
                let h = handleIndex(of: layer, at: p) {
-                pushUndo()
+                preGesture = layers   // snapshot; pushed only if the drag actually mutates
                 dragMode = .handle(h)
                 dragOrigin = p
                 break
             }
             selected = layers.last(where: { $0.hitTest(p) })?.id
-            if selected != nil { pushUndo() }   // snapshot before a potential move
+            preGesture = selected != nil ? layers : nil   // snapshot; pushed only on actual move
             dragMode = .move
             dragOrigin = p
         case .text:
@@ -377,10 +371,12 @@ final class CanvasView: NSView, NSTextFieldDelegate {
                   let i = layers.firstIndex(where: { $0.id == sel }) {
             switch dragMode {
             case .handle(let h) where h < layers[i].points.count:
+                commitPreGesture()
                 layers[i].points[h] = p
             case .move:
                 let dx = p.x - origin.x, dy = p.y - origin.y
                 if abs(dx) + abs(dy) > 0 {
+                    commitPreGesture()
                     layers[i].points = layers[i].points.map { CGPoint(x: $0.x + dx, y: $0.y + dy) }
                     dragOrigin = p
                 }
@@ -392,13 +388,16 @@ final class CanvasView: NSView, NSTextFieldDelegate {
 
     override func mouseUp(with event: NSEvent) {
         if let d = draft {
-            let minSpan = d.tool == .freehand ? 2 : 1
-            if d.points.count > minSpan || d.rect.width + d.rect.height > 4 {
-                pushUndo(before: d)
+            // freehand needs a real stroke; shapes need a real extent — a bare click commits nothing
+            let commit = d.tool == .freehand ? d.points.count > 2
+                                             : d.rect.width + d.rect.height > 4
+            if commit {
+                pushUndo()
                 layers.append(d)
             }
             draft = nil
         }
+        preGesture = nil
         dragOrigin = nil
         dragMode = .none
         needsDisplay = true
@@ -418,8 +417,15 @@ final class CanvasView: NSView, NSTextFieldDelegate {
         }
     }
 
-    private func pushUndo(before newDraft: Annotation? = nil) {
+    private func pushUndo() {
         undoStack.append(layers)
+        if undoStack.count > 100 { undoStack.removeFirst() }
+    }
+    /// Push the gesture-start snapshot the first time a drag actually mutates the layer.
+    private func commitPreGesture() {
+        guard let pre = preGesture else { return }
+        preGesture = nil
+        undoStack.append(pre)
         if undoStack.count > 100 { undoStack.removeFirst() }
     }
     private func undo() {
@@ -431,12 +437,14 @@ final class CanvasView: NSView, NSTextFieldDelegate {
 
     // MARK: text tool
     private var pendingFontSize: CGFloat = 48
+    private var cancelRestoresViaUndo = false   // set while re-editing an existing text layer
 
     /// Re-open a committed text layer for editing: remove it (undoable) and show the field
     /// pre-filled at its position, in its color and size.
     private func beginEditingExistingText(_ layer: Annotation) {
         guard let pos = layer.points.first else { return }
         pushUndo()
+        cancelRestoresViaUndo = true   // esc must reinstate the layer removed below
         layers.removeAll { $0.id == layer.id }
         selected = nil
         colorHex = layer.colorHex
@@ -472,9 +480,8 @@ final class CanvasView: NSView, NSTextFieldDelegate {
     }
 
     func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
-        if selector == #selector(NSResponder.cancelOperation(_:)) {   // esc discards
-            textField?.stringValue = ""
-            commitPendingText()
+        if selector == #selector(NSResponder.cancelOperation(_:)) {   // esc cancels losslessly
+            cancelPendingText()
             return true
         }
         if selector == #selector(NSResponder.insertNewline(_:)) {     // return commits
@@ -500,11 +507,27 @@ final class CanvasView: NSView, NSTextFieldDelegate {
         field.removeFromSuperview()
         textField = nil
         pendingTextPos = nil
+        let wasEditingExisting = cancelRestoresViaUndo
+        cancelRestoresViaUndo = false
         if !value.isEmpty {
             pushUndo()
             layers.append(Annotation(tool: .text, points: [pos], colorHex: colorHex,
                                      strokeWidth: strokeWidth, text: value, fontSize: pendingFontSize))
+        } else if wasEditingExisting {
+            undo()   // blanked out an existing layer's text — treat as cancel, restore it
         }
+        pendingFontSize = 48
+        needsDisplay = true
+    }
+
+    /// Dismiss the inline field without committing; a re-edit of existing text is restored.
+    private func cancelPendingText() {
+        guard let field = textField else { return }
+        field.removeFromSuperview()
+        textField = nil
+        pendingTextPos = nil
+        if cancelRestoresViaUndo { undo() }   // reinstate the layer beginEditingExistingText removed
+        cancelRestoresViaUndo = false
         pendingFontSize = 48
         needsDisplay = true
     }
@@ -543,7 +566,7 @@ final class CanvasView: NSView, NSTextFieldDelegate {
                 ctx.setStrokeColor(Tokens.accent.cgColor)
                 ctx.setLineWidth(2 * px)
                 ctx.setLineDash(phase: 0, lengths: [6 * px])
-                ctx.stroke(boundsOf(l).insetBy(dx: -10, dy: -10))
+                ctx.stroke(boundsOf(l).insetBy(dx: -10 * px, dy: -10 * px))
                 ctx.setLineDash(phase: 0, lengths: [])
             }
             for h in handles {

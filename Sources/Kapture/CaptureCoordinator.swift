@@ -78,14 +78,13 @@ final class CaptureCoordinator {
         }
     }
 
-    // MARK: previous-area memory
+    // MARK: previous-area memory (persisted via the Settings facade)
     private func rememberArea(_ sel: AreaSelection) {
         let r = sel.rectInPoints
-        UserDefaults.standard.set("\(sel.frame.display.displayID):\(r.origin.x):\(r.origin.y):\(r.width):\(r.height)",
-                                  forKey: "lastArea")
+        Settings.shared.lastArea = "\(sel.frame.display.displayID):\(r.origin.x):\(r.origin.y):\(r.width):\(r.height)"
     }
     private func recallArea() -> (CGDirectDisplayID, CGRect)? {
-        guard let s = UserDefaults.standard.string(forKey: "lastArea") else { return nil }
+        guard let s = Settings.shared.lastArea else { return nil }
         let p = s.split(separator: ":").compactMap { Double($0) }
         guard p.count == 5 else { return nil }
         return (CGDirectDisplayID(p[0]), CGRect(x: p[1], y: p[2], width: p[3], height: p[4]))
@@ -106,18 +105,26 @@ final class CaptureCoordinator {
 
     private func store(_ image: CGImage, screenID: Int?, windowTitle: String?, sourceApp: String? = nil,
                        sourceRect: NSRect? = nil) {
-        guard let library, let data = ScreenshotService.pngData(image) else { return }
+        guard let library else { return }
         let app = sourceApp ?? NSWorkspace.shared.frontmostApplication?.bundleIdentifier
-        do {
-            let (record, url) = try library.storePNG(
-                data, width: image.width, height: image.height,
-                sourceApp: app, windowTitle: windowTitle, screenID: screenID)
-            if Settings.shared.copyToClipboardAfterCapture {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.writeObjects([url as NSURL, NSImage(cgImage: image, size: .zero)])
-            }
-            OverlayController.shared.show(record: record, fileURL: url, image: image, from: sourceRect)
-            Sounds.play("Tink")
-        } catch { Log.store.error("store failed: \(error)") }
+        let width = image.width, height = image.height
+        // PNG encode + file/DB writes are hundreds of ms for a 5K frame — keep them off
+        // the main actor; hop back for clipboard + overlay once the record exists.
+        Task.detached(priority: .userInitiated) {
+            guard let data = ScreenshotService.pngData(image) else { return }
+            do {
+                let (record, url) = try library.storePNG(
+                    data, width: width, height: height,
+                    sourceApp: app, windowTitle: windowTitle, screenID: screenID)
+                await MainActor.run {
+                    if Settings.shared.copyToClipboardAfterCapture {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.writeObjects([url as NSURL, NSImage(cgImage: image, size: .zero)])
+                    }
+                    OverlayController.shared.show(record: record, fileURL: url, image: image, from: sourceRect)
+                    Sounds.play("Tink")
+                }
+            } catch { Log.store.error("store failed: \(error)") }
+        }
     }
 }

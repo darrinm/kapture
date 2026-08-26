@@ -5,7 +5,14 @@ cd "$(dirname "$0")/.."
 export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 unset SDKROOT MACOSX_DEPLOYMENT_TARGET
 # -warnings-as-errors: project warnings fail the build (dependencies are unaffected)
-/usr/bin/xcrun swift build -c release -Xswiftc -warnings-as-errors 2>&1 | grep -vE "unhandled Platform key" || true
+# capture output first so a failed build isn't masked by the grep filter — a stale
+# .build/release/Kapture from an earlier run must never be bundled silently
+build_out=$(/usr/bin/xcrun swift build -c release -Xswiftc -warnings-as-errors 2>&1) || {
+  printf '%s\n' "$build_out"
+  echo "build failed"
+  exit 1
+}
+printf '%s\n' "$build_out" | grep -vE "unhandled Platform key" || true
 BIN=.build/release/Kapture
 [ -f "$BIN" ] || { echo "build failed"; exit 1; }
 

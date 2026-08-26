@@ -29,6 +29,11 @@ public final class Library: @unchecked Sendable {
         return "capture \(f.string(from: date))"
     }
 
+    /// Path of `url` relative to the library root — the one place that owns this string surgery.
+    private func rel(_ url: URL) -> String {
+        url.path.replacingOccurrences(of: root.path + "/", with: "")
+    }
+
     public static func fastID(of url: URL) -> String {
         let attrs = (try? FileManager.default.attributesOfItem(atPath: url.path)) ?? [:]
         let size = (attrs[.size] as? Int) ?? 0
@@ -49,7 +54,7 @@ public final class Library: @unchecked Sendable {
             n += 1
         }
         let id = ULID.generate(now: now)
-        let relPath = url.path.replacingOccurrences(of: root.path + "/", with: "")
+        let relPath = rel(url)
 
         let record: CaptureRecord = try OpJournal.run(
             db, op: "write", captureId: id, src: nil, dst: relPath,
@@ -140,7 +145,7 @@ public final class Library: @unchecked Sendable {
         if fm.fileExists(atPath: dst.path) {
             dst = trashShard.appendingPathComponent("\(record.id)-\(src.lastPathComponent)")
         }
-        let trashRel = dst.path.replacingOccurrences(of: root.path + "/", with: "")
+        let trashRel = rel(dst)
 
         _ = try OpJournal.run(db, op: "discard", captureId: record.id, src: record.relPath, dst: trashRel,
             fileOp: {
@@ -190,18 +195,28 @@ public final class Library: @unchecked Sendable {
             dst = dst.deletingLastPathComponent().appendingPathComponent("\(base)-restored.png")
         }
         let src = root.appendingPathComponent(record.relPath)
-        _ = try OpJournal.run(db, op: "restore", captureId: record.id, src: record.relPath,
-                              dst: dst.path.replacingOccurrences(of: root.path + "/", with: ""),
-            fileOp: {
-                try fm.moveItem(at: src, to: dst)
-                let sidecar = Sidecar.url(for: src)
-                if fm.fileExists(atPath: sidecar.path) { try? fm.moveItem(at: sidecar, to: Sidecar.url(for: dst)) }
-                try? fm.removeItem(at: tombURL)
-            },
-            stateUpdate: { d, _ in
-                try d.execute(sql: "UPDATE captures SET relPath = ? WHERE id = ?",
-                              arguments: [dst.path.replacingOccurrences(of: self.root.path + "/", with: ""), record.id])
-            })
+        let dstRel = rel(dst)
+        do {
+            _ = try OpJournal.run(db, op: "restore", captureId: record.id, src: record.relPath, dst: dstRel,
+                fileOp: {
+                    try fm.moveItem(at: src, to: dst)
+                    let sidecar = Sidecar.url(for: src)
+                    if fm.fileExists(atPath: sidecar.path) { try? fm.moveItem(at: sidecar, to: Sidecar.url(for: dst)) }
+                    try? fm.removeItem(at: tombURL)
+                },
+                stateUpdate: { d, _ in
+                    try d.execute(sql: "UPDATE captures SET relPath = ? WHERE id = ?",
+                                  arguments: [dstRel, record.id])
+                })
+        } catch {
+            // the file never moved — revert the optimistic status flip so the capture stays
+            // trashed (restorable and sweepable) instead of 'kept' with a .trash/ relPath
+            try? db.queue.write { d in
+                try d.execute(sql: "UPDATE captures SET status = 'trashed', trashedAt = ? WHERE id = ?",
+                              arguments: [record.trashedAt ?? Date(), record.id])
+            }
+            throw error
+        }
         Log.store.info("restored \(originalRel, privacy: .public)")
         return try db.queue.read { try CaptureRecord.fetchOne($0, key: record.id) }
     }

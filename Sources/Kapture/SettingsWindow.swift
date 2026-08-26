@@ -10,7 +10,13 @@ final class SettingsWindowController {
     private var window: NSWindow?
 
     func show() {
-        if let window { window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true); return }
+        if let window {
+            // re-show must re-acquire — the willClose observer releases on every close,
+            // so skipping acquire here underflows the hold count and leaves the app .accessory
+            ActivationPolicy.acquire()
+            window.makeKeyAndOrderFront(nil)
+            return
+        }
         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 440, height: 360),
                          styleMask: [.titled, .closable], backing: .buffered, defer: false)
         w.title = "Kapture Settings"

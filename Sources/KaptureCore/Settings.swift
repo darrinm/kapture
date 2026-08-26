@@ -28,9 +28,10 @@ public struct Settings {
         set { d.set(newValue, forKey: "copyAfterCapture") }
     }
 
-    public var takeOverSystemShortcuts: Bool {
-        get { d.object(forKey: "takeOverSystemShortcuts") as? Bool ?? true }
-        set { d.set(newValue, forKey: "takeOverSystemShortcuts") }
+    /// Serialized previous-area selection: "displayID:x:y:w:h" (display-local points).
+    public var lastArea: String? {
+        get { d.string(forKey: "lastArea") }
+        set { d.set(newValue, forKey: "lastArea") }
     }
 
     public var overlaySizeIndex: Int {

@@ -57,6 +57,15 @@ public final class SelectionController {
         windows = []
         if resume { continuation?.resume(returning: sel); continuation = nil }
     }
+
+    /// space toggles window mode everywhere — the key press lands on the key window only,
+    /// but the cursor may be over another display's selection view.
+    fileprivate func toggleWindowModeAll() {
+        let views = windows.compactMap { $0.contentView as? SelectionView }
+        guard let first = views.first else { return }
+        let newMode = !first.windowMode
+        views.forEach { $0.setWindowMode(newMode) }
+    }
 }
 
 final class SelectionWindow: NSWindow {
@@ -112,13 +121,16 @@ final class SelectionView: NSView {
     override func keyDown(with event: NSEvent) {
         switch event.keyCode {
         case 53: onCancel()                                   // esc
-        case 49:                                              // space: toggle window mode
-            windowMode.toggle()
-            dragStart = nil; dragRect = nil
-            updateHover()
-            needsDisplay = true
+        case 49: SelectionController.shared.toggleWindowModeAll()   // space: all displays
         default: break
         }
+    }
+
+    func setWindowMode(_ on: Bool) {
+        windowMode = on
+        dragStart = nil; dragRect = nil
+        updateHover()
+        needsDisplay = true
     }
 
     // MARK: coordinate conversions (CG global is top-left origin; NS global is bottom-left)

@@ -3,6 +3,7 @@
 // Locked pins are closed from the menu bar's Pins submenu.
 import AppKit
 import KaptureCore
+import KaptureCapture
 import KaptureDesign
 
 @MainActor
@@ -21,12 +22,14 @@ final class PinController {
 
     func pinFromClipboard() {
         let pb = NSPasteboard.general
+        // local files only: a web URL (e.g. copied from a browser) would make
+        // NSImage(contentsOf:) do a synchronous network fetch on the main thread
         if let url = (pb.readObjects(forClasses: [NSURL.self]) as? [URL])?.first,
-           NSImage(contentsOf: url) != nil {
+           url.isFileURL, NSImage(contentsOf: url) != nil {
             pin(fileURL: url)
         } else if let img = (pb.readObjects(forClasses: [NSImage.self]) as? [NSImage])?.first,
-                  let tiff = img.tiffRepresentation,
-                  let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) {
+                  let cg = img.cgImage(forProposedRect: nil, context: nil, hints: nil),
+                  let png = ScreenshotService.pngData(cg) {
             let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("pin-\(ULID.generate()).png")
             try? png.write(to: tmp)
             pin(fileURL: tmp)

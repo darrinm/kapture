@@ -1,5 +1,5 @@
 // Accessibility tier (impl spec §5): with the grant, a consuming CGEventTap routes overlay
-// shortcuts (⌘W/⌘C/⌘S/⌘⌫/space) to the hovered card with no click. Without it, the
+// shortcuts (⌘W/⌘C/⌘S/⌘E/⌘⌫/space) to the hovered card with no click. Without it, the
 // click-to-key tier in OverlayView remains the permanent floor. Handles tap-disabled
 // re-enable; Secure Event Input silently pauses delivery (nothing to do).
 import AppKit
@@ -51,7 +51,8 @@ final class EventTapCenter {
     private static func handle(_ cgEvent: CGEvent) -> Unmanaged<CGEvent>? {
         guard let panel = OverlayController.shared.hoveredPanel,
               let event = NSEvent(cgEvent: cgEvent) else { return Unmanaged.passUnretained(cgEvent) }
-        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        // caps lock is a latched state, not a chord — ignore it so shortcuts keep working
+        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting(.capsLock)
         let cmdOnly = mods == .command
         if mods.isEmpty && event.keyCode == 49 { panel.quickLook(); return nil }          // space
         guard cmdOnly else { return Unmanaged.passUnretained(cgEvent) }
@@ -60,6 +61,7 @@ final class EventTapCenter {
         case "w": panel.keepAndClose(); return nil
         case "c": panel.copyToClipboard(); return nil
         case "s": panel.saveToExportLocation(); return nil
+        case "e": panel.edit(); return nil
         default: return Unmanaged.passUnretained(cgEvent)
         }
     }

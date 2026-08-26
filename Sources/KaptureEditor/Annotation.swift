@@ -131,7 +131,8 @@ public struct Annotation: Codable, Identifiable {
         switch tool {
         case .text:
             guard let pos = points.first, let text else { return false }
-            let size = (text as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: fontSize ?? 48)])
+            let size = (text as NSString).size(withAttributes:
+                [.font: NSFont.systemFont(ofSize: fontSize ?? 48, weight: .semibold)])
             return CGRect(origin: pos, size: size).insetBy(dx: -pad, dy: -pad).contains(p)
         case .counter:
             guard let c = points.first else { return false }
@@ -153,6 +154,24 @@ public struct Annotation: Codable, Identifiable {
         guard len2 > 0 else { return hypot(p.x - a.x, p.y - a.y) }
         let t = max(0, min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2))
         return hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy))
+    }
+}
+
+public enum AnnotationRenderer {
+    /// Flatten base + layers at native resolution. The base image draws upright (no flip —
+    /// CGContext.draw under a flipped CTM would mirror it vertically); the y-flip is applied
+    /// afterwards so layers draw in image space (origin top-left, y down), matching the
+    /// on-screen path in CanvasView.draw.
+    public static func flatten(base: CGImage, layers: [Annotation]) -> CGImage? {
+        let w = base.width, h = base.height
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        ctx.draw(base, in: CGRect(x: 0, y: 0, width: w, height: h))
+        ctx.translateBy(x: 0, y: CGFloat(h))
+        ctx.scaleBy(x: 1, y: -1)
+        for l in layers { l.draw(in: ctx) }
+        return ctx.makeImage()
     }
 }
 

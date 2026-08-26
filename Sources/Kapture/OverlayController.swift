@@ -30,12 +30,7 @@ final class OverlayController {
             return
         }
         // fly the capture from its on-screen rect down into the corner slot
-        let size = Tokens.overlaySizes[Settings.shared.overlaySizeIndex]
-        let x = Settings.shared.overlayOnLeftEdge
-            ? screen.visibleFrame.minX + Tokens.cornerMargin
-            : screen.visibleFrame.maxX - size.width - Tokens.cornerMargin
-        let target = NSRect(x: x, y: screen.visibleFrame.minY + Tokens.cornerMargin,
-                            width: size.width, height: size.height)
+        let target = cornerSlotFrame(on: screen)
 
         let flight = NSWindow(contentRect: source, styleMask: .borderless, backing: .buffered, defer: false)
         flight.isOpaque = false
@@ -58,12 +53,15 @@ final class OverlayController {
             ctx.duration = 0.38
             ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             flight.animator().setFrame(target, display: true)
-        }, completionHandler: {
-            panel.alphaValue = 1
-            panel.setFrame(target, display: true)
-            panel.orderFrontRegardless()
-            panel.scheduleAutoClose()
-            flight.orderOut(nil)
+        }, completionHandler: { [weak self] in
+            MainActor.assumeIsolated {   // NSAnimationContext completions run on main
+                panel.alphaValue = 1
+                // re-derive the slot at landing time — the stack may have moved mid-flight
+                self?.layout(animated: false)
+                panel.orderFrontRegardless()
+                panel.scheduleAutoClose()
+                flight.orderOut(nil)
+            }
         })
     }
 
@@ -79,7 +77,12 @@ final class OverlayController {
     }
 
     func hideAll() {
-        for panel in panels { Tokens.animate(0.2) { panel.animator().alphaValue = 0 } }
+        // order the panels out — an alpha-0 panel left ordered in still owns tracking areas,
+        // which would keep feeding hoveredPanel and let the event tap swallow keys invisibly
+        for panel in panels {
+            Tokens.animate(0.2, { panel.animator().alphaValue = 0 }) { panel.orderOut(nil) }
+        }
+        hoveredPanel = nil
         collapseChip?.orderOut(nil)
     }
 
@@ -99,13 +102,23 @@ final class OverlayController {
         layout()
     }
 
+    /// The first (corner) stack slot — single source of the corner geometry for
+    /// both the stack layout and the flight animation's landing target.
+    private func cornerSlotFrame(on screen: NSScreen) -> NSRect {
+        let size = Tokens.overlaySizes[Settings.shared.overlaySizeIndex]
+        let x = Settings.shared.overlayOnLeftEdge
+            ? screen.visibleFrame.minX + Tokens.cornerMargin
+            : screen.visibleFrame.maxX - size.width - Tokens.cornerMargin
+        return NSRect(x: x, y: screen.visibleFrame.minY + Tokens.cornerMargin,
+                      width: size.width, height: size.height)
+    }
+
     private func layout(animated: Bool = true) {
         guard let screen = NSScreen.main else { return }
-        let size = Tokens.overlaySizes[Settings.shared.overlaySizeIndex]
-        let onLeft = Settings.shared.overlayOnLeftEdge
-        let x = onLeft ? screen.visibleFrame.minX + Tokens.cornerMargin
-                       : screen.visibleFrame.maxX - size.width - Tokens.cornerMargin
-        var y = screen.visibleFrame.minY + Tokens.cornerMargin
+        let slot = cornerSlotFrame(on: screen)
+        let size = slot.size
+        let x = slot.minX
+        var y = slot.minY
 
         let visibleLimit = 5
         let showAll = fannedOut || panels.count <= visibleLimit
@@ -184,12 +197,13 @@ final class ChipView: NSView {
 final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
     let record: CaptureRecord
     let fileURL: URL
+    let image: CGImage   // decoded pixels — reused for clipboard/drag instead of re-reading disk
     let onClose: (OverlayPanel) -> Void
     var placed = false   // set on first layout; first placement never animates
     private var autoCloseTimer: Timer?
 
     init(record: CaptureRecord, fileURL: URL, image: CGImage, onClose: @escaping (OverlayPanel) -> Void) {
-        self.record = record; self.fileURL = fileURL; self.onClose = onClose
+        self.record = record; self.fileURL = fileURL; self.image = image; self.onClose = onClose
         let size = Tokens.overlaySizes[Settings.shared.overlaySizeIndex]
         super.init(contentRect: NSRect(origin: .zero, size: size),
                    styleMask: [.nonactivatingPanel, .borderless], backing: .buffered, defer: false)
@@ -239,24 +253,37 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
     }
 
     func discard() {
+        var discarded = false
         if let library = OverlayController.shared.library,
            let fresh = try? library.db.queue.read({ try CaptureRecord.fetchOne($0, key: record.id) }) {
-            try? library.discard(fresh)
+            do {
+                try library.discard(fresh)
+                discarded = true
+            } catch { Log.store.error("discard failed: \(error)") }
         }
+        guard discarded else { fadeOut(); return }   // no false discard feedback
         Sounds.play("Bottle")
         slideOff()
     }
 
     func copyToClipboard() {
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.writeObjects([fileURL as NSURL])
-        if let img = NSImage(contentsOf: fileURL) { NSPasteboard.general.writeObjects([img]) }
+        NSPasteboard.general.writeObjects([fileURL as NSURL, NSImage(cgImage: image, size: .zero)])
         keepAndClose()
     }
 
     func saveToExportLocation() {
-        let dest = Settings.shared.exportLocation.appendingPathComponent(fileURL.lastPathComponent)
-        try? FileManager.default.copyItem(at: fileURL, to: dest)
+        let dir = Settings.shared.exportLocation
+        let base = fileURL.deletingPathExtension().lastPathComponent
+        let ext = fileURL.pathExtension
+        var dest = dir.appendingPathComponent(fileURL.lastPathComponent)
+        var n = 2
+        while FileManager.default.fileExists(atPath: dest.path) {
+            dest = dir.appendingPathComponent("\(base)-\(n)").appendingPathExtension(ext)
+            n += 1
+        }
+        do { try FileManager.default.copyItem(at: fileURL, to: dest) }
+        catch { Log.store.error("export failed: \(error)") }
         keepAndClose()
     }
 
@@ -280,14 +307,7 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
     func edit() {
         try? OverlayController.shared.library?.setStatus(record.id, .kept)
         EditorController.shared.open(recordID: record.id)
-        fadeOutKeeping()
-    }
-
-    private func fadeOutKeeping() {
-        Tokens.animate(0.2, { self.animator().alphaValue = 0 }) {
-            self.orderOut(nil)
-            self.onClose(self)
-        }
+        fadeOut()
     }
 
     func quickLook() {
@@ -301,7 +321,7 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
     func numberOfPreviewItems(in panel: QLPreviewPanel!) -> Int { 1 }
     func previewPanel(_ panel: QLPreviewPanel!, previewItemAt index: Int) -> QLPreviewItem! { fileURL as NSURL }
 
-    private func fadeOut() {
+    func fadeOut() {
         Tokens.animate(0.2, { self.animator().alphaValue = 0 }) {
             self.orderOut(nil)
             self.onClose(self)
@@ -465,7 +485,7 @@ final class OverlayView: NSView, NSDraggingSource {
 
     override func mouseDragged(with event: NSEvent) {
         let item = NSDraggingItem(pasteboardWriter: panel.fileURL as NSURL)
-        item.setDraggingFrame(bounds, contents: NSImage(contentsOf: panel.fileURL))
+        item.setDraggingFrame(bounds, contents: NSImage(cgImage: image, size: bounds.size))
         beginDraggingSession(with: [item], event: event, source: self)
     }
 
