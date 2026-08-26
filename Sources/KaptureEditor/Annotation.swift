@@ -3,7 +3,7 @@
 import AppKit
 
 public enum Tool: String, CaseIterable, Codable {
-    case select, arrow, line, rect, ellipse, freehand, highlight, text, counter
+    case select, arrow, line, rect, ellipse, freehand, highlight, text, counter, crop
 }
 
 public extension NSColor {
@@ -79,6 +79,7 @@ public struct Annotation: Codable, Identifiable {
 
         switch tool {
         case .select: break
+        case .crop: break   // geometric, not painted — the renderer crops the output to its rect
         case .line:
             guard points.count >= 2 else { break }
             ctx.move(to: points[0]); ctx.addLine(to: points[1]); ctx.strokePath()
@@ -200,7 +201,14 @@ public enum AnnotationRenderer {
         ctx.translateBy(x: 0, y: CGFloat(h))
         ctx.scaleBy(x: 1, y: -1)
         for l in layers { l.draw(in: ctx) }
-        return ctx.makeImage()
+        guard let out = ctx.makeImage() else { return nil }
+        // Crop applies last, over the fully composited image (one crop layer at a time; the editor
+        // replaces any previous one). Its rect is image-space top-left — cropping(to:) matches.
+        if let crop = layers.last(where: { $0.tool == .crop }) {
+            let clamped = crop.rect.intersection(CGRect(x: 0, y: 0, width: w, height: h))
+            if clamped.width >= 1, clamped.height >= 1 { return out.cropping(to: clamped) ?? out }
+        }
+        return out
     }
 }
 

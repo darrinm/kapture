@@ -122,6 +122,7 @@ final class EditorViewController: NSViewController {
             (.highlight, "highlighter", "Highlight"),
             (.text, "textformat", "Text"),
             (.counter, "1.circle", "Step counter"),
+            (.crop, "crop", "Crop (applies when you press Done)"),
         ]
         for (tool, symbol, tip) in symbols {
             let b = NSButton(image: NSImage(systemSymbolName: symbol, accessibilityDescription: tip)!
@@ -366,7 +367,7 @@ final class CanvasView: NSView, NSTextFieldDelegate {
     /// endpoints/corners of the selected shape a drag can grab (image-space)
     private func handlePositions(of layer: Annotation) -> [CGPoint] {
         switch layer.tool {
-        case .arrow, .line, .rect, .ellipse, .highlight:
+        case .arrow, .line, .rect, .ellipse, .highlight, .crop:
             return layer.points.count >= 2 ? [layer.points[0], layer.points[1]] : []
         default:
             return []
@@ -408,6 +409,7 @@ final class CanvasView: NSView, NSTextFieldDelegate {
                                              : d.rect.width + d.rect.height > 4
             if commit {
                 pushUndo()
+                if d.tool == .crop { layers.removeAll { $0.tool == .crop } }   // one crop at a time
                 layers.append(d)
             }
             draft = nil
@@ -591,6 +593,25 @@ final class CanvasView: NSView, NSTextFieldDelegate {
         ctx.scaleBy(x: r.width / CGFloat(image.width), y: -r.height / CGFloat(image.height))
         for l in layers { l.draw(in: ctx) }
         if let d = draft { d.draw(in: ctx) }
+        // Crop preview: dim everything outside the crop rect, dashed border on it. The in-flight
+        // draft previews live; otherwise the committed crop layer shows what Done will keep.
+        if let crop = (draft?.tool == .crop ? draft : nil) ?? layers.last(where: { $0.tool == .crop }) {
+            let full = CGRect(x: 0, y: 0, width: CGFloat(image.width), height: CGFloat(image.height))
+            let keep = crop.rect.intersection(full)
+            if keep.width >= 1, keep.height >= 1 {
+                ctx.setFillColor(NSColor.black.withAlphaComponent(0.55).cgColor)
+                ctx.fill(CGRect(x: 0, y: 0, width: full.width, height: keep.minY))
+                ctx.fill(CGRect(x: 0, y: keep.maxY, width: full.width, height: full.height - keep.maxY))
+                ctx.fill(CGRect(x: 0, y: keep.minY, width: keep.minX, height: keep.height))
+                ctx.fill(CGRect(x: keep.maxX, y: keep.minY, width: full.width - keep.maxX, height: keep.height))
+                let px = CGFloat(image.width) / r.width
+                ctx.setStrokeColor(NSColor.white.cgColor)
+                ctx.setLineWidth(1.5 * px)
+                ctx.setLineDash(phase: 0, lengths: [6 * px])
+                ctx.stroke(keep)
+                ctx.setLineDash(phase: 0, lengths: [])
+            }
+        }
         if let sel = selected, let l = layers.first(where: { $0.id == sel }) {
             let px = CGFloat(image.width) / r.width   // 1 view point in image units
             let handles = handlePositions(of: l)
