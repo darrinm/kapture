@@ -387,12 +387,40 @@ final class CanvasView: NSView, NSTextFieldDelegate {
     /// endpoints/corners of the selected shape a drag can grab (image-space)
     private func handlePositions(of layer: Annotation) -> [CGPoint] {
         switch layer.tool {
-        case .arrow, .line, .rect, .ellipse, .highlight, .crop:
+        case .crop:
+            // 8 handles: corners then edge midpoints — order matched by resizeCrop(_:handle:to:)
+            guard layer.points.count >= 2 else { return [] }
+            let r = layer.rect
+            return [CGPoint(x: r.minX, y: r.minY), CGPoint(x: r.maxX, y: r.minY),
+                    CGPoint(x: r.minX, y: r.maxY), CGPoint(x: r.maxX, y: r.maxY),
+                    CGPoint(x: r.midX, y: r.minY), CGPoint(x: r.midX, y: r.maxY),
+                    CGPoint(x: r.minX, y: r.midY), CGPoint(x: r.maxX, y: r.midY)]
+        case .arrow, .line, .rect, .ellipse, .highlight:
             return layer.points.count >= 2 ? [layer.points[0], layer.points[1]] : []
         default:
             return []
         }
     }
+    /// Resize the crop rect by one of its 8 handles (order per handlePositions: 4 corners TL/TR/BL/BR,
+    /// then edge midpoints top/bottom/left/right). Edges crossing over are re-standardized.
+    private func resizeCrop(_ layer: inout Annotation, handle h: Int, to p: CGPoint) {
+        let r = layer.rect
+        var minX = r.minX, minY = r.minY, maxX = r.maxX, maxY = r.maxY
+        switch h {
+        case 0: minX = p.x; minY = p.y
+        case 1: maxX = p.x; minY = p.y
+        case 2: minX = p.x; maxY = p.y
+        case 3: maxX = p.x; maxY = p.y
+        case 4: minY = p.y
+        case 5: maxY = p.y
+        case 6: minX = p.x
+        case 7: maxX = p.x
+        default: return
+        }
+        layer.points = [CGPoint(x: min(minX, maxX), y: min(minY, maxY)),
+                        CGPoint(x: max(minX, maxX), y: max(minY, maxY))]
+    }
+
     private func handleIndex(of layer: Annotation, at p: CGPoint) -> Int? {
         let grab = 10 * CGFloat(image.width) / imageRect.width
         return handlePositions(of: layer).firstIndex { hypot($0.x - p.x, $0.y - p.y) < grab }
@@ -406,6 +434,9 @@ final class CanvasView: NSView, NSTextFieldDelegate {
         } else if let sel = selected, let origin = dragOrigin,   // select tool, or crop-tool move/resize
                   let i = layers.firstIndex(where: { $0.id == sel }) {
             switch dragMode {
+            case .handle(let h) where layers[i].tool == .crop:
+                commitPreGesture()
+                resizeCrop(&layers[i], handle: h, to: p)
             case .handle(let h) where h < layers[i].points.count:
                 commitPreGesture()
                 layers[i].points[h] = p
