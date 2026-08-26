@@ -183,6 +183,7 @@ final class EditorViewController: NSViewController {
     @objc private func toolTapped(_ sender: NSButton) {
         guard let raw = sender.identifier?.rawValue, let tool = Tool(rawValue: raw) else { return }
         canvas.tool = tool
+        if tool == .select { canvas.selectMostRecent() }
         updateColorSelection()
         // radio behavior
         var v: NSView? = sender.superview
@@ -257,6 +258,11 @@ final class CanvasView: NSView, NSTextFieldDelegate {
         let r = imageRect
         let scale = CGFloat(image.width) / r.width
         return CGPoint(x: (p.x - r.minX) * scale, y: (r.maxY - p.y) * scale)   // flip to top-left space
+    }
+
+    func selectMostRecent() {
+        selected = layers.last?.id
+        needsDisplay = true
     }
 
     func compositeImage() -> NSImage? {
