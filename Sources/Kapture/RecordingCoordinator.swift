@@ -21,6 +21,21 @@ final class RecordingCoordinator {
     private var frontApp: String?
 
     var isRecording: Bool { session != nil }
+    var isPaused: Bool { session?.isPaused ?? false }
+
+    func togglePause() {
+        guard let session else { return }
+        let next = !session.isPaused
+        session.setPaused(next)
+        RecordingHUD.shared.stop()
+        if !next {
+            RecordingHUD.shared.start(showClicks: Settings.shared.showClicksWhileRecording,
+                                      showKeys: Settings.shared.showKeysWhileRecording)
+        }
+        onPauseChanged?(next)
+        Sounds.play(next ? "Tink" : "Morse")
+    }
+    var onPauseChanged: ((Bool) -> Void)?
 
     func toggle() {
         if isRecording { stop() } else { start() }
@@ -61,6 +76,8 @@ final class RecordingCoordinator {
                 Log.capture.info("record: capturing \(session.pixelWidth)x\(session.pixelHeight)")
                 self.session = session
                 if let rect = borderRect { showBorder(around: rect) }
+                RecordingHUD.shared.start(showClicks: Settings.shared.showClicksWhileRecording,
+                                          showKeys: Settings.shared.showKeysWhileRecording)
                 startTimer()
                 Sounds.play("Morse")
                 onStateChanged?(true)
@@ -77,6 +94,7 @@ final class RecordingCoordinator {
         self.session = nil
         timer?.invalidate(); timer = nil
         border?.orderOut(nil); border = nil
+        RecordingHUD.shared.stop()
         onStateChanged?(false)
         let app = frontApp
         Task {

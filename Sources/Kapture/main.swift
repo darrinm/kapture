@@ -43,18 +43,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         RecordingCoordinator.shared.onStateChanged = { [weak self] recording in
             guard let button = self?.statusItem.button else { return }
             if recording {
-                button.image = NSImage(systemSymbolName: "record.circle.fill", accessibilityDescription: "Recording")
-                button.contentTintColor = NSColor(srgbRed: 0.78, green: 0.26, blue: 0.23, alpha: 1)
+                // non-template so the red survives; timer text appears on the first tick
+                let symbol = NSImage(systemSymbolName: "stop.circle.fill", accessibilityDescription: "Stop recording")?
+                    .withSymbolConfiguration(.init(paletteColors: [
+                        NSColor(srgbRed: 0.85, green: 0.22, blue: 0.19, alpha: 1)]))
+                symbol?.isTemplate = false
+                button.image = symbol
+                button.imagePosition = .imageLeft
+                button.title = " 0:00"
+                button.toolTip = "Stop recording (⌘⇧5)"
             } else {
                 button.image = NSImage(systemSymbolName: "camera.viewfinder", accessibilityDescription: "Kapture")
                 button.contentTintColor = nil
                 button.title = ""
+                button.toolTip = nil
             }
         }
         RecordingCoordinator.shared.onTick = { [weak self] elapsed in
             guard let button = self?.statusItem.button else { return }
-            button.title = " " + elapsed
+            button.title = RecordingCoordinator.shared.isPaused ? " ⏸ " + elapsed : " " + elapsed
             button.imagePosition = .imageLeft
+        }
+        RecordingCoordinator.shared.onPauseChanged = { [weak self] paused in
+            guard let button = self?.statusItem.button else { return }
+            let symbol = NSImage(systemSymbolName: paused ? "pause.circle.fill" : "stop.circle.fill",
+                                 accessibilityDescription: paused ? "Paused" : "Stop recording")?
+                .withSymbolConfiguration(.init(paletteColors: [
+                    NSColor(srgbRed: 0.85, green: 0.22, blue: 0.19, alpha: 1)]))
+            symbol?.isTemplate = false
+            button.image = symbol
         }
         HotkeyCenter.shared.install()
         EventTapCenter.shared.startIfPossible()   // silent no-op without the Accessibility grant
@@ -71,7 +88,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     private func installStatusItem() {
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        // variableLength: the item widens for the recording timer (squareLength clips it away)
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.image = NSImage(systemSymbolName: "camera.viewfinder", accessibilityDescription: "Kapture")
         // key equivalents derive from the hotkey table, so the menu can never disagree with it
         func item(_ title: String, _ action: Selector,
@@ -90,6 +108,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         menu.addItem(.separator())
         menu.addItem(item("Record Area or Window", #selector(menuRecord), hotkey: .record))
         menu.addItem(item("Stop Recording", #selector(menuStopRecording), hotkey: .record))
+        menu.addItem(item("Pause Recording", #selector(menuPauseRecording)))
         let timerMenu = NSMenu()
         for s in [3, 5, 10] {
             let item = NSMenuItem(title: "Capture Area in \(s)s", action: #selector(menuTimer(_:)), keyEquivalent: "")
@@ -116,9 +135,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     @objc private func menuRecord() { if !RecordingCoordinator.shared.isRecording { RecordingCoordinator.shared.start() } }
     @objc private func menuStopRecording() { RecordingCoordinator.shared.stop() }
+    @objc private func menuPauseRecording() { RecordingCoordinator.shared.togglePause() }
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         if item.action == #selector(menuRecord) { return !RecordingCoordinator.shared.isRecording }
         if item.action == #selector(menuStopRecording) { return RecordingCoordinator.shared.isRecording }
+        if item.action == #selector(menuPauseRecording) {
+            item.title = RecordingCoordinator.shared.isPaused ? "Resume Recording" : "Pause Recording"
+            return RecordingCoordinator.shared.isRecording
+        }
         return true
     }
 

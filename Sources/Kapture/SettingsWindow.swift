@@ -69,6 +69,8 @@ struct SettingsView: View {
     @AppStorage("hoverShortcutsEnabled") private var hoverShortcuts = true
     @AppStorage("recordSystemAudio") private var recordSystemAudio = true
     @AppStorage("recordMicrophone") private var recordMicrophone = false
+    @AppStorage("showClicksWhileRecording") private var showClicks = true
+    @AppStorage("showKeysWhileRecording") private var showKeys = false
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @State private var exportPath = Settings.shared.exportLocation.path
 
@@ -142,7 +144,9 @@ struct SettingsView: View {
         Form {
             Toggle("Record system audio", isOn: $recordSystemAudio)
             Toggle("Record microphone", isOn: $recordMicrophone)
-            Text("Applies to the next recording. The microphone permission is requested the first time a recording starts with it on.")
+            Toggle("Show clicks", isOn: $showClicks)
+            Toggle("Show keystrokes", isOn: $showKeys)
+            Text("Applies to the next recording. Click and keystroke visuals are drawn into the movie and need Accessibility access; the microphone permission is requested the first time a recording starts with it on.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }

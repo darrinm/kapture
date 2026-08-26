@@ -28,6 +28,27 @@ public final class RecordingSession: NSObject, SCStreamOutput, @unchecked Sendab
     private var started = false
     private var sessionStart = CMTime.invalid
     private var lastVideoPTS = CMTime.invalid
+    // pause/resume: samples are dropped while paused and every later sample is retimed by the
+    // accumulated pause span, so the movie has no hole (spike C math).
+    private let lock = NSLock()
+    private var paused = false
+    private var pauseBegan = CMTime.invalid
+    private var pausedOffset = CMTime.zero
+    private var lastAppendedEnd = CMTime.zero
+    public var isPaused: Bool { lock.lock(); defer { lock.unlock() }; return paused }
+
+    public func setPaused(_ value: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        guard value != paused else { return }
+        paused = value
+        if value {
+            pauseBegan = lastVideoPTS
+        } else if pauseBegan.isValid {
+            pauseBegan = .invalid   // the span is folded in on the first resumed sample
+            resuming = true
+        }
+    }
+    private var resuming = false
     public let outputURL: URL
     public let pixelWidth: Int
     public let pixelHeight: Int
@@ -150,14 +171,53 @@ public final class RecordingSession: NSObject, SCStreamOutput, @unchecked Sendab
             Log.capture.info("record: writer started ok=\(ok) status=\(self.writer.status.rawValue)")
         }
         guard sb.presentationTimeStamp >= sessionStart else { return }   // pre-session audio corrupts
+
+        lock.lock()
+        let isPaused = paused
+        if isPaused {
+            if type == .screen { lastVideoPTS = sb.presentationTimeStamp }
+            lock.unlock()
+            return
+        }
+        if resuming, type == .screen {
+            // fold the pause span into the offset: resumed media continues where we left off
+            let target = lastAppendedEnd + CMTime(value: 1, timescale: 60)
+            pausedOffset = sb.presentationTimeStamp - sessionStart - target
+            resuming = false
+        }
+        let offset = pausedOffset
+        lock.unlock()
+
+        let retimed = offset == .zero ? sb : Self.retime(sb, by: offset)
+        guard let retimed else { return }
         let input: AVAssetWriterInput?
         switch type {
-        case .screen: input = video; lastVideoPTS = sb.presentationTimeStamp
+        case .screen:
+            input = video
+            lastVideoPTS = sb.presentationTimeStamp
+            lock.lock(); lastAppendedEnd = retimed.presentationTimeStamp - sessionStart; lock.unlock()
         case .audio: input = sysAudio
         case .microphone: input = micAudio
         @unknown default: input = nil
         }
-        if let input, input.isReadyForMoreMediaData { input.append(sb) }
+        if let input, input.isReadyForMoreMediaData { input.append(retimed) }
         if writer.status == .failed { Log.capture.error("recording writer failed: \(self.writer.error)") }
+    }
+
+    /// Audio buffers can't be retimed in place — every buffer is copied with shifted timing.
+    private static func retime(_ sb: CMSampleBuffer, by offset: CMTime) -> CMSampleBuffer? {
+        var count = 0
+        CMSampleBufferGetSampleTimingInfoArray(sb, entryCount: 0, arrayToFill: nil, entriesNeededOut: &count)
+        var infos = [CMSampleTimingInfo](repeating: CMSampleTimingInfo(), count: count)
+        CMSampleBufferGetSampleTimingInfoArray(sb, entryCount: count, arrayToFill: &infos, entriesNeededOut: nil)
+        for i in 0..<count {
+            infos[i].presentationTimeStamp = infos[i].presentationTimeStamp - offset
+            if infos[i].decodeTimeStamp.isValid { infos[i].decodeTimeStamp = infos[i].decodeTimeStamp - offset }
+        }
+        var out: CMSampleBuffer?
+        CMSampleBufferCreateCopyWithNewTiming(allocator: nil, sampleBuffer: sb,
+                                              sampleTimingEntryCount: count, sampleTimingArray: &infos,
+                                              sampleBufferOut: &out)
+        return out
     }
 }

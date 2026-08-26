@@ -81,6 +81,16 @@ public struct Settings {
         set { d.set(newValue, forKey: "recordMicrophone") }
     }
 
+    public var showClicksWhileRecording: Bool {
+        get { d.object(forKey: "showClicksWhileRecording") as? Bool ?? true }
+        set { d.set(newValue, forKey: "showClicksWhileRecording") }
+    }
+
+    public var showKeysWhileRecording: Bool {
+        get { d.bool(forKey: "showKeysWhileRecording") }
+        set { d.set(newValue, forKey: "showKeysWhileRecording") }
+    }
+
     /// Route ⌘W/⌘C/⌘S/⌘⌫/space to the hovered overlay without clicking (needs Accessibility).
     public var hoverShortcutsEnabled: Bool {
         get { d.object(forKey: "hoverShortcutsEnabled") as? Bool ?? true }
