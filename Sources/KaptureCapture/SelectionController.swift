@@ -40,13 +40,19 @@ public final class SelectionController {
                 w.orderFrontRegardless()
                 return w
             }
+            // Activate: an inactive app swallows the first mouse-down as an activation click,
+            // and NSCursor.hide() only takes effect for the active app.
+            NSApp.activate(ignoringOtherApps: true)
             windows.first?.makeKey()
             NSCursor.hide()   // the drawn crosshair replaces the pointer entirely
         }
     }
 
     private func finish(_ sel: SelectionResult?, resume: Bool) {
-        if !windows.isEmpty { NSCursor.unhide() }
+        if !windows.isEmpty {
+            NSCursor.unhide()
+            NSApp.deactivate()   // hand focus back to the app the user was in
+        }
         windows.forEach { $0.orderOut(nil) }
         windows = []
         if resume { continuation?.resume(returning: sel); continuation = nil }
@@ -89,6 +95,7 @@ final class SelectionView: NSView {
     required init?(coder: NSCoder) { fatalError() }
 
     override var acceptsFirstResponder: Bool { true }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func viewDidMoveToWindow() {
         window?.acceptsMouseMovedEvents = true
