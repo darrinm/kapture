@@ -138,6 +138,22 @@ final class OverlayView: NSView, NSDraggingSource {
     @objc func copyTapped() { panel.copyToClipboard() }
     @objc func saveTapped() { panel.saveToExportLocation() }
 
+    // Click-to-key tier (spec §5): a click makes the panel key; then ⌘W/⌘C/⌘S work.
+    override var acceptsFirstResponder: Bool { true }
+    override func mouseDown(with event: NSEvent) {
+        panel.makeKey()
+        panel.makeFirstResponder(self)
+    }
+    override func keyDown(with event: NSEvent) {
+        let cmd = event.modifierFlags.contains(.command)
+        switch (cmd, event.charactersIgnoringModifiers) {
+        case (true, "w"): panel.keepAndClose()
+        case (true, "c"): panel.copyToClipboard()
+        case (true, "s"): panel.saveToExportLocation()
+        default: super.keyDown(with: event)
+        }
+    }
+
     override func mouseEntered(with event: NSEvent) { hovering = true }
     override func mouseExited(with event: NSEvent) { hovering = false }
 

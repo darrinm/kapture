@@ -21,6 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             switch action {
             case .area: CaptureCoordinator.shared.captureArea()
             case .fullscreen: CaptureCoordinator.shared.captureFullscreen()
+            case .previousArea: CaptureCoordinator.shared.capturePreviousArea()
             case .record: break   // M3
             }
         }
@@ -34,7 +35,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.image = NSImage(systemSymbolName: "camera.viewfinder", accessibilityDescription: "Kapture")
         let menu = NSMenu()
         menu.addItem(withTitle: "Capture Area", action: #selector(menuArea), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Capture Window", action: #selector(menuWindow), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Capture Fullscreen", action: #selector(menuFullscreen), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Capture All Displays", action: #selector(menuAllDisplays), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Capture Previous Area", action: #selector(menuPreviousArea), keyEquivalent: "").target = self
+        let timerMenu = NSMenu()
+        for s in [3, 5, 10] {
+            let item = NSMenuItem(title: "Capture Area in \(s)s", action: #selector(menuTimer(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = s
+            timerMenu.addItem(item)
+        }
+        let timerItem = NSMenuItem(title: "Self-Timer", action: nil, keyEquivalent: "")
+        timerItem.submenu = timerMenu
+        menu.addItem(timerItem)
         menu.addItem(.separator())
         menu.addItem(withTitle: "Open Library Folder", action: #selector(menuLibrary), keyEquivalent: "").target = self
         menu.addItem(.separator())
@@ -43,7 +57,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func menuArea() { CaptureCoordinator.shared.captureArea() }
+    @objc private func menuWindow() { CaptureCoordinator.shared.captureWindow() }
     @objc private func menuFullscreen() { CaptureCoordinator.shared.captureFullscreen() }
+    @objc private func menuAllDisplays() { CaptureCoordinator.shared.captureFullscreen(allDisplays: true) }
+    @objc private func menuPreviousArea() { CaptureCoordinator.shared.capturePreviousArea() }
+    @objc private func menuTimer(_ sender: NSMenuItem) { CaptureCoordinator.shared.captureAreaAfter(seconds: sender.tag) }
     @objc private func menuLibrary() { NSWorkspace.shared.open(Settings.shared.libraryRoot) }
 }
 

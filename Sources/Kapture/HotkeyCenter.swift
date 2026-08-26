@@ -8,9 +8,10 @@ import KaptureCore
 final class HotkeyCenter {
     static let shared = HotkeyCenter()
     enum Action: UInt32, CaseIterable {
-        case fullscreen = 1   // ⌘⇧3
-        case area = 2         // ⌘⇧4
-        case record = 3       // ⌘⇧5 (stub until M3)
+        case fullscreen = 1     // ⌘⇧3
+        case area = 2           // ⌘⇧4
+        case record = 3         // ⌘⇧5 (stub until M3)
+        case previousArea = 4   // ⌥⇧4
     }
     private var refs: [EventHotKeyRef?] = []
     var handler: ((Action) -> Void)?
@@ -29,10 +30,15 @@ final class HotkeyCenter {
             return noErr
         }, 1, &spec, nil, nil)
 
-        let bindings: [(UInt32, Action)] = [(20, .fullscreen), (21, .area), (23, .record)]
-        for (keyCode, action) in bindings {
+        let bindings: [(UInt32, UInt32, Action)] = [
+            (20, UInt32(cmdKey | shiftKey), .fullscreen),
+            (21, UInt32(cmdKey | shiftKey), .area),
+            (23, UInt32(cmdKey | shiftKey), .record),
+            (21, UInt32(optionKey | shiftKey), .previousArea),
+        ]
+        for (keyCode, modifiers, action) in bindings {
             var ref: EventHotKeyRef?
-            let status = RegisterEventHotKey(keyCode, UInt32(cmdKey | shiftKey),
+            let status = RegisterEventHotKey(keyCode, modifiers,
                                              EventHotKeyID(signature: OSType(0x4B505452), id: action.rawValue),
                                              GetApplicationEventTarget(), 0, &ref)
             if status != noErr { Log.shell.error("hotkey \(action.rawValue) register failed: \(status)") }

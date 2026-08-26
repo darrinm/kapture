@@ -52,6 +52,43 @@ public enum ScreenshotService {
         return frame.image.cropping(to: px)
     }
 
+    /// Live single-window capture (transparent background, includes rounded corners).
+    public static func captureWindow(_ window: SCWindow) async throws -> CGImage {
+        let filter = SCContentFilter(desktopIndependentWindow: window)
+        let config = SCStreamConfiguration()
+        let scale = NSScreen.main?.backingScaleFactor ?? 2
+        config.width = Int(window.frame.width * scale)
+        config.height = Int(window.frame.height * scale)
+        config.captureResolution = .best
+        config.showsCursor = false
+        config.backgroundColor = .clear
+        return try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+    }
+
+    /// Composite every display's frozen frame edge-to-edge into one image (all-displays fullscreen).
+    public static func compositeAllDisplays(_ frames: [FrozenFrame]) -> CGImage? {
+        guard !frames.isEmpty else { return nil }
+        if frames.count == 1 { return frames[0].image }
+        // CG global coords (top-left origin), points
+        let union = frames.map { $0.display.frame }.reduce(frames[0].display.frame) { $0.union($1) }
+        let scale = frames.map(\.scale).max() ?? 2
+        let w = Int(union.width * scale), h = Int(union.height * scale)
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        ctx.setFillColor(CGColor(gray: 0, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+        for f in frames {
+            let d = f.display.frame
+            // context is bottom-left origin; display frames are top-left global
+            let rect = CGRect(x: (d.origin.x - union.origin.x) * scale,
+                              y: (union.maxY - d.maxY) * scale,
+                              width: d.width * scale, height: d.height * scale)
+            ctx.draw(f.image, in: rect)
+        }
+        return ctx.makeImage()
+    }
+
     public static func pngData(_ image: CGImage) -> Data? {
         let rep = NSBitmapImageRep(cgImage: image)
         rep.size = NSSize(width: image.width, height: image.height)
