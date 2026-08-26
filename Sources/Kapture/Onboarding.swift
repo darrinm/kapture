@@ -29,6 +29,35 @@ final class Onboarding {
         w.makeKeyAndOrderFront(nil)
     }
 
+    private func wordmark() -> NSTextField {
+        let mark = NSTextField(labelWithString: "")
+        let s = NSMutableAttributedString(string: "Kapture", attributes: [
+            .font: NSFont.systemFont(ofSize: 30, weight: .bold), .foregroundColor: NSColor.labelColor])
+        s.append(NSAttributedString(string: ".", attributes: [
+            .font: NSFont.systemFont(ofSize: 30, weight: .bold), .foregroundColor: Tokens.accent]))
+        mark.attributedStringValue = s
+        return mark
+    }
+
+    private func accentButton(_ title: String, action: Selector) -> NSButton {
+        let b = NSButton(title: title, target: self, action: action)
+        b.bezelStyle = .rounded
+        b.controlSize = .large
+        b.keyEquivalent = "\r"
+        b.bezelColor = Tokens.accent
+        return b
+    }
+
+    private func present(_ root: NSStackView) {
+        guard let window else { return }
+        window.contentView = root
+        var size = root.fittingSize
+        size.width = max(size.width, 440)
+        size.height += 8
+        window.setContentSize(size)
+        window.center()
+    }
+
     private func renderPermission() {
         let root = NSStackView()
         root.orientation = .vertical
@@ -36,8 +65,7 @@ final class Onboarding {
         root.spacing = 14
         root.edgeInsets = NSEdgeInsets(top: 44, left: 40, bottom: 36, right: 40)
 
-        let mark = NSTextField(labelWithString: "Kapture.")
-        mark.font = .systemFont(ofSize: 30, weight: .bold)
+        let mark = wordmark()
         let head = NSTextField(labelWithString: "Allow screen capture")
         head.font = .systemFont(ofSize: 17, weight: .semibold)
         let body = NSTextField(wrappingLabelWithString:
@@ -45,16 +73,13 @@ final class Onboarding {
         body.alignment = .center
         body.textColor = .secondaryLabelColor
         body.preferredMaxLayoutWidth = 320
-        let button = NSButton(title: "Open System Settings", target: self, action: #selector(grantTapped))
-        button.bezelStyle = .rounded
-        button.controlSize = .large
-        button.keyEquivalent = "\r"
+        let button = accentButton("Open System Settings", action: #selector(grantTapped))
         let sub = NSTextField(labelWithString: "Kapture will relaunch automatically.")
         sub.font = .systemFont(ofSize: 11)
         sub.textColor = .tertiaryLabelColor
 
         [mark, head, body, button, sub].forEach { root.addArrangedSubview($0) }
-        window?.contentView = root
+        present(root)
     }
 
     @objc private func grantTapped() {
@@ -99,19 +124,15 @@ final class Onboarding {
         root.alignment = .centerX
         root.spacing = 14
         root.edgeInsets = NSEdgeInsets(top: 44, left: 40, bottom: 36, right: 40)
-        let mark = NSTextField(labelWithString: "Kapture.")
-        mark.font = .systemFont(ofSize: 30, weight: .bold)
+        let mark = wordmark()
         let head = NSTextField(labelWithString: "You're ready.")
         head.font = .systemFont(ofSize: 17, weight: .semibold)
         let body = NSTextField(wrappingLabelWithString: "Press ⌘⇧4 to take your first capture.")
         body.alignment = .center
         body.textColor = .secondaryLabelColor
-        let button = NSButton(title: "Done", target: self, action: #selector(dismiss))
-        button.bezelStyle = .rounded
-        button.controlSize = .large
-        button.keyEquivalent = "\r"
+        let button = accentButton("Done", action: #selector(dismiss))
         [mark, head, body, button].forEach { root.addArrangedSubview($0) }
-        window?.contentView = root
+        present(root)
     }
 
     @objc private func dismiss() {

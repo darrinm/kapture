@@ -25,7 +25,7 @@ public final class SelectionController {
 
     public func select(frames: [FrozenFrame], windows scWindows: [SCWindow],
                        startInWindowMode: Bool = false) async -> SelectionResult? {
-        finish(nil, resume: false)
+        finish(nil, resume: true)   // cancel any active session; its awaiter resumes with nil
         let candidates = scWindows.filter {
             $0.isOnScreen && $0.windowLayer == 0 && $0.frame.width > 40 && $0.frame.height > 40
                 && $0.owningApplication?.processID != ProcessInfo.processInfo.processIdentifier

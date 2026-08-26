@@ -93,7 +93,7 @@ final class PinView: NSImageView {
         layer?.cornerRadius = 6
         layer?.masksToBounds = true
         layer?.borderWidth = 1
-        layer?.borderColor = NSColor.separatorColor.cgColor
+        layer?.borderColor = NSColor.white.withAlphaComponent(0.28).cgColor   // visible edge on any content
 
         closeButton.image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Close pin")!
             .withSymbolConfiguration(.init(pointSize: 16, weight: .semibold))
