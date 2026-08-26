@@ -8,7 +8,7 @@ import KaptureCore
 final class CompetitorWatch {
     static let shared = CompetitorWatch()
 
-    private static let known: [String: String] = [
+    private nonisolated static let known: [String: String] = [
         "pl.maketheweb.cleanshotx": "CleanShot X",
         "cc.ffitch.shottr": "Shottr",
         "com.xnapper.Xnapper": "Xnapper",
