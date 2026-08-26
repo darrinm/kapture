@@ -2,7 +2,9 @@ import Foundation
 import GRDB
 
 /// The library: visible files under the root (truth), DB index in App Support (derived).
-public final class Library {
+/// @unchecked Sendable: all mutable state lives in the thread-safe DatabaseQueue; `db` and
+/// `root` are immutable, and file operations are serialized through the op journal.
+public final class Library: @unchecked Sendable {
     public let db: Database
     public let root: URL
 

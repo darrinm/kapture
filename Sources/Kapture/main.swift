@@ -77,7 +77,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func menuPinClipboard() { PinController.shared.pinFromClipboard() }
     @objc private func menuRestore() {
         guard let library = CaptureCoordinator.shared.library else { return }
-        if let restored = try? library.restoreLastDiscarded(), restored != nil {
+        if (try? library.restoreLastDiscarded()) != nil {
             NSSound(named: "Pop")?.play()
         }
     }
