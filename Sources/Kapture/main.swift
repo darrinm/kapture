@@ -151,8 +151,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     @objc func statusButtonClicked() {
         if NSApp.currentEvent?.type == .rightMouseUp {
             statusItem.menu = statusMenu
-            statusItem.button?.performClick(nil)
-            statusItem.menu = nil       // back to stop-button behavior after the menu closes
+            statusItem.button?.performClick(nil)   // modal: returns once the menu closes
+            // back to stop-button behavior — but only if we're still recording. Picking
+            // "Stop Recording" from that menu already restored the normal menu, and clearing
+            // it here would leave the item with neither a menu nor an action.
+            if RecordingCoordinator.shared.isRecording { statusItem.menu = nil }
         } else {
             RecordingCoordinator.shared.stop()
         }

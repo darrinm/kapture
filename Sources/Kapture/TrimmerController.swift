@@ -12,6 +12,7 @@ final class TrimmerController {
     static let shared = TrimmerController()
     var library: Library?
     private var windows: [String: NSWindow] = [:]
+    private var closeObservers: [String: NSObjectProtocol] = [:]
 
     func open(recordID: String) {
         guard let library,
@@ -26,7 +27,7 @@ final class TrimmerController {
 
         let aspect = record.height > 0 ? CGFloat(record.width) / CGFloat(record.height) : 16.0 / 9
         let maxSize = NSScreen.main?.visibleFrame.size ?? CGSize(width: 1440, height: 900)
-        let w = min(CGFloat(record.width) / 2 + 0, maxSize.width * 0.7)
+        let w = min(CGFloat(record.width) / 2, maxSize.width * 0.7)
         let h = w / aspect
 
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: max(560, w), height: max(320, h)),
@@ -36,10 +37,14 @@ final class TrimmerController {
         window.center()
         window.isReleasedWhenClosed = false
         windows[recordID] = window
-        NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window,
-                                               queue: .main) { [weak self] _ in
+        closeObservers[recordID] = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak self] _ in
             Task { @MainActor in
-                self?.windows[recordID] = nil
+                guard let self else { return }
+                self.windows[recordID] = nil
+                if let token = self.closeObservers.removeValue(forKey: recordID) {
+                    NotificationCenter.default.removeObserver(token)
+                }
                 ActivationPolicy.release()
             }
         }
@@ -55,7 +60,9 @@ final class TrimmerController {
                 Log.capture.error("trimmer: item never became trimmable")
                 return
             }
-            await playerView.beginTrimming()
+            // Cancel must not export: AVKit's restoration of the playback end times is not
+            // contractual, so a discarded result can commit a trim the user rejected.
+            guard await playerView.beginTrimming() == .okButton else { window.close(); return }
             guard let item = playerView.player?.currentItem else { return }
             let start = item.reversePlaybackEndTime.isValid && item.reversePlaybackEndTime.seconds > 0
                 ? item.reversePlaybackEndTime : .zero

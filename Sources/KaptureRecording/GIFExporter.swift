@@ -30,39 +30,36 @@ public enum GIFExporter {
         let times = (0..<frameCount).map {
             CMTime(seconds: Double($0) / Double(fps), preferredTimescale: 600)
         }
-        var frames: [CGImage] = []
-        frames.reserveCapacity(frameCount)
-        for t in times {
-            if let img = try? generator.copyCGImage(at: t, actualTime: nil) { frames.append(img) }
-        }
-        guard let first = frames.first else { throw CocoaError(.fileReadCorruptFile) }
-        let w = first.width, h = first.height
-
-        // frames → RGBA buffers
-        let buffers = frames.compactMap { rgba($0, width: w, height: h) }
-        guard !buffers.isEmpty else { throw CocoaError(.fileReadCorruptFile) }
-
-        // one global palette from subsampled pixels across all frames
+        // Pass 1 — palette. Every frame is decoded on demand and released again: holding all
+        // of them (as CGImages *and* RGBA buffers) costs ~1.4 GB for a 30s 960x540 clip and
+        // will jetsam on anything longer. A couple of dozen evenly spaced frames cover the
+        // clip's colors as well as sampling all of them did.
+        var w = 0, h = 0
         var samples: [(UInt8, UInt8, UInt8)] = []
         samples.reserveCapacity(220_000)
-        let strideStep = max(1, (buffers.count * w * h) / 200_000)
-        var i = 0
-        for buf in buffers {
+        let paletteFrames = min(times.count, 24)
+        let frameStride = max(1, times.count / paletteFrames)
+        let perFrameBudget = max(1, 200_000 / paletteFrames)
+        for (i, t) in times.enumerated() where i % frameStride == 0 {
+            guard let img = try? generator.copyCGImage(at: t, actualTime: nil) else { continue }
+            if w == 0 { w = img.width; h = img.height }
+            guard let buf = rgba(img, width: w, height: h) else { continue }
+            let step = max(1, (w * h) / perFrameBudget)
             var p = 0
             while p < w * h {
-                if i % strideStep == 0 {
-                    samples.append((buf[p * 4], buf[p * 4 + 1], buf[p * 4 + 2]))
-                }
-                i += 1; p += 1
+                samples.append((buf[p * 4], buf[p * 4 + 1], buf[p * 4 + 2]))
+                p += step
             }
         }
+        guard w > 0, h > 0, !samples.isEmpty else { throw CocoaError(.fileReadCorruptFile) }
         let palette = medianCut(samples, count: 256)
+        samples = []
 
         // encode: indexed frames with FS dithering, single shared color table
         let out = FileManager.default.temporaryDirectory
             .appendingPathComponent("kapture-gif-\(ULID.generate()).gif")
         guard let dest = CGImageDestinationCreateWithURL(out as CFURL, UTType.gif.identifier as CFString,
-                                                         buffers.count, nil) else {
+                                                         times.count, nil) else {
             throw CocoaError(.fileWriteUnknown)
         }
         let gifProps = [kCGImagePropertyGIFDictionary: [kCGImagePropertyGIFLoopCount: 0]] as CFDictionary
@@ -82,7 +79,11 @@ public enum GIFExporter {
             throw CocoaError(.fileWriteUnknown)
         }
 
-        for buf in buffers {
+        // Pass 2 — encode, one frame resident at a time.
+        var written = 0
+        for t in times {
+            guard let frame = try? generator.copyCGImage(at: t, actualTime: nil),
+                  let buf = rgba(frame, width: w, height: h) else { continue }
             let indexed = ditherToPalette(buf, width: w, height: h, palette: palette)
             guard let provider = CGDataProvider(data: Data(indexed) as CFData),
                   let img = CGImage(width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 8,
@@ -91,9 +92,10 @@ public enum GIFExporter {
                                     provider: provider, decode: nil, shouldInterpolate: false,
                                     intent: .defaultIntent) else { continue }
             CGImageDestinationAddImage(dest, img, frameProps)
+            written += 1
         }
-        guard CGImageDestinationFinalize(dest) else { throw CocoaError(.fileWriteUnknown) }
-        return Result(url: out, width: w, height: h, duration: Double(buffers.count) * delay)
+        guard written > 0, CGImageDestinationFinalize(dest) else { throw CocoaError(.fileWriteUnknown) }
+        return Result(url: out, width: w, height: h, duration: Double(written) * delay)
     }
 
     // MARK: internals
@@ -111,27 +113,38 @@ public enum GIFExporter {
         return ok ? buf : nil
     }
 
+    private struct ColorBox {
+        var pixels: [(UInt8, UInt8, UInt8)]
+        var channel: Int    // widest channel
+        var range: Int      // its spread; <= 0 means nothing left to separate
+    }
+
     private static func medianCut(_ pixels: [(UInt8, UInt8, UInt8)], count: Int) -> [(UInt8, UInt8, UInt8)] {
         guard !pixels.isEmpty else { return [(0, 0, 0)] }
-        var boxes: [[(UInt8, UInt8, UInt8)]] = [pixels]
+        // each box carries its own widest-channel spread, measured once when it is created —
+        // rescanning every box on all 255 splits is ~255x the pixel reads for the same answer
+        func makeBox(_ p: [(UInt8, UInt8, UInt8)]) -> ColorBox {
+            guard p.count > 1 else { return ColorBox(pixels: p, channel: 0, range: 0) }
+            let ranges = channelRanges(p)
+            let widest = ranges.firstIndex(of: ranges.max()!)!
+            return ColorBox(pixels: p, channel: widest, range: ranges[widest])
+        }
+        var boxes = [makeBox(pixels)]
         while boxes.count < count {
             // split the box with the widest channel range
-            guard let (index, channel) = boxes.enumerated().compactMap({ (i, box) -> (Int, Int, Int)? in
-                guard box.count > 1 else { return nil }
-                let ranges = channelRanges(box)
-                let widest = ranges.firstIndex(of: ranges.max()!)!
-                return (i, widest, ranges[widest])
-            }).max(by: { $0.2 < $1.2 }).map({ ($0.0, $0.1) }) else { break }
-            var box = boxes.remove(at: index)
-            box.sort { component($0, channel) < component($1, channel) }
-            let mid = box.count / 2
-            boxes.append(Array(box[..<mid]))
-            boxes.append(Array(box[mid...]))
+            guard let index = boxes.indices.max(by: { boxes[$0].range < boxes[$1].range }),
+                  boxes[index].range > 0 else { break }
+            let box = boxes.remove(at: index)
+            var sorted = box.pixels
+            sorted.sort { component($0, box.channel) < component($1, box.channel) }
+            let mid = sorted.count / 2
+            boxes.append(makeBox(Array(sorted[..<mid])))
+            boxes.append(makeBox(Array(sorted[mid...])))
         }
         return boxes.map { box in
             var r = 0, g = 0, b = 0
-            for p in box { r += Int(p.0); g += Int(p.1); b += Int(p.2) }
-            let n = max(1, box.count)
+            for p in box.pixels { r += Int(p.0); g += Int(p.1); b += Int(p.2) }
+            let n = max(1, box.pixels.count)
             return (UInt8(r / n), UInt8(g / n), UInt8(b / n))
         }
     }

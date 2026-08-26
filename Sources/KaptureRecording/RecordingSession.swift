@@ -22,8 +22,10 @@ public final class RecordingSession: NSObject, SCStreamOutput, @unchecked Sendab
     private let stream: SCStream
     private let writer: AVAssetWriter
     private let video: AVAssetWriterInput
-    private let sysAudio: AVAssetWriterInput
-    private let micAudio: AVAssetWriterInput
+    // nil when that source is off — an input added to the writer but never fed leaves an
+    // empty audio track in every movie
+    private let sysAudio: AVAssetWriterInput?
+    private let micAudio: AVAssetWriterInput?
     private let queue = DispatchQueue(label: "sh.kapture.recording")
     private var started = false
     private var sessionStart = CMTime.invalid
@@ -36,6 +38,8 @@ public final class RecordingSession: NSObject, SCStreamOutput, @unchecked Sendab
     private var pausedOffset = CMTime.zero
     private var lastAppendedEnd = CMTime.zero
     public var isPaused: Bool { lock.lock(); defer { lock.unlock() }; return paused }
+    /// End of the last appended video frame, relative to the session start (pause spans excluded).
+    private func recordedEnd() -> CMTime { lock.lock(); defer { lock.unlock() }; return lastAppendedEnd }
 
     public func setPaused(_ value: Bool) {
         lock.lock(); defer { lock.unlock() }
@@ -104,9 +108,9 @@ public final class RecordingSession: NSObject, SCStreamOutput, @unchecked Sendab
             AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: 48000,
             AVNumberOfChannelsKey: 2, AVEncoderBitRateKey: 128_000,
         ]
-        sysAudio = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
-        micAudio = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
-        for input in [video, sysAudio, micAudio] {
+        sysAudio = captureSystemAudio ? AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings) : nil
+        micAudio = micEnabled ? AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings) : nil
+        for input in [video, sysAudio, micAudio].compactMap({ $0 }) {
             input.expectsMediaDataInRealTime = true
             writer.add(input)
         }
@@ -128,17 +132,20 @@ public final class RecordingSession: NSObject, SCStreamOutput, @unchecked Sendab
         try? await stream.stopCapture()
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
             queue.async {
-                for input in [self.video, self.sysAudio, self.micAudio] { input.markAsFinished() }
-                if self.writer.status == .writing {
-                    self.writer.finishWriting { cont.resume() }
-                } else {
-                    cont.resume()
+                // markAsFinished before startWriting raises NSInternalInconsistencyException —
+                // reachable when the stop lands before the first in-size frame
+                guard self.writer.status == .writing else { cont.resume(); return }
+                for input in [self.video, self.sysAudio, self.micAudio].compactMap({ $0 }) {
+                    input.markAsFinished()
                 }
+                self.writer.finishWriting { cont.resume() }
             }
         }
         if writer.status == .failed { throw writer.error ?? CocoaError(.fileWriteUnknown) }
-        let duration = started && lastVideoPTS.isValid && sessionStart.isValid
-            ? (lastVideoPTS - sessionStart).seconds : 0
+        // recorded (not wall-clock) length: lastAppendedEnd is already pause-compensated,
+        // so a paused recording doesn't report the pause span as movie duration
+        let recorded = recordedEnd()
+        let duration = started && recorded.isValid ? max(0, recorded.seconds) : 0
         return RecordingResult(url: outputURL, width: pixelWidth, height: pixelHeight, duration: duration)
     }
 
@@ -173,13 +180,16 @@ public final class RecordingSession: NSObject, SCStreamOutput, @unchecked Sendab
         guard sb.presentationTimeStamp >= sessionStart else { return }   // pre-session audio corrupts
 
         lock.lock()
-        let isPaused = paused
-        if isPaused {
+        if paused {
             if type == .screen { lastVideoPTS = sb.presentationTimeStamp }
             lock.unlock()
             return
         }
-        if resuming, type == .screen {
+        if resuming {
+            // the new offset can only be computed from a video frame; audio arriving before it
+            // would be retimed with the stale offset and land ahead of everything that follows,
+            // making the audio track's timestamps non-monotonic (append fails, writer dies)
+            guard type == .screen else { lock.unlock(); return }
             // fold the pause span into the offset: resumed media continues where we left off
             let target = lastAppendedEnd + CMTime(value: 1, timescale: 60)
             pausedOffset = sb.presentationTimeStamp - sessionStart - target
@@ -194,8 +204,10 @@ public final class RecordingSession: NSObject, SCStreamOutput, @unchecked Sendab
         switch type {
         case .screen:
             input = video
+            lock.lock()
             lastVideoPTS = sb.presentationTimeStamp
-            lock.lock(); lastAppendedEnd = retimed.presentationTimeStamp - sessionStart; lock.unlock()
+            lastAppendedEnd = retimed.presentationTimeStamp - sessionStart
+            lock.unlock()
         case .audio: input = sysAudio
         case .microphone: input = micAudio
         @unknown default: input = nil

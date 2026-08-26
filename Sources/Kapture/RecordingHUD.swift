@@ -45,8 +45,9 @@ final class RecordingHUD {
     func stop() {
         if let monitor { NSEvent.removeMonitor(monitor) }
         monitor = nil
-        clickWindow?.orderOut(nil); clickWindow = nil
-        keysWindow?.orderOut(nil); keysWindow = nil
+        // tear down first: the ripple timer and the fade task outlive the windows otherwise
+        clickWindow?.teardown(); clickWindow?.orderOut(nil); clickWindow = nil
+        keysWindow?.teardown(); keysWindow?.orderOut(nil); keysWindow = nil
     }
 
     private static func describe(_ event: NSEvent) -> String {
@@ -81,6 +82,7 @@ final class ClickWindow: NSPanel {
     func ripple(at screenPoint: NSPoint) {
         view.addRipple(at: NSPoint(x: screenPoint.x - frame.minX, y: screenPoint.y - frame.minY))
     }
+    func teardown() { view.stopAnimating() }
 }
 
 final class ClickView: NSView {
@@ -101,6 +103,13 @@ final class ClickView: NSView {
                 }
             }
         }
+    }
+
+    /// The timer only self-invalidates when the last ripple expires; if the window goes away
+    /// mid-ripple the weak-self block would keep firing at 60Hz for the app's lifetime.
+    func stopAnimating() {
+        timer?.invalidate(); timer = nil
+        ripples.removeAll()
     }
 
     override func draw(_ dirty: NSRect) {
@@ -148,6 +157,8 @@ final class KeystrokeWindow: NSPanel {
         contentView = container
         alphaValue = 0
     }
+
+    func teardown() { clearTask?.cancel(); clearTask = nil }
 
     func show(_ key: String) {
         guard !key.isEmpty else { return }

@@ -3,6 +3,7 @@
 // trash / ⌘⌫ / swipe-toward-edge discards into the 7-day trash. space = Quick Look.
 // Beyond 5 the pile collapses into a "+n" card. Right-click menu on every card.
 import AppKit
+import AVFoundation
 import Quartz
 import KaptureCore
 import KaptureDesign
@@ -74,12 +75,22 @@ final class OverlayController {
         let url = library.root.appendingPathComponent(record.relPath)
         // decoding the flattened PNG is slow for big captures — keep it off the main actor
         Task.detached(priority: .userInitiated) {
-            guard let image = NSImage(contentsOf: url)?
-                .cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
+            guard let image = OverlayController.poster(for: url) else { return }
             await MainActor.run {
                 OverlayController.shared.show(record: record, fileURL: url, image: image)
             }
         }
+    }
+
+    /// Card pixels for any library file: decoded stills, first frame for movies.
+    /// NSImage returns nil for .mp4, so a movie needs the asset generator (post-trim cards).
+    nonisolated static func poster(for url: URL) -> CGImage? {
+        if let still = NSImage(contentsOf: url)?.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+            return still
+        }
+        let generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
+        generator.appliesPreferredTrackTransform = true
+        return try? generator.copyCGImage(at: .zero, actualTime: nil)
     }
 
     func hideAll() {

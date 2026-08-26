@@ -21,6 +21,9 @@ final class RecordingCoordinator {
     private var frontApp: String?
     private var pauseStart: Date?
     private var pausedTotal: TimeInterval = 0
+    /// true between "selection made" and "session assigned" — a second ⌘⇧5 in that window
+    /// would otherwise start a second stream and orphan the first one, still capturing.
+    private var starting = false
 
     var isRecording: Bool { session != nil }
     var isPaused: Bool { session?.isPaused ?? false }
@@ -51,7 +54,7 @@ final class RecordingCoordinator {
     }
 
     func start() {
-        guard !isRecording else { return }
+        guard !isRecording, !starting else { return }
         Log.capture.info("record: begin")
         Task {
             guard ScreenshotService.hasPermission else { Onboarding.shared.show(); return }
@@ -63,6 +66,8 @@ final class RecordingCoordinator {
                     frames: frames, windows: content?.windows ?? [])
                 guard let result = selection else { Log.capture.info("record: selection cancelled"); return }
                 Log.capture.info("record: selection made")
+                starting = true
+                defer { starting = false }
 
                 frontApp = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
                 let pid = ProcessInfo.processInfo.processIdentifier
@@ -123,10 +128,8 @@ final class RecordingCoordinator {
 
     private func showRecordingCard(record: CaptureRecord, url: URL) async {
         // poster = first frame
-        let poster: CGImage? = await Task.detached(priority: .userInitiated) {
-            let generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
-            generator.appliesPreferredTrackTransform = true
-            return try? generator.copyCGImage(at: .zero, actualTime: nil)
+        let poster = await Task.detached(priority: .userInitiated) {
+            OverlayController.poster(for: url)
         }.value
         guard let poster else { return }
         OverlayController.shared.show(record: record, fileURL: url, image: poster)
