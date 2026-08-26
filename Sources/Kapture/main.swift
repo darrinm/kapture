@@ -17,6 +17,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             EditorController.shared.onFlattened = { id in
                 OverlayController.shared.showCard(recordID: id)
             }
+            EditorController.shared.onWindowOpened = { ActivationPolicy.acquire() }
+            EditorController.shared.onWindowClosed = { ActivationPolicy.release() }
         } catch {
             Log.shell.error("store init failed: \(error)")
         }

@@ -18,7 +18,11 @@ final class SettingsWindowController {
         w.center()
         w.isReleasedWhenClosed = false
         window = w
-        NSApp.activate(ignoringOtherApps: true)
+        NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: w,
+                                               queue: .main) { _ in
+            Task { @MainActor in ActivationPolicy.release() }
+        }
+        ActivationPolicy.acquire()
         w.makeKeyAndOrderFront(nil)
     }
 }

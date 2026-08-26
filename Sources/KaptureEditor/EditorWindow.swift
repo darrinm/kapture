@@ -11,6 +11,9 @@ public final class EditorController {
     public var library: Library?
     /// Called after Done flattens — the shell reopens the capture as an overlay card.
     public var onFlattened: ((String) -> Void)?
+    /// Window lifecycle hooks — the shell uses these to toggle activation policy.
+    public var onWindowOpened: (() -> Void)?
+    public var onWindowClosed: (() -> Void)?
 
     public func open(recordID: String) {
         guard let library,
@@ -35,8 +38,12 @@ public final class EditorController {
         windows[recordID] = window
         NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window,
                                                queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.windows[recordID] = nil }
+            Task { @MainActor in
+                self?.windows[recordID] = nil
+                self?.onWindowClosed?()
+            }
         }
+        onWindowOpened?()
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
     }
