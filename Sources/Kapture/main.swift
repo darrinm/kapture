@@ -69,6 +69,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(withTitle: "Close All Pins", action: #selector(menuClosePins), keyEquivalent: "").target = self
         menu.addItem(.separator())
         menu.addItem(withTitle: "Open Library Folder", action: #selector(menuLibrary), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Settings…", action: #selector(menuSettings), keyEquivalent: ",").target = self
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit Kapture", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         statusItem.menu = menu
@@ -78,7 +79,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func menuRestore() {
         guard let library = CaptureCoordinator.shared.library else { return }
         if (try? library.restoreLastDiscarded()) != nil {
-            NSSound(named: "Pop")?.play()
+            Sounds.play("Pop")
         }
     }
     @objc private func menuShowOverlays() { OverlayController.shared.showAll() }
@@ -92,6 +93,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func menuPreviousArea() { CaptureCoordinator.shared.capturePreviousArea() }
     @objc private func menuTimer(_ sender: NSMenuItem) { CaptureCoordinator.shared.captureAreaAfter(seconds: sender.tag) }
     @objc private func menuLibrary() { NSWorkspace.shared.open(Settings.shared.libraryRoot) }
+    @objc private func menuSettings() { SettingsWindowController.shared.show() }
 }
 
 // TCC helper mode: a fresh process gets a fresh Screen Recording evaluation, unlike the

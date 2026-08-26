@@ -73,7 +73,7 @@ final class CaptureCoordinator {
 
     func captureAreaAfter(seconds: Int) {
         DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(seconds)) { [weak self] in
-            NSSound(named: "Pop")?.play()
+            Sounds.play("Pop")
             self?.captureArea()
         }
     }
@@ -117,7 +117,7 @@ final class CaptureCoordinator {
                 NSPasteboard.general.writeObjects([url as NSURL, NSImage(cgImage: image, size: .zero)])
             }
             OverlayController.shared.show(record: record, fileURL: url, image: image, from: sourceRect)
-            NSSound(named: "Tink")?.play()
+            Sounds.play("Tink")
         } catch { Log.store.error("store failed: \(error)") }
     }
 }

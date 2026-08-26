@@ -60,6 +60,7 @@ final class OverlayController {
             panel.alphaValue = 1
             panel.setFrame(target, display: true)
             panel.orderFrontRegardless()
+            panel.scheduleAutoClose()
             flight.orderOut(nil)
         })
     }
@@ -172,6 +173,7 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
     let fileURL: URL
     let onClose: (OverlayPanel) -> Void
     var placed = false   // set on first layout; first placement never animates
+    private var autoCloseTimer: Timer?
 
     init(record: CaptureRecord, fileURL: URL, image: CGImage, onClose: @escaping (OverlayPanel) -> Void) {
         self.record = record; self.fileURL = fileURL; self.onClose = onClose
@@ -191,6 +193,25 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
         alphaValue = 0
         orderFrontRegardless()
         Tokens.animate(0.25) { self.animator().alphaValue = 1 }
+        scheduleAutoClose()
+    }
+
+    // MARK: auto-close (paused while hovered)
+    func scheduleAutoClose() {
+        guard Settings.shared.autoCloseEnabled else { return }
+        autoCloseTimer?.invalidate()
+        autoCloseTimer = Timer.scheduledTimer(withTimeInterval: Double(Settings.shared.autoCloseInterval),
+                                              repeats: false) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                Settings.shared.autoCloseSaves ? self.saveToExportLocation() : self.keepAndClose()
+            }
+        }
+    }
+
+    func hoverChanged(_ hovering: Bool) {
+        if hovering { autoCloseTimer?.invalidate(); autoCloseTimer = nil }
+        else { scheduleAutoClose() }
     }
 
     // MARK: keep / discard
@@ -204,7 +225,7 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
            let fresh = try? library.db.queue.read({ try CaptureRecord.fetchOne($0, key: record.id) }) {
             try? library.discard(fresh)
         }
-        NSSound(named: "Bottle")?.play()
+        Sounds.play("Bottle")
         slideOff()
     }
 
@@ -271,7 +292,14 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
 final class OverlayView: NSView, NSDraggingSource {
     unowned let panel: OverlayPanel
     let image: CGImage
-    var hovering = false { didSet { needsDisplay = true; chrome.isHidden = !hovering; trashButton.isHidden = !hovering } }
+    var hovering = false {
+        didSet {
+            needsDisplay = true
+            chrome.isHidden = !hovering
+            trashButton.isHidden = !hovering
+            panel.hoverChanged(hovering)
+        }
+    }
     let chrome = NSStackView()
     let trashButton = NSButton()
     private var swipeX: CGFloat = 0

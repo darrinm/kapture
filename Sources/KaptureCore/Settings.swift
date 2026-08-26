@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 
 /// UserDefaults-backed settings. Keychain-bound values (API key, upload token) come later (M4/M5).
 public struct Settings {
@@ -45,5 +46,35 @@ public struct Settings {
     public var onboardingComplete: Bool {
         get { d.bool(forKey: "onboardingComplete") }
         set { d.set(newValue, forKey: "onboardingComplete") }
+    }
+
+    public var soundsEnabled: Bool {
+        get { d.object(forKey: "soundsEnabled") as? Bool ?? true }
+        set { d.set(newValue, forKey: "soundsEnabled") }
+    }
+
+    public var autoCloseEnabled: Bool {
+        get { d.bool(forKey: "autoCloseEnabled") }
+        set { d.set(newValue, forKey: "autoCloseEnabled") }
+    }
+
+    /// seconds; 5 / 10 / 15 / 30
+    public var autoCloseInterval: Int {
+        get { d.object(forKey: "autoCloseInterval") as? Int ?? 10 }
+        set { d.set(newValue, forKey: "autoCloseInterval") }
+    }
+
+    /// true = save-and-close, false = close (keep in library)
+    public var autoCloseSaves: Bool {
+        get { d.bool(forKey: "autoCloseSaves") }
+        set { d.set(newValue, forKey: "autoCloseSaves") }
+    }
+}
+
+/// One place that plays UI sounds, honoring the master toggle.
+public enum Sounds {
+    public static func play(_ name: String) {
+        guard Settings.shared.soundsEnabled else { return }
+        NSSound(named: NSSound.Name(name))?.play()
     }
 }
