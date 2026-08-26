@@ -375,7 +375,8 @@ final class CanvasView: NSView, NSTextFieldDelegate {
                     break
                 }
             }
-            draft = Annotation(tool: .crop, points: [p, p], colorHex: colorHex, strokeWidth: strokeWidth)
+            let cp = clampToImage(p)
+            draft = Annotation(tool: .crop, points: [cp, cp], colorHex: colorHex, strokeWidth: strokeWidth)
         default:
             draft = Annotation(tool: tool, points: [p, p],
                                colorHex: tool == .highlight ? highlightHex : colorHex,
@@ -426,22 +427,35 @@ final class CanvasView: NSView, NSTextFieldDelegate {
         return handlePositions(of: layer).firstIndex { hypot($0.x - p.x, $0.y - p.y) < grab }
     }
 
+    private var imageBounds: CGRect {
+        CGRect(x: 0, y: 0, width: CGFloat(image.width), height: CGFloat(image.height))
+    }
+    private func clampToImage(_ p: CGPoint) -> CGPoint {
+        CGPoint(x: min(max(p.x, 0), imageBounds.width), y: min(max(p.y, 0), imageBounds.height))
+    }
+
     override func mouseDragged(with event: NSEvent) {
         let p = toImage(convert(event.locationInWindow, from: nil))
         if var d = draft {
-            if d.tool == .freehand { d.points.append(p) } else { d.points[1] = p }
+            if d.tool == .freehand { d.points.append(p) }
+            else { d.points[1] = d.tool == .crop ? clampToImage(p) : p }
             draft = d
         } else if let sel = selected, let origin = dragOrigin,   // select tool, or crop-tool move/resize
                   let i = layers.firstIndex(where: { $0.id == sel }) {
             switch dragMode {
             case .handle(let h) where layers[i].tool == .crop:
                 commitPreGesture()
-                resizeCrop(&layers[i], handle: h, to: p)
+                resizeCrop(&layers[i], handle: h, to: clampToImage(p))
             case .handle(let h) where h < layers[i].points.count:
                 commitPreGesture()
                 layers[i].points[h] = p
             case .move:
-                let dx = p.x - origin.x, dy = p.y - origin.y
+                var dx = p.x - origin.x, dy = p.y - origin.y
+                if layers[i].tool == .crop {   // the crop rect never leaves the image
+                    let r = layers[i].rect
+                    dx = min(max(dx, -r.minX), imageBounds.width - r.maxX)
+                    dy = min(max(dy, -r.minY), imageBounds.height - r.maxY)
+                }
                 if abs(dx) + abs(dy) > 0 {
                     commitPreGesture()
                     layers[i].points = layers[i].points.map { CGPoint(x: $0.x + dx, y: $0.y + dy) }
