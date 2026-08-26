@@ -28,7 +28,7 @@ Support) · clipboard destination · quick-access overlay (hover chrome keep/cop
 w/ close-after-drag, click-to-key ⌘W/⌘C/⌘S) · two-screen onboarding with relaunch-after-grant ·
 app icon (gpt-image-2 + squircle mask, `scripts/build-icns.sh`) · MIT license · CI.
 
-M0 remaining: shadowing verify-by-fire in onboarding.
+M0: complete (verify-by-fire ships as CompetitorWatch — detects capture apps holding the shortcuts, one-click quit).
 
 ## M1 status (It triages)
 
