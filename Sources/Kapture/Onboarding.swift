@@ -62,10 +62,21 @@ final class Onboarding {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
             NSWorkspace.shared.open(url)
         }
-        // Poll: TCC evaluates at launch, so relaunch once granted (spike-validated behavior).
+        // TCC evaluates per process launch, so the running app's preflight stays stale after the
+        // grant. Poll via a fresh child process (--tcc-check), which reads the current TCC state.
         pollTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { _ in
-            Task { @MainActor in
-                if CGPreflightScreenCaptureAccess() { Onboarding.shared.relaunch() }
+            Task.detached {
+                guard let exe = Bundle.main.executablePath else { return }
+                let p = Process()
+                p.executableURL = URL(fileURLWithPath: exe)
+                p.arguments = ["--tcc-check"]
+                p.standardOutput = FileHandle.nullDevice
+                p.standardError = FileHandle.nullDevice
+                try? p.run()
+                p.waitUntilExit()
+                if p.terminationStatus == 0 {
+                    await MainActor.run { Onboarding.shared.relaunch() }
+                }
             }
         }
     }

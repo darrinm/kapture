@@ -65,6 +65,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func menuLibrary() { NSWorkspace.shared.open(Settings.shared.libraryRoot) }
 }
 
+// TCC helper mode: a fresh process gets a fresh Screen Recording evaluation, unlike the
+// long-running app (TCC evaluates at launch). Onboarding polls this to detect the grant.
+if CommandLine.arguments.contains("--tcc-check") {
+    exit(CGPreflightScreenCaptureAccess() ? 0 : 1)
+}
+
 MainActor.assumeIsolated {
     let app = NSApplication.shared
     let delegate = AppDelegate()
