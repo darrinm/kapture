@@ -7,6 +7,7 @@ import KaptureRecording
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     var statusItem: NSStatusItem!
+    private var statusMenu: NSMenu!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         do {
@@ -51,12 +52,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 button.image = symbol
                 button.imagePosition = .imageLeft
                 button.title = " 0:00"
-                button.toolTip = "Stop recording (⌘⇧5)"
+                button.toolTip = "Click to stop recording (⌘⇧5) · right-click for more"
+                // while recording the item is a stop BUTTON, not a menu opener
+                self?.statusItem.menu = nil
+                button.target = self
+                button.action = #selector(AppDelegate.statusButtonClicked)
+                button.sendAction(on: [.leftMouseUp, .rightMouseUp])
             } else {
                 button.image = NSImage(systemSymbolName: "camera.viewfinder", accessibilityDescription: "Kapture")
                 button.contentTintColor = nil
                 button.title = ""
                 button.toolTip = nil
+                button.target = nil
+                button.action = nil
+                self?.statusItem.menu = self?.statusMenu
             }
         }
         RecordingCoordinator.shared.onTick = { [weak self] elapsed in
@@ -130,12 +139,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         menu.addItem(withTitle: "Settings…", action: #selector(menuSettings), keyEquivalent: ",").target = self
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit Kapture", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        statusMenu = menu
         statusItem.menu = menu
     }
 
     @objc private func menuRecord() { if !RecordingCoordinator.shared.isRecording { RecordingCoordinator.shared.start() } }
     @objc private func menuStopRecording() { RecordingCoordinator.shared.stop() }
     @objc private func menuPauseRecording() { RecordingCoordinator.shared.togglePause() }
+
+    /// While recording, a left click on the status item stops; a right click opens the menu.
+    @objc func statusButtonClicked() {
+        if NSApp.currentEvent?.type == .rightMouseUp {
+            statusItem.menu = statusMenu
+            statusItem.button?.performClick(nil)
+            statusItem.menu = nil       // back to stop-button behavior after the menu closes
+        } else {
+            RecordingCoordinator.shared.stop()
+        }
+    }
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         if item.action == #selector(menuRecord) { return !RecordingCoordinator.shared.isRecording }
         if item.action == #selector(menuStopRecording) { return RecordingCoordinator.shared.isRecording }
