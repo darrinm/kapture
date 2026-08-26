@@ -67,6 +67,8 @@ struct SettingsView: View {
     @AppStorage("autoCloseInterval") private var autoCloseInterval = 10
     @AppStorage("autoCloseSaves") private var autoCloseSaves = false
     @AppStorage("hoverShortcutsEnabled") private var hoverShortcuts = true
+    @AppStorage("recordSystemAudio") private var recordSystemAudio = true
+    @AppStorage("recordMicrophone") private var recordMicrophone = false
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @State private var exportPath = Settings.shared.exportLocation.path
 
@@ -74,6 +76,7 @@ struct SettingsView: View {
         TabView {
             general.tabItem { Label("General", systemImage: "gearshape") }
             overlay.tabItem { Label("Overlay", systemImage: "rectangle.bottomright.filled.and.rectangle") }
+            recording.tabItem { Label("Recording", systemImage: "record.circle") }
         }
         .frame(width: 420)
         .padding(.bottom, 12)
@@ -133,6 +136,18 @@ struct SettingsView: View {
         NSWorkspace.shared.recycle([Bundle.main.bundleURL]) { _, _ in
             DispatchQueue.main.async { NSApp.terminate(nil) }
         }
+    }
+
+    var recording: some View {
+        Form {
+            Toggle("Record system audio", isOn: $recordSystemAudio)
+            Toggle("Record microphone", isOn: $recordMicrophone)
+            Text("Applies to the next recording. The microphone permission is requested the first time a recording starts with it on.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .formStyle(.grouped)
+        .padding(.top, 4)
     }
 
     var overlay: some View {

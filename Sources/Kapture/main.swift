@@ -2,6 +2,7 @@ import AppKit
 import KaptureCore
 import KaptureCapture
 import KaptureEditor
+import KaptureRecording
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
@@ -146,6 +147,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 // long-running app (TCC evaluates at launch). Onboarding polls this to detect the grant.
 if CommandLine.arguments.contains("--tcc-check") {
     exit(CGPreflightScreenCaptureAccess() ? 0 : 1)
+}
+
+// GIF-exporter smoke mode: converts the given movie and prints the result (test harness).
+if let i = CommandLine.arguments.firstIndex(of: "--gif-test"), CommandLine.arguments.count > i + 1 {
+    let path = CommandLine.arguments[i + 1]
+    let sem = DispatchSemaphore(value: 0)
+    Task {
+        do {
+            let r = try await GIFExporter.export(movie: URL(fileURLWithPath: path))
+            let bytes = ((try? FileManager.default.attributesOfItem(atPath: r.url.path)[.size]) as? Int) ?? 0
+            print("gif-ok \(r.url.path) \(r.width)x\(r.height) \(r.duration)s \(bytes) bytes")
+        } catch {
+            print("gif-failed: \(error)")
+        }
+        sem.signal()
+    }
+    sem.wait()
+    exit(0)
 }
 
 MainActor.assumeIsolated {

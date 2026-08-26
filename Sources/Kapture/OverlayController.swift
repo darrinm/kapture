@@ -7,6 +7,7 @@ import Quartz
 import KaptureCore
 import KaptureDesign
 import KaptureEditor
+import KaptureRecording
 
 @MainActor
 final class OverlayController {
@@ -312,6 +313,28 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
         keepAndClose()
     }
 
+    /// Recording → optimized GIF as a NEW library capture (the movie stays untouched).
+    func convertToGIF() {
+        guard record.kind == .recording else { return }
+        markKept()
+        let source = fileURL
+        let app = record.sourceApp
+        fadeOut()
+        Task.detached(priority: .userInitiated) {
+            do {
+                let gif = try await GIFExporter.export(movie: source)
+                guard let library = await OverlayController.shared.library else { return }
+                let (record, _) = try library.storeMovie(
+                    from: gif.url, width: gif.width, height: gif.height,
+                    duration: gif.duration, sourceApp: app, ext: "gif", kind: .gif)
+                await MainActor.run {
+                    Sounds.play("Glass")
+                    OverlayController.shared.showCard(recordID: record.id)
+                }
+            } catch { Log.capture.error("gif export failed: \(error)") }
+        }
+    }
+
     func edit() {
         markKept()
         if record.kind == .recording {
@@ -467,6 +490,9 @@ final class OverlayView: NSView, NSDraggingSource {
         let menu = NSMenu()
         menu.addItem(withTitle: panel.record.kind == .recording ? "Trim…" : "Edit…",
                      action: #selector(editTapped), keyEquivalent: "").target = self
+        if panel.record.kind == .recording {
+            menu.addItem(withTitle: "Convert to GIF", action: #selector(gifTapped), keyEquivalent: "").target = self
+        }
         menu.addItem(withTitle: "Pin to Screen", action: #selector(pinTapped), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Copy", action: #selector(copyTapped), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Save As…", action: #selector(saveAsTapped), keyEquivalent: "").target = self
@@ -476,6 +502,7 @@ final class OverlayView: NSView, NSDraggingSource {
         return menu
     }
     @objc func saveAsTapped() { panel.saveAs() }
+    @objc func gifTapped() { panel.convertToGIF() }
     @objc func revealTapped() {
         panel.markKept()
         NSWorkspace.shared.activateFileViewerSelecting([panel.fileURL])

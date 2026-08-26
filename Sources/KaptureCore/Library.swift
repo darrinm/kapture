@@ -64,11 +64,12 @@ public final class Library: @unchecked Sendable {
     /// Store a finished recording: journaled move from its temp location into the shard,
     /// minimal sidecar, DB row (staged). Same durability contract as storePNG.
     public func storeMovie(from tempURL: URL, width: Int, height: Int, duration: Double,
-                           sourceApp: String?) throws -> (CaptureRecord, URL) {
+                           sourceApp: String?, ext: String = "mp4",
+                           kind: CaptureKind = .recording) throws -> (CaptureRecord, URL) {
         let now = Date()
         let dir = try shardDir(for: now)
         let url = Library.uniqueURL(in: dir, base: "recording \(Library.timestampFormatter.string(from: now))",
-                                    ext: "mp4")
+                                    ext: ext)
         let id = ULID.generate(now: now)
         let relPath = rel(url)
         let bytes = ((try? FileManager.default.attributesOfItem(atPath: tempURL.path)[.size]) as? Int) ?? 0
@@ -78,7 +79,7 @@ public final class Library: @unchecked Sendable {
             fileOp: {
                 try FileManager.default.moveItem(at: tempURL, to: url)
                 try Sidecar(id: id, created: now, app: sourceApp, window: nil).write(next: url)
-                var r = CaptureRecord(id: id, kind: .recording, createdAt: now,
+                var r = CaptureRecord(id: id, kind: kind, createdAt: now,
                                       width: width, height: height, bytes: bytes, relPath: relPath,
                                       sourceApp: sourceApp, windowTitle: nil, screenID: nil,
                                       fastID: Library.fastID(of: url))
