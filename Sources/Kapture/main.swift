@@ -14,6 +14,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             CaptureCoordinator.shared.library = library
             OverlayController.shared.library = library
             EditorController.shared.library = library
+            TrimmerController.shared.library = library
             EditorController.shared.onFlattened = { id in
                 OverlayController.shared.showCard(recordID: id)
             }

@@ -313,9 +313,12 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
     }
 
     func edit() {
-        guard record.kind == .screenshot else { quickLook(); return }   // editor is stills-only until the trimmer lands
         markKept()
-        EditorController.shared.open(recordID: record.id)
+        if record.kind == .recording {
+            TrimmerController.shared.open(recordID: record.id)
+        } else {
+            EditorController.shared.open(recordID: record.id)
+        }
         fadeOut()
     }
 
@@ -462,7 +465,8 @@ final class OverlayView: NSView, NSDraggingSource {
     // MARK: right-click
     override func menu(for event: NSEvent) -> NSMenu? {
         let menu = NSMenu()
-        menu.addItem(withTitle: "Edit…", action: #selector(editTapped), keyEquivalent: "").target = self
+        menu.addItem(withTitle: panel.record.kind == .recording ? "Trim…" : "Edit…",
+                     action: #selector(editTapped), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Pin to Screen", action: #selector(pinTapped), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Copy", action: #selector(copyTapped), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Save As…", action: #selector(saveAsTapped), keyEquivalent: "").target = self

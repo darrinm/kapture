@@ -120,6 +120,34 @@ public final class Library: @unchecked Sendable {
         }
     }
 
+    /// Apply a trim to a recording: first trim preserves the pristine movie in .originals/,
+    /// the trimmed file replaces rel_path, identity/duration refresh, shares go stale.
+    public func applyTrim(_ id: String, trimmedURL: URL, duration: Double) throws {
+        guard let record = try db.queue.read({ try CaptureRecord.fetchOne($0, key: id) }) else { return }
+        let fm = FileManager.default
+        let fileURL = root.appendingPathComponent(record.relPath)
+        let originalRel = ".originals/" + record.relPath
+        let originalURL = root.appendingPathComponent(originalRel)
+        let bytes = ((try? fm.attributesOfItem(atPath: trimmedURL.path)[.size]) as? Int) ?? record.bytes
+
+        _ = try OpJournal.run(db, op: "trim", captureId: id, src: record.relPath, dst: record.relPath,
+            fileOp: {
+                if !fm.fileExists(atPath: originalURL.path) {
+                    try fm.createDirectory(at: originalURL.deletingLastPathComponent(),
+                                           withIntermediateDirectories: true)
+                    try fm.copyItem(at: fileURL, to: originalURL)
+                }
+                _ = try fm.replaceItemAt(fileURL, withItemAt: trimmedURL)
+            },
+            stateUpdate: { d, _ in
+                try d.execute(sql: """
+                    UPDATE captures SET bytes = ?, durationS = ?, fastID = ?, contentHash = NULL,
+                        shareStale = (shareURL IS NOT NULL) WHERE id = ?
+                    """, arguments: [bytes, duration, Library.fastID(of: fileURL), id])
+            })
+        Log.store.info("trimmed \(record.relPath, privacy: .public) to \(Int(duration))s")
+    }
+
     // MARK: - Edits (spec §2.3: originals + flatten)
 
     /// First edit moves the pristine pixels to .originals/; every flatten rewrites rel_path,
