@@ -30,6 +30,7 @@ public struct CaptureRecord: Codable, Sendable, FetchableRecord, PersistableReco
     public var summary: String?
     public var shareURL: String?
     public var shareStale: Bool
+    public var durationS: Double?   // recordings
 
     public init(id: String = ULID.generate(), kind: CaptureKind, status: CaptureStatus = .staged,
                 createdAt: Date = Date(), width: Int, height: Int, bytes: Int, relPath: String,
@@ -40,6 +41,7 @@ public struct CaptureRecord: Codable, Sendable, FetchableRecord, PersistableReco
         self.relPath = relPath; self.sourceApp = sourceApp; self.windowTitle = windowTitle
         self.screenID = screenID; self.fastID = fastID; self.contentHash = nil
         self.aiState = "none"; self.summary = nil; self.shareURL = nil; self.shareStale = false
+        self.durationS = nil
     }
 }
 

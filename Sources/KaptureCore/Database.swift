@@ -52,6 +52,11 @@ public final class Database: Sendable {
                 t.column("lastError", .text)
             }
         }
+        migrator.registerMigration("v2-recording-duration") { db in
+            try db.alter(table: "captures") { t in
+                t.add(column: "durationS", .double)
+            }
+        }
         try migrator.migrate(queue)
     }
 }

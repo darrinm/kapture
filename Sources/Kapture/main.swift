@@ -4,7 +4,7 @@ import KaptureCapture
 import KaptureEditor
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     var statusItem: NSStatusItem!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -34,8 +34,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case .fullscreen: CaptureCoordinator.shared.captureFullscreen()
             case .previousArea: CaptureCoordinator.shared.capturePreviousArea()
             case .pinClipboard: PinController.shared.pinFromClipboard()
-            case .record: break   // M3
+            case .record: RecordingCoordinator.shared.toggle()
             }
+        }
+        RecordingCoordinator.shared.library = CaptureCoordinator.shared.library
+        RecordingCoordinator.shared.onStateChanged = { [weak self] recording in
+            guard let button = self?.statusItem.button else { return }
+            if recording {
+                button.image = NSImage(systemSymbolName: "record.circle.fill", accessibilityDescription: "Recording")
+                button.contentTintColor = NSColor(srgbRed: 0.78, green: 0.26, blue: 0.23, alpha: 1)
+            } else {
+                button.image = NSImage(systemSymbolName: "camera.viewfinder", accessibilityDescription: "Kapture")
+                button.contentTintColor = nil
+                button.title = ""
+            }
+        }
+        RecordingCoordinator.shared.onTick = { [weak self] elapsed in
+            guard let button = self?.statusItem.button else { return }
+            button.title = " " + elapsed
+            button.imagePosition = .imageLeft
         }
         HotkeyCenter.shared.install()
         EventTapCenter.shared.startIfPossible()   // silent no-op without the Accessibility grant
@@ -68,6 +85,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(item("Capture Fullscreen", #selector(menuFullscreen), hotkey: .fullscreen))
         menu.addItem(item("Capture All Displays", #selector(menuAllDisplays)))
         menu.addItem(item("Capture Previous Area", #selector(menuPreviousArea), hotkey: .previousArea))
+        menu.addItem(.separator())
+        menu.addItem(item("Record Area or Window", #selector(menuRecord), hotkey: .record))
+        menu.addItem(item("Stop Recording", #selector(menuStopRecording), hotkey: .record))
         let timerMenu = NSMenu()
         for s in [3, 5, 10] {
             let item = NSMenuItem(title: "Capture Area in \(s)s", action: #selector(menuTimer(_:)), keyEquivalent: "")
@@ -90,6 +110,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit Kapture", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         statusItem.menu = menu
+    }
+
+    @objc private func menuRecord() { if !RecordingCoordinator.shared.isRecording { RecordingCoordinator.shared.start() } }
+    @objc private func menuStopRecording() { RecordingCoordinator.shared.stop() }
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        if item.action == #selector(menuRecord) { return !RecordingCoordinator.shared.isRecording }
+        if item.action == #selector(menuStopRecording) { return RecordingCoordinator.shared.isRecording }
+        return true
     }
 
     @objc private func menuPinClipboard() { PinController.shared.pinFromClipboard() }

@@ -63,7 +63,7 @@ public enum ScreenshotService {
 
     /// Scale of the display the CG-global (top-left origin) rect mostly sits on —
     /// mixed-DPI correctness for window captures, where NSScreen.main may be a different display.
-    static func displayScale(forCGGlobal r: CGRect) -> CGFloat {
+    public static func displayScale(forCGGlobal r: CGRect) -> CGFloat {
         let ns = nsRect(cgGlobal: r)
         let best = NSScreen.screens.max { a, b in
             overlapArea(a.frame, ns) < overlapArea(b.frame, ns)

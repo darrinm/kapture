@@ -71,6 +71,16 @@ public struct Settings {
         set { d.set(newValue, forKey: "autoCloseSaves") }
     }
 
+    public var recordSystemAudio: Bool {
+        get { d.object(forKey: "recordSystemAudio") as? Bool ?? true }
+        set { d.set(newValue, forKey: "recordSystemAudio") }
+    }
+
+    public var recordMicrophone: Bool {
+        get { d.bool(forKey: "recordMicrophone") }
+        set { d.set(newValue, forKey: "recordMicrophone") }
+    }
+
     /// Route ⌘W/⌘C/⌘S/⌘⌫/space to the hovered overlay without clicking (needs Accessibility).
     public var hoverShortcutsEnabled: Bool {
         get { d.object(forKey: "hoverShortcutsEnabled") as? Bool ?? true }

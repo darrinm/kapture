@@ -313,6 +313,7 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
     }
 
     func edit() {
+        guard record.kind == .screenshot else { quickLook(); return }   // editor is stills-only until the trimmer lands
         markKept()
         EditorController.shared.open(recordID: record.id)
         fadeOut()
@@ -521,6 +522,19 @@ final class OverlayView: NSView, NSDraggingSource {
             ctx.setFillColor(Tokens.overlayScrim.cgColor)
             ctx.fill(CGRect(x: 0, y: bounds.height - 32, width: bounds.width, height: 32))
             ctx.fill(CGRect(x: 0, y: 0, width: bounds.width, height: 32))
+        }
+        if let seconds = panel.record.durationS, !hovering {
+            let s = Int(seconds.rounded())
+            let label = String(format: "▸ %d:%02d", s / 60, s % 60) as NSString
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .semibold),
+                .foregroundColor: NSColor.white,
+            ]
+            let size = label.size(withAttributes: attrs)
+            let pill = CGRect(x: 6, y: 6, width: size.width + 12, height: size.height + 6)
+            NSColor.black.withAlphaComponent(0.62).setFill()
+            NSBezierPath(roundedRect: pill, xRadius: pill.height / 2, yRadius: pill.height / 2).fill()
+            label.draw(at: CGPoint(x: pill.minX + 6, y: pill.minY + 3), withAttributes: attrs)
         }
     }
 }

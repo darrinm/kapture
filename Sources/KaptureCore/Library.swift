@@ -61,6 +61,35 @@ public final class Library: @unchecked Sendable {
         return "\(size):\(Int(mtime * 1000)):\(inode)"
     }
 
+    /// Store a finished recording: journaled move from its temp location into the shard,
+    /// minimal sidecar, DB row (staged). Same durability contract as storePNG.
+    public func storeMovie(from tempURL: URL, width: Int, height: Int, duration: Double,
+                           sourceApp: String?) throws -> (CaptureRecord, URL) {
+        let now = Date()
+        let dir = try shardDir(for: now)
+        let url = Library.uniqueURL(in: dir, base: "recording \(Library.timestampFormatter.string(from: now))",
+                                    ext: "mp4")
+        let id = ULID.generate(now: now)
+        let relPath = rel(url)
+        let bytes = ((try? FileManager.default.attributesOfItem(atPath: tempURL.path)[.size]) as? Int) ?? 0
+
+        let record: CaptureRecord = try OpJournal.run(
+            db, op: "write", captureId: id, src: nil, dst: relPath,
+            fileOp: {
+                try FileManager.default.moveItem(at: tempURL, to: url)
+                try Sidecar(id: id, created: now, app: sourceApp, window: nil).write(next: url)
+                var r = CaptureRecord(id: id, kind: .recording, createdAt: now,
+                                      width: width, height: height, bytes: bytes, relPath: relPath,
+                                      sourceApp: sourceApp, windowTitle: nil, screenID: nil,
+                                      fastID: Library.fastID(of: url))
+                r.durationS = duration
+                return r
+            },
+            stateUpdate: { d, record in try record.insert(d) })
+        Log.store.info("stored \(relPath, privacy: .public) (\(Int(duration))s recording)")
+        return (record, url)
+    }
+
     /// Store PNG data: journal → write file + sidecar → DB insert (staged). Returns the record + URL.
     public func storePNG(_ data: Data, width: Int, height: Int,
                          sourceApp: String?, windowTitle: String?, screenID: Int?) throws -> (CaptureRecord, URL) {
