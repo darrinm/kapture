@@ -93,6 +93,9 @@ final class EditorViewController: NSViewController {
     private var railButtons: [NSButton] = []
     private var widthLabel: NSTextField!
     private var widthSlider: NSSlider!
+    private var sizeLabel: NSTextField!
+    private var sizeSlider: NSSlider!
+    private var fillCheck: NSButton!
 
     /// Programmatic tool switch (e.g. after applying a crop): canvas, rail radio, and bars agree.
     private func selectTool(_ tool: Tool) {
@@ -151,6 +154,7 @@ final class EditorViewController: NSViewController {
             railButtons.append(b)
         }
         canvas.onCropApplied = { [weak self] in self?.selectTool(.select) }
+        canvas.onSelectionChanged = { [weak self] in self?.updateOptionsBar() }
 
         let options = NSStackView()
         options.orientation = .horizontal
@@ -179,6 +183,18 @@ final class EditorViewController: NSViewController {
         widthLabel = NSTextField(labelWithString: "Width")
         options.addArrangedSubview(widthLabel)
         options.addArrangedSubview(widthSlider)
+
+        sizeSlider = NSSlider(value: Double(canvas.textSize), minValue: 18, maxValue: 120,
+                              target: self, action: #selector(sizeChanged(_:)))
+        sizeSlider.translatesAutoresizingMaskIntoConstraints = false
+        sizeSlider.widthAnchor.constraint(equalToConstant: 120).isActive = true
+        sizeLabel = NSTextField(labelWithString: "Size")
+        options.addArrangedSubview(sizeLabel)
+        options.addArrangedSubview(sizeSlider)
+
+        fillCheck = NSButton(checkboxWithTitle: "Fill", target: self, action: #selector(fillTapped(_:)))
+        options.addArrangedSubview(fillCheck)
+
         options.addArrangedSubview(NSView())
         updateOptionsBar()
 
@@ -236,19 +252,53 @@ final class EditorViewController: NSViewController {
         }
         updateColorSelection()
     }
-    /// The bottom row shows only what the selected tool can use: color for anything painted,
-    /// width for stroked/sized marks — nothing for crop (it has its own on-canvas affordance).
+    /// The bottom row shows only what the effective tool can use: the active tool, or — in
+    /// select mode — the selected layer's tool, with values synced to that layer. Color for
+    /// anything painted; width for stroked marks ("Size" for counters); text size for text;
+    /// fill for rect/ellipse; nothing for crop (it has its on-canvas chips).
     private func updateOptionsBar() {
-        let tool = canvas.tool
-        let showColor = tool != .crop
-        let showWidth: Bool
-        switch tool {
-        case .crop, .highlight, .text: showWidth = false
-        default: showWidth = true
+        let selectedLayer = canvas.tool == .select ? canvas.selectedLayer : nil
+        let effective = selectedLayer?.tool ?? canvas.tool
+
+        var showColor = true, showWidth = false, showSize = false, showFill = false
+        var widthTitle = "Width"
+        switch effective {
+        case .crop: showColor = false
+        case .highlight: break
+        case .text: showSize = true
+        case .counter: showWidth = true; widthTitle = "Size"
+        case .rect, .ellipse: showWidth = true; showFill = true
+        case .select, .arrow, .line, .freehand: showWidth = true
         }
         colorButtons.forEach { $0.isHidden = !showColor }
         widthLabel.isHidden = !showWidth
         widthSlider.isHidden = !showWidth
+        widthLabel.stringValue = widthTitle
+        sizeLabel.isHidden = !showSize
+        sizeSlider.isHidden = !showSize
+        fillCheck.isHidden = !showFill
+
+        // sync control values to the selected layer (or the tool defaults)
+        if let layer = selectedLayer {
+            widthSlider.doubleValue = Double(layer.strokeWidth)
+            sizeSlider.doubleValue = Double(layer.fontSize ?? Annotation.defaultFontSize)
+            fillCheck.state = layer.filled == true ? .on : .off
+        } else {
+            widthSlider.doubleValue = Double(canvas.strokeWidth)
+            sizeSlider.doubleValue = Double(canvas.textSize)
+            fillCheck.state = canvas.fillShapes ? .on : .off
+        }
+    }
+
+    @objc private func sizeChanged(_ sender: NSSlider) {
+        let v = CGFloat(sender.doubleValue)
+        if !canvas.resizeTextSelected(v, recordUndo: !sliderGestureActive) { canvas.textSize = v }
+        sliderGestureActive = NSApp.currentEvent?.type != .leftMouseUp
+    }
+
+    @objc private func fillTapped(_ sender: NSButton) {
+        let on = sender.state == .on
+        if !canvas.refillSelected(on) { canvas.fillShapes = on }
     }
 
     private func updateColorSelection() {
@@ -295,6 +345,13 @@ final class CanvasView: NSView, NSTextFieldDelegate {
     var colorHex = "#C7423A"
     var highlightHex = "#FFE83D"   // highlighter keeps its own color; classic yellow default
     var strokeWidth: CGFloat = 6
+    var textSize: CGFloat = Annotation.defaultFontSize
+    var fillShapes = false
+    var onSelectionChanged: (() -> Void)?
+    var selectedLayer: Annotation? {
+        guard let sel = selected else { return nil }
+        return layers.first(where: { $0.id == sel })
+    }
     private enum DragMode { case none, move, handle(Int) }
     private var dragMode: DragMode = .none
     private var draft: Annotation?
@@ -350,6 +407,36 @@ final class CanvasView: NSView, NSTextFieldDelegate {
     func selectMostRecent() {
         selected = layers.last(where: { !($0.tool == .crop && $0.applied == true) })?.id
         needsDisplay = true
+        onSelectionChanged?()
+    }
+
+    /// Toggle fill on the selected rect/ellipse (undoable). Returns false if none applies.
+    @discardableResult
+    func refillSelected(_ filled: Bool) -> Bool {
+        guard let sel = selected, let i = layers.firstIndex(where: { $0.id == sel }),
+              layers[i].tool == .rect || layers[i].tool == .ellipse else { return false }
+        pushUndo()
+        layers[i].filled = filled
+        needsDisplay = true
+        return true
+    }
+
+    /// Change the selected text layer's size; one undo entry per slider gesture.
+    @discardableResult
+    func resizeTextSelected(_ size: CGFloat, recordUndo: Bool) -> Bool {
+        textSize = size
+        if let field = textField {   // live entry follows the slider
+            pendingFontSize = size
+            let scale = imageRect.width / viewport.width
+            field.font = .systemFont(ofSize: max(11, size * scale), weight: .semibold)
+            return true
+        }
+        guard let sel = selected, let i = layers.firstIndex(where: { $0.id == sel }),
+              layers[i].tool == .text else { return false }
+        if recordUndo { pushUndo() }
+        layers[i].fontSize = size
+        needsDisplay = true
+        return true
     }
 
     // MARK: crop apply/remove — in-editor, undoable (the flag lives in the layer stack)
@@ -425,6 +512,7 @@ final class CanvasView: NSView, NSTextFieldDelegate {
             preGesture = selected != nil ? layers : nil   // snapshot; pushed only on actual move
             dragMode = .move
             dragOrigin = p
+            onSelectionChanged?()
         case .text:
             beginText(atImagePoint: p, viewPoint: convert(event.locationInWindow, from: nil))
         case .counter:
@@ -454,9 +542,11 @@ final class CanvasView: NSView, NSTextFieldDelegate {
             let cp = clampToImage(p)
             draft = Annotation(tool: .crop, points: [cp, cp], colorHex: colorHex, strokeWidth: strokeWidth)
         default:
-            draft = Annotation(tool: tool, points: [p, p],
+            var d = Annotation(tool: tool, points: [p, p],
                                colorHex: tool == .highlight ? highlightHex : colorHex,
                                strokeWidth: strokeWidth)
+            if tool == .rect || tool == .ellipse { d.filled = fillShapes }
+            draft = d
         }
         needsDisplay = true
     }
@@ -571,6 +661,7 @@ final class CanvasView: NSView, NSTextFieldDelegate {
             layers.removeAll { $0.id == sel }
             selected = nil
             needsDisplay = true
+            onSelectionChanged?()
         } else if event.modifierFlags.contains(.command),
                   event.charactersIgnoringModifiers == "z" {
             undo()
@@ -595,6 +686,7 @@ final class CanvasView: NSView, NSTextFieldDelegate {
         layers = prev
         selected = nil
         needsDisplay = true
+        onSelectionChanged?()
     }
 
     // MARK: text tool
@@ -620,7 +712,7 @@ final class CanvasView: NSView, NSTextFieldDelegate {
 
     private func beginText(atImagePoint p: CGPoint, viewPoint: CGPoint, initialText: String = "") {
         let scale = imageRect.width / viewport.width
-        if initialText.isEmpty { pendingFontSize = Annotation.defaultFontSize }
+        if initialText.isEmpty { pendingFontSize = textSize }
         let fontSize = max(11, pendingFontSize * scale)
         let height = ceil(fontSize * 1.4)
         // rendered text's top-left lands at the click point; align the field to match

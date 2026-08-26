@@ -30,12 +30,14 @@ public struct Annotation: Codable, Identifiable {
     public var number: Int?           // counter
     public var fontSize: CGFloat?     // text, image-space
     public var applied: Bool?         // crop: true once applied in-editor (canvas re-bases to its rect)
+    public var filled: Bool?          // rect/ellipse: solid fill instead of outline
 
     public init(tool: Tool, points: [CGPoint], colorHex: String, strokeWidth: CGFloat,
                 text: String? = nil, number: Int? = nil, fontSize: CGFloat? = nil) {
         self.id = UUID(); self.tool = tool; self.points = points; self.colorHex = colorHex
         self.strokeWidth = strokeWidth; self.text = text; self.number = number; self.fontSize = fontSize
         self.applied = nil
+        self.filled = nil
     }
 
     public var color: NSColor { NSColor(hex: colorHex) }
@@ -89,9 +91,11 @@ public struct Annotation: Codable, Identifiable {
             guard points.count >= 2 else { break }
             drawArrow(ctx, from: points[0], to: points[1])
         case .rect:
-            ctx.stroke(rect.insetBy(dx: strokeWidth / 2, dy: strokeWidth / 2))
+            if filled == true { ctx.fill(rect) }
+            else { ctx.stroke(rect.insetBy(dx: strokeWidth / 2, dy: strokeWidth / 2)) }
         case .ellipse:
-            ctx.strokeEllipse(in: rect.insetBy(dx: strokeWidth / 2, dy: strokeWidth / 2))
+            if filled == true { ctx.fillEllipse(in: rect) }
+            else { ctx.strokeEllipse(in: rect.insetBy(dx: strokeWidth / 2, dy: strokeWidth / 2)) }
         case .freehand:
             guard points.count > 1 else { break }
             ctx.move(to: points[0])
@@ -176,7 +180,7 @@ public struct Annotation: Codable, Identifiable {
             return distanceToSegment(p, points[0], points[1]) < pad
         default:
             return rect.insetBy(dx: -pad, dy: -pad).contains(p) && !rect.insetBy(dx: pad, dy: pad).contains(p)
-                || (tool == .highlight || tool == .crop) && rect.contains(p)
+                || (tool == .highlight || tool == .crop || filled == true) && rect.contains(p)
         }
     }
 
