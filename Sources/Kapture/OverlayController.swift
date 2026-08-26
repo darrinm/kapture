@@ -67,6 +67,17 @@ final class OverlayController {
         })
     }
 
+    /// Re-show a capture as a card (e.g. returning from the editor with fresh pixels).
+    func showCard(recordID: String) {
+        guard let library,
+              let record = try? library.db.queue.read({ try CaptureRecord.fetchOne($0, key: recordID) }),
+              record.status != .trashed else { return }
+        let url = library.root.appendingPathComponent(record.relPath)
+        guard let image = NSImage(contentsOf: url)?
+            .cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
+        show(record: record, fileURL: url, image: image)
+    }
+
     func hideAll() {
         for panel in panels { Tokens.animate(0.2) { panel.animator().alphaValue = 0 } }
         collapseChip?.orderOut(nil)

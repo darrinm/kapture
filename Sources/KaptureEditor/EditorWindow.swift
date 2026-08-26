@@ -9,6 +9,8 @@ public final class EditorController {
     public static let shared = EditorController()
     private var windows: [String: NSWindow] = [:]   // capture id → window
     public var library: Library?
+    /// Called after Done flattens — the shell reopens the capture as an overlay card.
+    public var onFlattened: ((String) -> Void)?
 
     public func open(recordID: String) {
         guard let library,
@@ -20,8 +22,9 @@ public final class EditorController {
               let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
 
         let editor = EditorViewController(baseImage: cg,
-                                          layers: layersJSON.map(AnnotationCodec.decode) ?? []) { [weak self] layers in
+                                          layers: layersJSON.map(AnnotationCodec.decode) ?? []) { [weak self] layers, done in
             self?.save(recordID: recordID, base: cg, layers: layers)
+            if done { self?.onFlattened?(recordID) }
         }
         let window = NSWindow(contentViewController: editor)
         window.title = (record.relPath as NSString).lastPathComponent
@@ -60,11 +63,12 @@ public final class EditorController {
 @MainActor
 final class EditorViewController: NSViewController {
     let baseImage: CGImage
-    let onDone: ([Annotation]) -> Void
+    let onDone: ([Annotation], _ dismissing: Bool) -> Void
     let canvas: CanvasView
     var idealSize: NSSize
+    private var colorButtons: [NSButton] = []
 
-    init(baseImage: CGImage, layers: [Annotation], onDone: @escaping ([Annotation]) -> Void) {
+    init(baseImage: CGImage, layers: [Annotation], onDone: @escaping ([Annotation], Bool) -> Void) {
         self.baseImage = baseImage
         self.onDone = onDone
         self.canvas = CanvasView(image: baseImage, layers: layers)
@@ -128,7 +132,9 @@ final class EditorViewController: NSViewController {
             NSLayoutConstraint.activate([b.widthAnchor.constraint(equalToConstant: 18),
                                          b.heightAnchor.constraint(equalToConstant: 18)])
             options.addArrangedSubview(b)
+            colorButtons.append(b)
         }
+        updateColorSelection()
         let widthSlider = NSSlider(value: Double(canvas.strokeWidth), minValue: 2, maxValue: 24,
                                    target: self, action: #selector(widthChanged(_:)))
         widthSlider.translatesAutoresizingMaskIntoConstraints = false
@@ -170,6 +176,7 @@ final class EditorViewController: NSViewController {
     @objc private func toolTapped(_ sender: NSButton) {
         guard let raw = sender.identifier?.rawValue, let tool = Tool(rawValue: raw) else { return }
         canvas.tool = tool
+        updateColorSelection()
         // radio behavior
         var v: NSView? = sender.superview
         while v != nil, !(v is NSStackView) { v = v?.superview }
@@ -177,13 +184,22 @@ final class EditorViewController: NSViewController {
             .forEach { $0.state = $0 === sender ? .on : .off }
     }
     @objc private func colorTapped(_ sender: NSButton) {
-        if let hex = sender.identifier?.rawValue { canvas.colorHex = hex }
+        guard let hex = sender.identifier?.rawValue else { return }
+        if canvas.tool == .highlight { canvas.highlightHex = hex } else { canvas.colorHex = hex }
+        updateColorSelection()
+    }
+    private func updateColorSelection() {
+        let active = canvas.tool == .highlight ? canvas.highlightHex : canvas.colorHex
+        for b in colorButtons {
+            let isActive = b.identifier?.rawValue == active
+            b.layer?.borderWidth = isActive ? 2.5 : (b.identifier?.rawValue == "#FFFFFF" ? 1 : 0)
+            b.layer?.borderColor = isActive ? NSColor.controlAccentColor.cgColor : NSColor.separatorColor.cgColor
+        }
     }
     @objc private func widthChanged(_ sender: NSSlider) { canvas.strokeWidth = CGFloat(sender.doubleValue) }
     @objc private func copyTapped() {
         canvas.commitPendingText()
-        onDone(canvas.layers)   // flatten + persist, then copy the flattened file
-        // copy current composite to clipboard
+        onDone(canvas.layers, false)   // flatten + persist without dismissing
         if let img = canvas.compositeImage() {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.writeObjects([img])
@@ -191,7 +207,7 @@ final class EditorViewController: NSViewController {
     }
     @objc private func doneTapped() {
         canvas.commitPendingText()
-        onDone(canvas.layers)
+        onDone(canvas.layers, true)
         view.window?.close()
     }
 }
@@ -202,7 +218,10 @@ final class CanvasView: NSView, NSTextFieldDelegate {
     var layers: [Annotation]
     var tool: Tool = .arrow
     var colorHex = "#C7423A"
+    var highlightHex = "#FFE83D"   // highlighter keeps its own color; classic yellow default
     var strokeWidth: CGFloat = 6
+    private enum DragMode { case none, move, handle(Int) }
+    private var dragMode: DragMode = .none
     private var draft: Annotation?
     private var selected: UUID?
     private var dragOrigin: CGPoint?
@@ -252,8 +271,17 @@ final class CanvasView: NSView, NSTextFieldDelegate {
         let p = toImage(convert(event.locationInWindow, from: nil))
         switch tool {
         case .select:
+            // a handle on the already-selected layer wins over re-selection
+            if let sel = selected, let layer = layers.first(where: { $0.id == sel }),
+               let h = handleIndex(of: layer, at: p) {
+                pushUndo()
+                dragMode = .handle(h)
+                dragOrigin = p
+                break
+            }
             selected = layers.last(where: { $0.hitTest(p) })?.id
             if selected != nil { pushUndo() }   // snapshot before a potential move
+            dragMode = .move
             dragOrigin = p
         case .text:
             beginText(atImagePoint: p, viewPoint: convert(event.locationInWindow, from: nil))
@@ -263,9 +291,25 @@ final class CanvasView: NSView, NSTextFieldDelegate {
             layers.append(Annotation(tool: .counter, points: [p], colorHex: colorHex,
                                      strokeWidth: strokeWidth, number: next))
         default:
-            draft = Annotation(tool: tool, points: [p, p], colorHex: colorHex, strokeWidth: strokeWidth)
+            draft = Annotation(tool: tool, points: [p, p],
+                               colorHex: tool == .highlight ? highlightHex : colorHex,
+                               strokeWidth: strokeWidth)
         }
         needsDisplay = true
+    }
+
+    /// endpoints/corners of the selected shape a drag can grab (image-space)
+    private func handlePositions(of layer: Annotation) -> [CGPoint] {
+        switch layer.tool {
+        case .arrow, .line, .rect, .ellipse, .highlight:
+            return layer.points.count >= 2 ? [layer.points[0], layer.points[1]] : []
+        default:
+            return []
+        }
+    }
+    private func handleIndex(of layer: Annotation, at p: CGPoint) -> Int? {
+        let grab = 10 * CGFloat(image.width) / imageRect.width
+        return handlePositions(of: layer).firstIndex { hypot($0.x - p.x, $0.y - p.y) < grab }
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -273,11 +317,18 @@ final class CanvasView: NSView, NSTextFieldDelegate {
         if var d = draft {
             if d.tool == .freehand { d.points.append(p) } else { d.points[1] = p }
             draft = d
-        } else if tool == .select, let sel = selected, let origin = dragOrigin {
-            let dx = p.x - origin.x, dy = p.y - origin.y
-            if let i = layers.firstIndex(where: { $0.id == sel }), abs(dx) + abs(dy) > 0 {
-                layers[i].points = layers[i].points.map { CGPoint(x: $0.x + dx, y: $0.y + dy) }
-                dragOrigin = p
+        } else if tool == .select, let sel = selected, let origin = dragOrigin,
+                  let i = layers.firstIndex(where: { $0.id == sel }) {
+            switch dragMode {
+            case .handle(let h) where h < layers[i].points.count:
+                layers[i].points[h] = p
+            case .move:
+                let dx = p.x - origin.x, dy = p.y - origin.y
+                if abs(dx) + abs(dy) > 0 {
+                    layers[i].points = layers[i].points.map { CGPoint(x: $0.x + dx, y: $0.y + dy) }
+                    dragOrigin = p
+                }
+            default: break
             }
         }
         needsDisplay = true
@@ -293,6 +344,7 @@ final class CanvasView: NSView, NSTextFieldDelegate {
             draft = nil
         }
         dragOrigin = nil
+        dragMode = .none
         needsDisplay = true
     }
 
@@ -324,17 +376,36 @@ final class CanvasView: NSView, NSTextFieldDelegate {
     // MARK: text tool
     private func beginText(atImagePoint p: CGPoint, viewPoint: CGPoint) {
         let scale = imageRect.width / CGFloat(image.width)
-        let field = NSTextField(frame: NSRect(x: viewPoint.x, y: viewPoint.y - 24, width: 240, height: 28))
-        field.font = .systemFont(ofSize: max(12, 48 * scale), weight: .semibold)
+        let fontSize = max(11, 48 * scale)
+        let height = ceil(fontSize * 1.4)
+        // rendered text's top-left lands at the click point; align the field to match
+        let field = NSTextField(frame: NSRect(x: viewPoint.x - 2, y: viewPoint.y - height,
+                                              width: max(180, imageRect.maxX - viewPoint.x), height: height))
+        field.font = .systemFont(ofSize: fontSize, weight: .semibold)
         field.textColor = Annotation(tool: .text, points: [], colorHex: colorHex, strokeWidth: 1).color
-        field.backgroundColor = .clear
-        field.isBordered = true
+        field.drawsBackground = false
+        field.isBezeled = false
+        field.isBordered = false
         field.focusRingType = .none
+        field.placeholderString = "Text"
         field.delegate = self
         addSubview(field)
         window?.makeFirstResponder(field)
         textField = field
         pendingTextPos = p
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        if selector == #selector(NSResponder.cancelOperation(_:)) {   // esc discards
+            textField?.stringValue = ""
+            commitPendingText()
+            return true
+        }
+        if selector == #selector(NSResponder.insertNewline(_:)) {     // return commits
+            commitPendingText()
+            return true
+        }
+        return false
     }
 
     func commitPendingText() {
@@ -371,10 +442,22 @@ final class CanvasView: NSView, NSTextFieldDelegate {
         for l in layers { l.draw(in: ctx) }
         if let d = draft { d.draw(in: ctx) }
         if let sel = selected, let l = layers.first(where: { $0.id == sel }) {
+            let px = CGFloat(image.width) / r.width   // 1 view point in image units
             ctx.setStrokeColor(Tokens.accent.cgColor)
-            ctx.setLineWidth(2 * CGFloat(image.width) / r.width)
-            ctx.setLineDash(phase: 0, lengths: [6 * CGFloat(image.width) / r.width])
+            ctx.setLineWidth(2 * px)
+            ctx.setLineDash(phase: 0, lengths: [6 * px])
             ctx.stroke(boundsOf(l).insetBy(dx: -10, dy: -10))
+            ctx.setLineDash(phase: 0, lengths: [])
+            // control-point handles
+            for h in handlePositions(of: l) {
+                let hr = 6 * px
+                let rect = CGRect(x: h.x - hr, y: h.y - hr, width: hr * 2, height: hr * 2)
+                ctx.setFillColor(NSColor.white.cgColor)
+                ctx.fillEllipse(in: rect)
+                ctx.setStrokeColor(Tokens.accent.cgColor)
+                ctx.setLineWidth(1.5 * px)
+                ctx.strokeEllipse(in: rect)
+            }
         }
         ctx.restoreGState()
     }

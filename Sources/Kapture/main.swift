@@ -14,6 +14,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             CaptureCoordinator.shared.library = library
             OverlayController.shared.library = library
             EditorController.shared.library = library
+            EditorController.shared.onFlattened = { id in
+                OverlayController.shared.showCard(recordID: id)
+            }
         } catch {
             Log.shell.error("store init failed: \(error)")
         }
