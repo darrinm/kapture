@@ -25,7 +25,7 @@ public final class SelectionController {
 
     public func select(frames: [FrozenFrame], windows scWindows: [SCWindow],
                        startInWindowMode: Bool = false) async -> SelectionResult? {
-        finish(nil, resume: true)   // cancel any active session; its awaiter resumes with nil
+        finish(nil)   // cancel any active session; its awaiter resumes with nil
         let candidates = scWindows.filter {
             $0.isOnScreen && $0.windowLayer == 0 && $0.frame.width > 40 && $0.frame.height > 40
                 && $0.owningApplication?.processID != ProcessInfo.processInfo.processIdentifier
@@ -35,8 +35,8 @@ public final class SelectionController {
             windows = frames.map { frame in
                 let w = SelectionWindow(frame: frame, scWindows: candidates,
                     startInWindowMode: startInWindowMode,
-                    onDone: { [weak self] sel in self?.finish(sel, resume: true) },
-                    onCancel: { [weak self] in self?.finish(nil, resume: true) })
+                    onDone: { [weak self] sel in self?.finish(sel) },
+                    onCancel: { [weak self] in self?.finish(nil) })
                 w.orderFrontRegardless()
                 return w
             }
@@ -48,14 +48,15 @@ public final class SelectionController {
         }
     }
 
-    private func finish(_ sel: SelectionResult?, resume: Bool) {
+    private func finish(_ sel: SelectionResult?) {
         if !windows.isEmpty {
             NSCursor.unhide()
             NSApp.deactivate()   // hand focus back to the app the user was in
         }
         windows.forEach { $0.orderOut(nil) }
         windows = []
-        if resume { continuation?.resume(returning: sel); continuation = nil }
+        continuation?.resume(returning: sel)
+        continuation = nil
     }
 
     /// space toggles window mode everywhere — the key press lands on the key window only,
@@ -157,10 +158,39 @@ final class SelectionView: NSView {
     }
 
     // MARK: mouse
+    /// Targeted invalidation: the frozen frame is static, so only the chrome (crosshair, loupe,
+    /// rubber band) needs repainting as the mouse moves. Invalidate old + new chrome rects.
+    private var lastInvalidRects: [NSRect] = []
+    private let strokePad: CGFloat = 60   // covers the selection stroke + the dimensions badge
+
+    private func chromeRects() -> [NSRect] {
+        var rects = [
+            NSRect(x: mouse.x - 1.5, y: 0, width: 3, height: bounds.height),   // vertical crosshair
+            NSRect(x: 0, y: mouse.y - 1.5, width: bounds.width, height: 3),    // horizontal crosshair
+        ]
+        // loupe circle + hex badge below it; generous pad for badge and ring stroke
+        let center = loupeCenter()
+        let radius = Self.loupeRadius
+        rects.append(NSRect(x: center.x - radius, y: center.y - radius,
+                            width: radius * 2, height: radius * 2).insetBy(dx: -60, dy: -60))
+        if let rect = dragRect {
+            rects.append(rect.insetBy(dx: -strokePad, dy: -strokePad))
+        }
+        return rects
+    }
+
+    private func invalidateChrome() {
+        guard !windowMode else { needsDisplay = true; return }   // window highlight: keep it simple
+        let rects = chromeRects()
+        for r in lastInvalidRects { setNeedsDisplay(r) }
+        for r in rects { setNeedsDisplay(r) }
+        lastInvalidRects = rects
+    }
+
     override func mouseMoved(with event: NSEvent) {
         mouse = convert(event.locationInWindow, from: nil)
         updateHover()
-        needsDisplay = true
+        invalidateChrome()
     }
     override func mouseDown(with event: NSEvent) {
         if windowMode {
@@ -183,7 +213,7 @@ final class SelectionView: NSView {
                           width: rect.width * 2, height: rect.height * 2)
         }
         dragRect = rect
-        needsDisplay = true
+        invalidateChrome()
     }
     override func mouseUp(with event: NSEvent) {
         guard !windowMode else { return }
@@ -238,12 +268,21 @@ final class SelectionView: NSView {
         return ScreenshotService.crop(frozen, rectInPoints: topLeft)
     }
 
-    private func drawLoupe(_ ctx: CGContext) {
-        let radius: CGFloat = 60
-        let sample: CGFloat = 16   // points sampled around the cursor
+    // MARK: loupe geometry (shared by drawing and targeted invalidation)
+    private static let loupeRadius: CGFloat = 60
+
+    private func loupeCenter() -> CGPoint {
+        let radius = Self.loupeRadius
         var center = CGPoint(x: mouse.x + radius + 24, y: mouse.y - radius - 24)
         if center.x + radius > bounds.width { center.x = mouse.x - radius - 24 }
         if center.y - radius < 0 { center.y = mouse.y + radius + 24 }
+        return center
+    }
+
+    private func drawLoupe(_ ctx: CGContext) {
+        let radius = Self.loupeRadius
+        let sample: CGFloat = 16   // points sampled around the cursor
+        let center = loupeCenter()
 
         let srcTopLeft = CGRect(x: mouse.x - sample / 2, y: bounds.height - mouse.y - sample / 2,
                                 width: sample, height: sample)
@@ -271,17 +310,16 @@ final class SelectionView: NSView {
         ctx.setStrokeColor(NSColor.white.cgColor)
         ctx.setLineWidth(2)
         ctx.strokeEllipse(in: circle)
-        // hex caption
-        if let hex = centerHex() {
+        // hex caption — read from the crop already made for the loupe, no second crop per frame
+        if let hex = centerHex(of: crop) {
             drawBadge(hex, at: CGPoint(x: center.x, y: circle.minY - 18), monospaced: true)
         }
     }
 
-    private func centerHex() -> String? {
-        let src = CGRect(x: mouse.x - 0.5, y: bounds.height - mouse.y - 0.5, width: 1, height: 1)
-        guard let px = ScreenshotService.crop(frozen, rectInPoints: src) else { return nil }
-        let rep = NSBitmapImageRep(cgImage: px)
-        guard let c = rep.colorAt(x: 0, y: 0)?.usingColorSpace(.sRGB) else { return nil }
+    /// Hex of the pixel under the cursor: the center pixel of the loupe's sample crop.
+    private func centerHex(of crop: CGImage) -> String? {
+        let rep = NSBitmapImageRep(cgImage: crop)
+        guard let c = rep.colorAt(x: crop.width / 2, y: crop.height / 2)?.usingColorSpace(.sRGB) else { return nil }
         return String(format: "#%02X%02X%02X", Int(c.redComponent * 255), Int(c.greenComponent * 255), Int(c.blueComponent * 255))
     }
 

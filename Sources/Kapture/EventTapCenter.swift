@@ -10,7 +10,6 @@ final class EventTapCenter {
     static let shared = EventTapCenter()
     private var tap: CFMachPort?
     private var source: CFRunLoopSource?
-    var isRunning: Bool { tap != nil }
 
     static var hasAccessibility: Bool { AXIsProcessTrusted() }
 
@@ -53,16 +52,9 @@ final class EventTapCenter {
               let event = NSEvent(cgEvent: cgEvent) else { return Unmanaged.passUnretained(cgEvent) }
         // caps lock is a latched state, not a chord — ignore it so shortcuts keep working
         let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting(.capsLock)
-        let cmdOnly = mods == .command
-        if mods.isEmpty && event.keyCode == 49 { panel.quickLook(); return nil }          // space
-        guard cmdOnly else { return Unmanaged.passUnretained(cgEvent) }
-        if event.keyCode == 51 { panel.discard(); return nil }                             // ⌘⌫
-        switch event.charactersIgnoringModifiers {
-        case "w": panel.keepAndClose(); return nil
-        case "c": panel.copyToClipboard(); return nil
-        case "s": panel.saveToExportLocation(); return nil
-        case "e": panel.edit(); return nil
-        default: return Unmanaged.passUnretained(cgEvent)
-        }
+        let handled = panel.performShortcut(command: mods == .command, keyCode: event.keyCode,
+                                            characters: event.charactersIgnoringModifiers,
+                                            plainSpace: mods.isEmpty)
+        return handled ? nil : Unmanaged.passUnretained(cgEvent)   // pass unhandled events through
     }
 }

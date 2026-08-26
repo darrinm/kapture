@@ -54,19 +54,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func installStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         statusItem.button?.image = NSImage(systemSymbolName: "camera.viewfinder", accessibilityDescription: "Kapture")
-        func item(_ title: String, _ action: Selector, key: String = "",
-                  mods: NSEvent.ModifierFlags = []) -> NSMenuItem {
-            let i = NSMenuItem(title: title, action: action, keyEquivalent: key)
-            i.keyEquivalentModifierMask = mods
+        // key equivalents derive from the hotkey table, so the menu can never disagree with it
+        func item(_ title: String, _ action: Selector,
+                  hotkey: HotkeyCenter.Action? = nil) -> NSMenuItem {
+            let i = NSMenuItem(title: title, action: action, keyEquivalent: hotkey?.keyEquivalent ?? "")
+            i.keyEquivalentModifierMask = hotkey?.cocoaModifiers ?? []
             i.target = self
             return i
         }
         let menu = NSMenu()
-        menu.addItem(item("Capture Area", #selector(menuArea), key: "4", mods: [.command, .shift]))
+        menu.addItem(item("Capture Area", #selector(menuArea), hotkey: .area))
         menu.addItem(item("Capture Window", #selector(menuWindow)))
-        menu.addItem(item("Capture Fullscreen", #selector(menuFullscreen), key: "3", mods: [.command, .shift]))
+        menu.addItem(item("Capture Fullscreen", #selector(menuFullscreen), hotkey: .fullscreen))
         menu.addItem(item("Capture All Displays", #selector(menuAllDisplays)))
-        menu.addItem(item("Capture Previous Area", #selector(menuPreviousArea), key: "4", mods: [.option, .shift]))
+        menu.addItem(item("Capture Previous Area", #selector(menuPreviousArea), hotkey: .previousArea))
         let timerMenu = NSMenu()
         for s in [3, 5, 10] {
             let item = NSMenuItem(title: "Capture Area in \(s)s", action: #selector(menuTimer(_:)), keyEquivalent: "")
@@ -78,7 +79,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         timerItem.submenu = timerMenu
         menu.addItem(timerItem)
         menu.addItem(.separator())
-        menu.addItem(item("Pin from Clipboard", #selector(menuPinClipboard), key: "1", mods: [.command, .shift]))
+        menu.addItem(item("Pin from Clipboard", #selector(menuPinClipboard), hotkey: .pinClipboard))
         menu.addItem(withTitle: "Restore Last Discarded", action: #selector(menuRestore), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Show Overlays", action: #selector(menuShowOverlays), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Close All Overlays (keep)", action: #selector(menuCloseOverlays), keyEquivalent: "").target = self

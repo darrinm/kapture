@@ -8,6 +8,29 @@ import KaptureCore
 final class SettingsWindowController {
     static let shared = SettingsWindowController()
     private var window: NSWindow?
+    private var axPollTimer: Timer?
+    private var axPollTicks = 0
+
+    /// Poll for the Accessibility grant after sending the user to System Settings.
+    /// One poller at a time; gives up after ~2 minutes.
+    func pollForAccessibility() {
+        axPollTimer?.invalidate()
+        axPollTicks = 0
+        axPollTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { timer in
+            Task { @MainActor in
+                let c = SettingsWindowController.shared
+                c.axPollTicks += 1
+                if EventTapCenter.hasAccessibility {
+                    timer.invalidate()
+                    c.axPollTimer = nil
+                    EventTapCenter.shared.startIfPossible()
+                } else if c.axPollTicks >= 80 {   // ~2 min: the user isn't granting it now
+                    timer.invalidate()
+                    c.axPollTimer = nil
+                }
+            }
+        }
+    }
 
     func show() {
         if let window {
@@ -34,16 +57,18 @@ final class SettingsWindowController {
 }
 
 struct SettingsView: View {
-    @State private var copyAfterCapture = Settings.shared.copyToClipboardAfterCapture
-    @State private var sounds = Settings.shared.soundsEnabled
+    // @AppStorage binds straight to the UserDefaults keys the Settings facade reads;
+    // defaults mirror the facade's fallbacks.
+    @AppStorage("copyAfterCapture") private var copyAfterCapture = true
+    @AppStorage("soundsEnabled") private var sounds = true
+    @AppStorage("overlayOnLeftEdge") private var overlayLeft = false
+    @AppStorage("overlaySizeIndex") private var overlaySize = 1
+    @AppStorage("autoCloseEnabled") private var autoClose = false
+    @AppStorage("autoCloseInterval") private var autoCloseInterval = 10
+    @AppStorage("autoCloseSaves") private var autoCloseSaves = false
+    @AppStorage("hoverShortcutsEnabled") private var hoverShortcuts = true
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @State private var exportPath = Settings.shared.exportLocation.path
-    @State private var overlayLeft = Settings.shared.overlayOnLeftEdge
-    @State private var overlaySize = Settings.shared.overlaySizeIndex
-    @State private var autoClose = Settings.shared.autoCloseEnabled
-    @State private var autoCloseInterval = Settings.shared.autoCloseInterval
-    @State private var autoCloseSaves = Settings.shared.autoCloseSaves
-    @State private var hoverShortcuts = Settings.shared.hoverShortcutsEnabled
 
     var body: some View {
         TabView {
@@ -57,9 +82,7 @@ struct SettingsView: View {
     var general: some View {
         Form {
             Toggle("Copy capture to clipboard", isOn: $copyAfterCapture)
-                .onChange(of: copyAfterCapture) { _, v in Settings.shared.copyToClipboardAfterCapture = v }
             Toggle("Sounds", isOn: $sounds)
-                .onChange(of: sounds) { _, v in Settings.shared.soundsEnabled = v }
             Toggle("Launch at login", isOn: $launchAtLogin)
                 .onChange(of: launchAtLogin) { _, v in
                     do { v ? try SMAppService.mainApp.register() : try SMAppService.mainApp.unregister() }
@@ -75,13 +98,13 @@ struct SettingsView: View {
             }
             Toggle("Hover shortcuts on overlay cards", isOn: $hoverShortcuts)
                 .onChange(of: hoverShortcuts) { _, v in
-                    Settings.shared.hoverShortcutsEnabled = v
+                    // @AppStorage persists the value; this hook only manages the event tap
                     if v {
                         if EventTapCenter.hasAccessibility {
                             EventTapCenter.shared.startIfPossible()
                         } else {
                             EventTapCenter.requestAccessibility()
-                            pollForAccessibility()
+                            SettingsWindowController.shared.pollForAccessibility()
                         }
                     } else {
                         EventTapCenter.shared.stop()
@@ -96,17 +119,6 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .padding(.top, 4)
-    }
-
-    private func pollForAccessibility() {
-        Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { timer in
-            Task { @MainActor in
-                if EventTapCenter.hasAccessibility {
-                    timer.invalidate()
-                    EventTapCenter.shared.startIfPossible()
-                }
-            }
-        }
     }
 
     private func uninstall() {
@@ -129,23 +141,18 @@ struct SettingsView: View {
                 Text("Bottom right").tag(false)
                 Text("Bottom left").tag(true)
             }
-            .onChange(of: overlayLeft) { _, v in Settings.shared.overlayOnLeftEdge = v }
             Picker("Size", selection: $overlaySize) {
                 Text("Small").tag(0); Text("Medium").tag(1); Text("Large").tag(2)
             }
-            .onChange(of: overlaySize) { _, v in Settings.shared.overlaySizeIndex = v }
             Toggle("Auto-close", isOn: $autoClose)
-                .onChange(of: autoClose) { _, v in Settings.shared.autoCloseEnabled = v }
             if autoClose {
                 Picker("After", selection: $autoCloseInterval) {
                     ForEach([5, 10, 15, 30], id: \.self) { Text("\($0) seconds").tag($0) }
                 }
-                .onChange(of: autoCloseInterval) { _, v in Settings.shared.autoCloseInterval = v }
                 Picker("Action", selection: $autoCloseSaves) {
                     Text("Close (keep in library)").tag(false)
                     Text("Save and close").tag(true)
                 }
-                .onChange(of: autoCloseSaves) { _, v in Settings.shared.autoCloseSaves = v }
             }
         }
         .formStyle(.grouped)

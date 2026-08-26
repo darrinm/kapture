@@ -22,13 +22,22 @@ public final class EditorController {
         else { return }
         if let existing = windows[recordID] { existing.makeKeyAndOrderFront(nil); return }
         let (baseURL, layersJSON) = library.editBase(for: record)
-        guard let image = NSImage(contentsOf: baseURL),
-              let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
+        // Decoding a 5K PNG takes long enough to stall the UI — do it off the main actor.
+        Task.detached(priority: .userInitiated) {
+            guard let image = NSImage(contentsOf: baseURL),
+                  let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
+            await MainActor.run {
+                EditorController.shared.present(recordID: recordID, record: record,
+                                                base: cg, layersJSON: layersJSON)
+            }
+        }
+    }
 
+    private func present(recordID: String, record: CaptureRecord, base cg: CGImage, layersJSON: String?) {
+        if let existing = windows[recordID] { existing.makeKeyAndOrderFront(nil); return }
         let editor = EditorViewController(baseImage: cg,
                                           layers: layersJSON.map(AnnotationCodec.decode) ?? []) { [weak self] layers, done in
-            self?.save(recordID: recordID, base: cg, layers: layers)
-            if done { self?.onFlattened?(recordID) }
+            self?.save(recordID: recordID, base: cg, layers: layers, reopenAsCard: done)
         }
         let window = NSWindow(contentViewController: editor)
         window.title = (record.relPath as NSString).lastPathComponent
@@ -52,16 +61,25 @@ public final class EditorController {
         window.makeKeyAndOrderFront(nil)
     }
 
-    private func save(recordID: String, base: CGImage, layers: [Annotation]) {
+    /// Flatten + PNG encode + applyEdit are hundreds of ms for large captures — run them off
+    /// the main actor. The onFlattened hop back to MainActor fires only after applyEdit finishes,
+    /// so the reopened card reads the fresh pixels.
+    private func save(recordID: String, base: CGImage, layers: [Annotation], reopenAsCard: Bool) {
         guard let library else { return }
-        guard let out = AnnotationRenderer.flatten(base: base, layers: layers) else { return }
-        let rep = NSBitmapImageRep(cgImage: out)
-        guard let png = rep.representation(using: .png, properties: [:]) else { return }
-        do {
-            try library.applyEdit(recordID, flattenedPNG: png,
-                                  layersJSON: AnnotationCodec.encode(layers),
-                                  width: out.width, height: out.height)
-        } catch { Log.store.error("apply edit failed: \(error)") }
+        let onFlattened = self.onFlattened
+        Task.detached(priority: .userInitiated) {
+            if let out = AnnotationRenderer.flatten(base: base, layers: layers),
+               let png = ImageEncoding.pngData(out) {
+                do {
+                    try library.applyEdit(recordID, flattenedPNG: png,
+                                          layersJSON: AnnotationCodec.encode(layers),
+                                          width: out.width, height: out.height)
+                } catch { Log.store.error("apply edit failed: \(error)") }
+            }
+            if reopenAsCard {
+                await MainActor.run { onFlattened?(recordID) }
+            }
+        }
     }
 }
 
@@ -128,7 +146,7 @@ final class EditorViewController: NSViewController {
             let b = NSButton(title: "", target: self, action: #selector(colorTapped(_:)))
             b.isBordered = false
             b.wantsLayer = true
-            b.layer?.backgroundColor = Annotation(tool: .rect, points: [], colorHex: hex, strokeWidth: 1).color.cgColor
+            b.layer?.backgroundColor = NSColor(hex: hex).cgColor
             b.layer?.cornerRadius = 9
             b.layer?.borderWidth = hex == "#FFFFFF" ? 1 : 0
             b.layer?.borderColor = NSColor.separatorColor.cgColor
@@ -267,10 +285,7 @@ final class CanvasView: NSView, NSTextFieldDelegate {
 
     // MARK: geometry — image rect aspect-fit in view; conversions view↔image space
     private var imageRect: CGRect {
-        let iw = CGFloat(image.width), ih = CGFloat(image.height)
-        let scale = min(bounds.width / iw, bounds.height / ih)
-        let w = iw * scale, h = ih * scale
-        return CGRect(x: (bounds.width - w) / 2, y: (bounds.height - h) / 2, width: w, height: h)
+        Tokens.aspectFit(CGSize(width: image.width, height: image.height), in: bounds)
     }
     private func toImage(_ p: CGPoint) -> CGPoint {
         let r = imageRect
@@ -436,7 +451,7 @@ final class CanvasView: NSView, NSTextFieldDelegate {
     }
 
     // MARK: text tool
-    private var pendingFontSize: CGFloat = 48
+    private var pendingFontSize: CGFloat = Annotation.defaultFontSize
     private var cancelRestoresViaUndo = false   // set while re-editing an existing text layer
 
     /// Re-open a committed text layer for editing: remove it (undoable) and show the field
@@ -448,7 +463,7 @@ final class CanvasView: NSView, NSTextFieldDelegate {
         layers.removeAll { $0.id == layer.id }
         selected = nil
         colorHex = layer.colorHex
-        pendingFontSize = layer.fontSize ?? 48
+        pendingFontSize = layer.fontSize ?? Annotation.defaultFontSize
         let r = imageRect
         let scale = r.width / CGFloat(image.width)
         let viewPoint = CGPoint(x: r.minX + pos.x * scale, y: r.maxY - pos.y * scale)
@@ -458,14 +473,14 @@ final class CanvasView: NSView, NSTextFieldDelegate {
 
     private func beginText(atImagePoint p: CGPoint, viewPoint: CGPoint, initialText: String = "") {
         let scale = imageRect.width / CGFloat(image.width)
-        if initialText.isEmpty { pendingFontSize = 48 }
+        if initialText.isEmpty { pendingFontSize = Annotation.defaultFontSize }
         let fontSize = max(11, pendingFontSize * scale)
         let height = ceil(fontSize * 1.4)
         // rendered text's top-left lands at the click point; align the field to match
         let field = NSTextField(frame: NSRect(x: viewPoint.x - 2, y: viewPoint.y - height,
                                               width: max(180, imageRect.maxX - viewPoint.x), height: height))
         field.font = .systemFont(ofSize: fontSize, weight: .semibold)
-        field.textColor = Annotation(tool: .text, points: [], colorHex: colorHex, strokeWidth: 1).color
+        field.textColor = NSColor(hex: colorHex)
         field.drawsBackground = false
         field.isBezeled = false
         field.isBordered = false
@@ -496,54 +511,79 @@ final class CanvasView: NSView, NSTextFieldDelegate {
     func recolorActiveText(_ hex: String) -> Bool {
         guard let field = textField else { return false }
         colorHex = hex
-        field.textColor = Annotation(tool: .text, points: [], colorHex: hex, strokeWidth: 1).color
+        field.textColor = NSColor(hex: hex)
         window?.makeFirstResponder(field)   // keep typing where you were
         return true
     }
 
-    func commitPendingText() {
-        guard let field = textField, let pos = pendingTextPos else { return }
-        let value = field.stringValue.trimmingCharacters(in: .whitespaces)
+    /// Shared field teardown: remove the inline field and reset text-entry state.
+    /// Returns the field's trimmed value, the pending image-space position, the pending font
+    /// size, and whether this was a re-edit of an existing layer; nil when no field is open.
+    private func dismissTextField() -> (value: String, pos: CGPoint?, fontSize: CGFloat,
+                                        wasEditingExisting: Bool)? {
+        guard let field = textField else { return nil }
+        let state = (field.stringValue.trimmingCharacters(in: .whitespaces),
+                     pendingTextPos, pendingFontSize, cancelRestoresViaUndo)
         field.removeFromSuperview()
         textField = nil
         pendingTextPos = nil
-        let wasEditingExisting = cancelRestoresViaUndo
         cancelRestoresViaUndo = false
-        if !value.isEmpty {
+        pendingFontSize = Annotation.defaultFontSize
+        needsDisplay = true
+        return state
+    }
+
+    func commitPendingText() {
+        guard let s = dismissTextField(), let pos = s.pos else { return }
+        if !s.value.isEmpty {
             pushUndo()
             layers.append(Annotation(tool: .text, points: [pos], colorHex: colorHex,
-                                     strokeWidth: strokeWidth, text: value, fontSize: pendingFontSize))
-        } else if wasEditingExisting {
+                                     strokeWidth: strokeWidth, text: s.value, fontSize: s.fontSize))
+        } else if s.wasEditingExisting {
             undo()   // blanked out an existing layer's text — treat as cancel, restore it
         }
-        pendingFontSize = 48
-        needsDisplay = true
     }
 
     /// Dismiss the inline field without committing; a re-edit of existing text is restored.
     private func cancelPendingText() {
-        guard let field = textField else { return }
-        field.removeFromSuperview()
-        textField = nil
-        pendingTextPos = nil
-        if cancelRestoresViaUndo { undo() }   // reinstate the layer beginEditingExistingText removed
-        cancelRestoresViaUndo = false
-        pendingFontSize = 48
-        needsDisplay = true
+        guard let s = dismissTextField() else { return }
+        if s.wasEditingExisting { undo() }   // reinstate the layer beginEditingExistingText removed
     }
 
     func controlTextDidEndEditing(_ obj: Notification) { commitPendingText() }
 
     // MARK: drawing
+    /// Base image + drop shadow, composited once and blitted per frame — rescaling and
+    /// re-shadowing a 5K base on every annotation tweak is the expensive part of draw.
+    private var baseComposite: CGImage?
+    private var baseCompositeSize: CGSize = .zero
+    private let shadowPad: CGFloat = 20   // covers blur 12 + offset 2 on every side
+
+    private func baseComposite(for size: CGSize) -> CGImage? {
+        if let cached = baseComposite, baseCompositeSize == size { return cached }
+        let scale = window?.backingScaleFactor ?? 2
+        let w = Int((size.width + shadowPad * 2) * scale)
+        let h = Int((size.height + shadowPad * 2) * scale)
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        ctx.scaleBy(x: scale, y: scale)
+        ctx.interpolationQuality = .high
+        ctx.setShadow(offset: CGSize(width: 0, height: -2), blur: 12,
+                      color: NSColor.black.withAlphaComponent(0.35).cgColor)
+        ctx.draw(image, in: CGRect(x: shadowPad, y: shadowPad, width: size.width, height: size.height))
+        baseComposite = ctx.makeImage()
+        baseCompositeSize = size
+        return baseComposite
+    }
+
     override func draw(_ dirty: NSRect) {
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
         let r = imageRect
         // checkerboard-free neutral surround already via layer background
-        ctx.saveGState()
-        ctx.setShadow(offset: CGSize(width: 0, height: -2), blur: 12,
-                      color: NSColor.black.withAlphaComponent(0.35).cgColor)
-        ctx.draw(image, in: r)
-        ctx.restoreGState()
+        if let composite = baseComposite(for: r.size) {
+            ctx.draw(composite, in: r.insetBy(dx: -shadowPad, dy: -shadowPad))
+        }
 
         // map image space (top-left px) into the view's image rect
         ctx.saveGState()
@@ -566,7 +606,7 @@ final class CanvasView: NSView, NSTextFieldDelegate {
                 ctx.setStrokeColor(Tokens.accent.cgColor)
                 ctx.setLineWidth(2 * px)
                 ctx.setLineDash(phase: 0, lengths: [6 * px])
-                ctx.stroke(boundsOf(l).insetBy(dx: -10 * px, dy: -10 * px))
+                ctx.stroke(l.bounds.insetBy(dx: -10 * px, dy: -10 * px))
                 ctx.setLineDash(phase: 0, lengths: [])
             }
             for h in handles {
@@ -580,29 +620,5 @@ final class CanvasView: NSView, NSTextFieldDelegate {
             }
         }
         ctx.restoreGState()
-    }
-
-    private func boundsOf(_ l: Annotation) -> CGRect {
-        guard let first = l.points.first else { return .zero }
-        switch l.tool {
-        case .text:
-            guard let text = l.text else { break }
-            let size = (text as NSString).size(withAttributes:
-                [.font: NSFont.systemFont(ofSize: l.fontSize ?? 48, weight: .semibold)])
-            return CGRect(origin: first, size: size)
-        case .counter:
-            let r = max(l.strokeWidth * 4, 24)
-            return CGRect(x: first.x - r, y: first.y - r, width: r * 2, height: r * 2)
-        default: break
-        }
-        guard l.points.count > 1 else {
-            return CGRect(x: first.x - 30, y: first.y - 30, width: 60, height: 60)
-        }
-        var minX = first.x, minY = first.y, maxX = first.x, maxY = first.y
-        for p in l.points {
-            minX = min(minX, p.x); minY = min(minY, p.y)
-            maxX = max(maxX, p.x); maxY = max(maxY, p.y)
-        }
-        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
     }
 }

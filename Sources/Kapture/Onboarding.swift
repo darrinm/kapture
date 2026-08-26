@@ -48,6 +48,23 @@ final class Onboarding {
         return b
     }
 
+    /// Shared screen scaffold: stack config + wordmark + heading + body label.
+    private func screenScaffold(heading: String, body bodyText: String) -> NSStackView {
+        let root = NSStackView()
+        root.orientation = .vertical
+        root.alignment = .centerX
+        root.spacing = 14
+        root.edgeInsets = NSEdgeInsets(top: 44, left: 40, bottom: 36, right: 40)
+        let head = NSTextField(labelWithString: heading)
+        head.font = .systemFont(ofSize: 17, weight: .semibold)
+        let body = NSTextField(wrappingLabelWithString: bodyText)
+        body.alignment = .center
+        body.textColor = .secondaryLabelColor
+        body.preferredMaxLayoutWidth = 320
+        [wordmark(), head, body].forEach { root.addArrangedSubview($0) }
+        return root
+    }
+
     private func present(_ root: NSStackView) {
         guard let window else { return }
         window.contentView = root
@@ -59,26 +76,13 @@ final class Onboarding {
     }
 
     private func renderPermission() {
-        let root = NSStackView()
-        root.orientation = .vertical
-        root.alignment = .centerX
-        root.spacing = 14
-        root.edgeInsets = NSEdgeInsets(top: 44, left: 40, bottom: 36, right: 40)
-
-        let mark = wordmark()
-        let head = NSTextField(labelWithString: "Allow screen capture")
-        head.font = .systemFont(ofSize: 17, weight: .semibold)
-        let body = NSTextField(wrappingLabelWithString:
-            "macOS asks once. Kapture never uploads anything unless you choose to share it.")
-        body.alignment = .center
-        body.textColor = .secondaryLabelColor
-        body.preferredMaxLayoutWidth = 320
+        let root = screenScaffold(heading: "Allow screen capture",
+            body: "macOS asks once. Kapture never uploads anything unless you choose to share it.")
         let button = accentButton("Open System Settings", action: #selector(grantTapped))
         let sub = NSTextField(labelWithString: "Kapture will relaunch automatically.")
         sub.font = .systemFont(ofSize: 11)
         sub.textColor = .tertiaryLabelColor
-
-        [mark, head, body, button, sub].forEach { root.addArrangedSubview($0) }
+        [button, sub].forEach { root.addArrangedSubview($0) }
         present(root)
     }
 
@@ -89,6 +93,7 @@ final class Onboarding {
         }
         // TCC evaluates per process launch, so the running app's preflight stays stale after the
         // grant. Poll via a fresh child process (--tcc-check), which reads the current TCC state.
+        pollTimer?.invalidate()   // a second tap must not stack pollers
         pollTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { _ in
             Task.detached {
                 guard let exe = Bundle.main.executablePath else { return }
@@ -119,23 +124,15 @@ final class Onboarding {
 
     private func welcomeDone() {
         Settings.shared.onboardingComplete = true
-        let root = NSStackView()
-        root.orientation = .vertical
-        root.alignment = .centerX
-        root.spacing = 14
-        root.edgeInsets = NSEdgeInsets(top: 44, left: 40, bottom: 36, right: 40)
-        let mark = wordmark()
-        let head = NSTextField(labelWithString: "You're ready.")
-        head.font = .systemFont(ofSize: 17, weight: .semibold)
-        let body = NSTextField(wrappingLabelWithString: "Press ⌘⇧4 to take your first capture.")
-        body.alignment = .center
-        body.textColor = .secondaryLabelColor
-        let button = accentButton("Done", action: #selector(dismiss))
-        [mark, head, body, button].forEach { root.addArrangedSubview($0) }
+        let root = screenScaffold(heading: "You're ready.",
+                                  body: "Press ⌘⇧4 to take your first capture.")
+        root.addArrangedSubview(accentButton("Done", action: #selector(dismiss)))
         present(root)
     }
 
     @objc private func dismiss() {
+        pollTimer?.invalidate()
+        pollTimer = nil
         window?.orderOut(nil)
         window = nil
     }

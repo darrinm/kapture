@@ -14,19 +14,38 @@ public final class Library: @unchecked Sendable {
         try FileManager.default.createDirectory(at: self.root, withIntermediateDirectories: true)
     }
 
-    /// YYYY/MM shard directory for a date, created on demand.
-    public func shardDir(for date: Date = Date()) throws -> URL {
+    // DateFormatter creation is expensive; formatting through a shared instance is thread-safe.
+    private static let shardFormatter: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "yyyy/MM"
-        let dir = root.appendingPathComponent(f.string(from: date), isDirectory: true)
+        return f
+    }()
+    private static let timestampFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
+        return f
+    }()
+
+    /// YYYY/MM shard directory for a date, created on demand.
+    public func shardDir(for date: Date = Date()) throws -> URL {
+        let dir = root.appendingPathComponent(Library.shardFormatter.string(from: date), isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
 
     public static func timestampName(_ date: Date = Date()) -> String {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
-        return "capture \(f.string(from: date))"
+        "capture \(timestampFormatter.string(from: date))"
+    }
+
+    /// First non-colliding "base.ext" in `dir`, then "base-2.ext", "base-3.ext", …
+    public static func uniqueURL(in dir: URL, base: String, ext: String) -> URL {
+        var url = dir.appendingPathComponent(base).appendingPathExtension(ext)
+        var n = 2
+        while FileManager.default.fileExists(atPath: url.path) {
+            url = dir.appendingPathComponent("\(base)-\(n)").appendingPathExtension(ext)
+            n += 1
+        }
+        return url
     }
 
     /// Path of `url` relative to the library root — the one place that owns this string surgery.
@@ -47,12 +66,7 @@ public final class Library: @unchecked Sendable {
                          sourceApp: String?, windowTitle: String?, screenID: Int?) throws -> (CaptureRecord, URL) {
         let now = Date()
         let dir = try shardDir(for: now)
-        var url = dir.appendingPathComponent(Library.timestampName(now)).appendingPathExtension("png")
-        var n = 2
-        while FileManager.default.fileExists(atPath: url.path) {
-            url = dir.appendingPathComponent(Library.timestampName(now) + "-\(n)").appendingPathExtension("png")
-            n += 1
-        }
+        let url = Library.uniqueURL(in: dir, base: Library.timestampName(now), ext: "png")
         let id = ULID.generate(now: now)
         let relPath = rel(url)
 
@@ -134,6 +148,16 @@ public final class Library: @unchecked Sendable {
         trashDir.appendingPathComponent("\(id).tombstone.json")
     }
 
+    /// Move a capture file together with its sidecar (when one exists).
+    private func moveWithSidecar(from src: URL, to dst: URL) throws {
+        let fm = FileManager.default
+        try fm.moveItem(at: src, to: dst)
+        let sidecar = Sidecar.url(for: src)
+        if fm.fileExists(atPath: sidecar.path) {
+            try? fm.moveItem(at: sidecar, to: Sidecar.url(for: dst))
+        }
+    }
+
     /// Discard: journal → move file (+sidecar) into .trash/ + write tombstone → status=trashed.
     public func discard(_ record: CaptureRecord) throws {
         let fm = FileManager.default
@@ -149,11 +173,7 @@ public final class Library: @unchecked Sendable {
 
         _ = try OpJournal.run(db, op: "discard", captureId: record.id, src: record.relPath, dst: trashRel,
             fileOp: {
-                try fm.moveItem(at: src, to: dst)
-                let sidecar = Sidecar.url(for: src)
-                if fm.fileExists(atPath: sidecar.path) {
-                    try? fm.moveItem(at: sidecar, to: Sidecar.url(for: dst))
-                }
+                try self.moveWithSidecar(from: src, to: dst)
                 let tomb = Tombstone(id: record.id, originalRelPath: record.relPath, trashedAt: Date())
                 let enc = JSONEncoder(); enc.dateEncodingStrategy = .iso8601
                 try enc.encode(tomb).write(to: self.tombstoneURL(record.id), options: .atomic)
@@ -199,9 +219,7 @@ public final class Library: @unchecked Sendable {
         do {
             _ = try OpJournal.run(db, op: "restore", captureId: record.id, src: record.relPath, dst: dstRel,
                 fileOp: {
-                    try fm.moveItem(at: src, to: dst)
-                    let sidecar = Sidecar.url(for: src)
-                    if fm.fileExists(atPath: sidecar.path) { try? fm.moveItem(at: sidecar, to: Sidecar.url(for: dst)) }
+                    try self.moveWithSidecar(from: src, to: dst)
                     try? fm.removeItem(at: tombURL)
                 },
                 stateUpdate: { d, _ in

@@ -13,6 +13,10 @@ final class PinController {
 
     func pin(fileURL: URL) {
         guard let image = NSImage(contentsOf: fileURL) else { return }
+        pin(fileURL: fileURL, image: image)
+    }
+
+    private func pin(fileURL: URL, image: NSImage) {
         let panel = PinPanel(fileURL: fileURL, image: image) { [weak self] p in
             self?.pins.removeAll { $0 === p }
         }
@@ -25,8 +29,8 @@ final class PinController {
         // local files only: a web URL (e.g. copied from a browser) would make
         // NSImage(contentsOf:) do a synchronous network fetch on the main thread
         if let url = (pb.readObjects(forClasses: [NSURL.self]) as? [URL])?.first,
-           url.isFileURL, NSImage(contentsOf: url) != nil {
-            pin(fileURL: url)
+           url.isFileURL, let image = NSImage(contentsOf: url) {
+            pin(fileURL: url, image: image)
         } else if let img = (pb.readObjects(forClasses: [NSImage.self]) as? [NSImage])?.first,
                   let cg = img.cgImage(forProposedRect: nil, context: nil, hints: nil),
                   let png = ScreenshotService.pngData(cg) {

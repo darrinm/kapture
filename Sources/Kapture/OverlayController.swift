@@ -71,9 +71,14 @@ final class OverlayController {
               let record = try? library.db.queue.read({ try CaptureRecord.fetchOne($0, key: recordID) }),
               record.status != .trashed else { return }
         let url = library.root.appendingPathComponent(record.relPath)
-        guard let image = NSImage(contentsOf: url)?
-            .cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
-        show(record: record, fileURL: url, image: image)
+        // decoding the flattened PNG is slow for big captures — keep it off the main actor
+        Task.detached(priority: .userInitiated) {
+            guard let image = NSImage(contentsOf: url)?
+                .cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
+            await MainActor.run {
+                OverlayController.shared.show(record: record, fileURL: url, image: image)
+            }
+        }
     }
 
     func hideAll() {
@@ -146,30 +151,34 @@ final class OverlayController {
         }
         hidden.forEach { $0.orderOut(nil) }
 
-        collapseChip?.orderOut(nil)
-        collapseChip = nil
-        if !hidden.isEmpty {
-            let chip = CollapseChip(count: hidden.count) { [weak self] in self?.fanOut() }
+        if hidden.isEmpty {
+            collapseChip?.orderOut(nil)
+        } else {
+            let chip = collapseChip ?? CollapseChip { [weak self] in self?.fanOut() }
+            collapseChip = chip
+            chip.update(count: hidden.count)
             chip.setFrame(NSRect(x: x, y: y, width: size.width, height: 36), display: true)
             chip.orderFrontRegardless()
-            collapseChip = chip
         }
     }
 }
 
 final class CollapseChip: NSPanel {
-    init(count: Int, onClick: @escaping () -> Void) {
+    init(onClick: @escaping () -> Void) {
         super.init(contentRect: .zero, styleMask: [.nonactivatingPanel, .borderless], backing: .buffered, defer: false)
         isOpaque = false; backgroundColor = .clear
         level = .statusBar; hasShadow = true
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        let view = ChipView(text: "+\(count) more", onClick: onClick)
-        contentView = view
+        contentView = ChipView(text: "", onClick: onClick)
+    }
+
+    func update(count: Int) {
+        (contentView as? ChipView)?.text = "+\(count) more"
     }
 }
 
 final class ChipView: NSView {
-    let text: String
+    var text: String { didSet { needsDisplay = true } }
     let onClick: () -> Void
     init(text: String, onClick: @escaping () -> Void) {
         self.text = text; self.onClick = onClick
@@ -247,8 +256,13 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
     }
 
     // MARK: keep / discard
-    func keepAndClose() {
+    /// Mark the capture kept in the library — every "walk away with it" gesture funnels here.
+    func markKept() {
         try? OverlayController.shared.library?.setStatus(record.id, .kept)
+    }
+
+    func keepAndClose() {
+        markKept()
         fadeOut()
     }
 
@@ -273,22 +287,16 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
     }
 
     func saveToExportLocation() {
-        let dir = Settings.shared.exportLocation
-        let base = fileURL.deletingPathExtension().lastPathComponent
-        let ext = fileURL.pathExtension
-        var dest = dir.appendingPathComponent(fileURL.lastPathComponent)
-        var n = 2
-        while FileManager.default.fileExists(atPath: dest.path) {
-            dest = dir.appendingPathComponent("\(base)-\(n)").appendingPathExtension(ext)
-            n += 1
-        }
+        let dest = Library.uniqueURL(in: Settings.shared.exportLocation,
+                                     base: fileURL.deletingPathExtension().lastPathComponent,
+                                     ext: fileURL.pathExtension)
         do { try FileManager.default.copyItem(at: fileURL, to: dest) }
         catch { Log.store.error("export failed: \(error)") }
         keepAndClose()
     }
 
     func saveAs() {
-        try? OverlayController.shared.library?.setStatus(record.id, .kept)
+        markKept()
         let save = NSSavePanel()
         save.nameFieldStringValue = fileURL.lastPathComponent
         NSApp.activate(ignoringOtherApps: true)
@@ -305,9 +313,26 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
     }
 
     func edit() {
-        try? OverlayController.shared.library?.setStatus(record.id, .kept)
+        markKept()
         EditorController.shared.open(recordID: record.id)
         fadeOut()
+    }
+
+    /// The one overlay shortcut table (used by both the click-to-key tier and the AX event
+    /// tap): space → Quick Look; ⌘⌫ discard; ⌘W keep; ⌘C copy; ⌘S save; ⌘E edit.
+    /// Strict modifiers: space with none, letters/delete with command only.
+    @discardableResult
+    func performShortcut(command: Bool, keyCode: UInt16, characters: String?, plainSpace: Bool) -> Bool {
+        if plainSpace && keyCode == 49 { quickLook(); return true }        // space
+        guard command else { return false }
+        if keyCode == 51 { discard(); return true }                        // ⌘⌫
+        switch characters {
+        case "w": keepAndClose(); return true
+        case "c": copyToClipboard(); return true
+        case "s": saveToExportLocation(); return true
+        case "e": edit(); return true
+        default: return false
+        }
     }
 
     func quickLook() {
@@ -352,9 +377,24 @@ final class OverlayView: NSView, NSDraggingSource {
         }
     }
     let chrome = NSStackView()
-    let trashButton = NSButton()
+    private var trashButton: NSButton!
     private var swipeX: CGFloat = 0
     private var swipeY: CGFloat = 0
+
+    private func button(_ symbol: String, _ tip: String, _ action: Selector) -> NSButton {
+        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: tip)!
+            .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))!
+        let b = NSButton(image: image, target: self, action: action)
+        b.isBordered = false
+        b.contentTintColor = .white
+        b.toolTip = tip
+        b.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            b.widthAnchor.constraint(equalToConstant: 22),
+            b.heightAnchor.constraint(equalToConstant: 22),
+        ])
+        return b
+    }
 
     init(panel: OverlayPanel, image: CGImage) {
         self.panel = panel; self.image = image
@@ -363,20 +403,6 @@ final class OverlayView: NSView, NSDraggingSource {
         layer?.cornerRadius = Tokens.radiusOverlay
         layer?.masksToBounds = true
 
-        func button(_ symbol: String, _ tip: String, _ action: Selector) -> NSButton {
-            let image = NSImage(systemSymbolName: symbol, accessibilityDescription: tip)!
-                .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))!
-            let b = NSButton(image: image, target: self, action: action)
-            b.isBordered = false
-            b.contentTintColor = .white
-            b.toolTip = tip
-            b.translatesAutoresizingMaskIntoConstraints = false
-            NSLayoutConstraint.activate([
-                b.widthAnchor.constraint(equalToConstant: 22),
-                b.heightAnchor.constraint(equalToConstant: 22),
-            ])
-            return b
-        }
         chrome.orientation = .horizontal
         chrome.spacing = 4
         chrome.addArrangedSubview(button("xmark", "Keep & close (⌘W)", #selector(closeTapped)))
@@ -389,16 +415,9 @@ final class OverlayView: NSView, NSDraggingSource {
         addSubview(chrome)
         chrome.translatesAutoresizingMaskIntoConstraints = false
 
-        trashButton.image = NSImage(systemSymbolName: "trash", accessibilityDescription: "Discard")!
-            .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))!
-        trashButton.isBordered = false
-        trashButton.contentTintColor = .white
-        trashButton.toolTip = "Discard (⌘⌫) — recoverable for 7 days"
-        trashButton.target = self
-        trashButton.action = #selector(discardTapped)
+        trashButton = button("trash", "Discard (⌘⌫) — recoverable for 7 days", #selector(discardTapped))
         trashButton.isHidden = true
         addSubview(trashButton)
-        trashButton.translatesAutoresizingMaskIntoConstraints = false
 
         NSLayoutConstraint.activate([
             chrome.topAnchor.constraint(equalTo: topAnchor, constant: 5),
@@ -407,8 +426,6 @@ final class OverlayView: NSView, NSDraggingSource {
             chrome.heightAnchor.constraint(equalToConstant: 22),
             trashButton.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -5),
             trashButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
-            trashButton.widthAnchor.constraint(equalToConstant: 22),
-            trashButton.heightAnchor.constraint(equalToConstant: 22),
         ])
         let area = NSTrackingArea(rect: .zero, options: [.activeAlways, .mouseEnteredAndExited, .inVisibleRect],
                                   owner: self)
@@ -432,15 +449,12 @@ final class OverlayView: NSView, NSDraggingSource {
         panel.makeFirstResponder(self)
     }
     override func keyDown(with event: NSEvent) {
-        let cmd = event.modifierFlags.contains(.command)
-        if event.keyCode == 49 { panel.quickLook(); return }                    // space
-        if cmd && event.keyCode == 51 { panel.discard(); return }              // ⌘⌫
-        switch (cmd, event.charactersIgnoringModifiers) {
-        case (true, "w"): panel.keepAndClose()
-        case (true, "c"): panel.copyToClipboard()
-        case (true, "s"): panel.saveToExportLocation()
-        case (true, "e"): panel.edit()
-        default: super.keyDown(with: event)
+        // caps lock is a latched state, not a chord — ignore it so shortcuts keep working
+        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting(.capsLock)
+        if !panel.performShortcut(command: mods == .command, keyCode: event.keyCode,
+                                  characters: event.charactersIgnoringModifiers,
+                                  plainSpace: mods.isEmpty) {
+            super.keyDown(with: event)
         }
     }
 
@@ -458,7 +472,7 @@ final class OverlayView: NSView, NSDraggingSource {
     }
     @objc func saveAsTapped() { panel.saveAs() }
     @objc func revealTapped() {
-        try? OverlayController.shared.library?.setStatus(panel.record.id, .kept)
+        panel.markKept()
         NSWorkspace.shared.activateFileViewerSelecting([panel.fileURL])
     }
 
@@ -499,16 +513,8 @@ final class OverlayView: NSView, NSDraggingSource {
     override func draw(_ dirty: NSRect) {
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
         ctx.interpolationQuality = .high
-        let imgAspect = CGFloat(image.width) / CGFloat(image.height)
-        let viewAspect = bounds.width / bounds.height
-        var r = bounds
-        if imgAspect > viewAspect {
-            let w = bounds.height * imgAspect
-            r = CGRect(x: (bounds.width - w) / 2, y: 0, width: w, height: bounds.height)
-        } else {
-            let h = bounds.width / imgAspect
-            r = CGRect(x: 0, y: (bounds.height - h) / 2, width: bounds.width, height: h)
-        }
+        // aspect-fill: the layer's masksToBounds crops the overflow
+        let r = Tokens.aspectFill(CGSize(width: image.width, height: image.height), in: bounds)
         ctx.draw(image, in: r)
         if hovering {
             // scrim bands sized to the 22pt button rows + 5pt insets

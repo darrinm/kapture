@@ -55,13 +55,18 @@ public enum ScreenshotService {
         return frame.image.cropping(to: px)
     }
 
+    /// CG-global rect (top-left origin) → NS-global rect (bottom-left origin).
+    public static func nsRect(cgGlobal r: CGRect) -> NSRect {
+        let primaryMaxY = NSScreen.screens.first?.frame.maxY ?? 0
+        return NSRect(x: r.origin.x, y: primaryMaxY - r.maxY, width: r.width, height: r.height)
+    }
+
     /// Scale of the display the CG-global (top-left origin) rect mostly sits on —
     /// mixed-DPI correctness for window captures, where NSScreen.main may be a different display.
     static func displayScale(forCGGlobal r: CGRect) -> CGFloat {
-        let primaryMaxY = NSScreen.screens.first?.frame.maxY ?? 0
-        let nsRect = CGRect(x: r.origin.x, y: primaryMaxY - r.maxY, width: r.width, height: r.height)
+        let ns = nsRect(cgGlobal: r)
         let best = NSScreen.screens.max { a, b in
-            overlapArea(a.frame, nsRect) < overlapArea(b.frame, nsRect)
+            overlapArea(a.frame, ns) < overlapArea(b.frame, ns)
         }
         return best?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
     }
@@ -108,12 +113,10 @@ public enum ScreenshotService {
     }
 
     public static func pngData(_ image: CGImage) -> Data? {
-        let rep = NSBitmapImageRep(cgImage: image)
-        rep.size = NSSize(width: image.width, height: image.height)
-        return rep.representation(using: .png, properties: [:])
+        ImageEncoding.pngData(image)
     }
 }
 
 public enum CaptureError: Error {
-    case noContent, noPermission, cancelled
+    case noContent
 }

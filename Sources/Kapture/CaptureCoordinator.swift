@@ -28,7 +28,7 @@ final class CaptureCoordinator {
                     let image = try await ScreenshotService.captureWindow(win)
                     store(image, screenID: nil, windowTitle: win.title,
                           sourceApp: win.owningApplication?.bundleIdentifier,
-                          sourceRect: nsRect(cgGlobal: win.frame))
+                          sourceRect: ScreenshotService.nsRect(cgGlobal: win.frame))
                 case nil:
                     break
                 }
@@ -97,12 +97,6 @@ final class CaptureCoordinator {
                y: screen.frame.maxY - r.maxY,
                width: r.width, height: r.height)
     }
-    /// CG-global top-left rect (SCWindow.frame) → global NS rect
-    private func nsRect(cgGlobal r: CGRect) -> NSRect {
-        let primaryMaxY = NSScreen.screens.first?.frame.maxY ?? 0
-        return NSRect(x: r.origin.x, y: primaryMaxY - r.maxY, width: r.width, height: r.height)
-    }
-
     private func store(_ image: CGImage, screenID: Int?, windowTitle: String?, sourceApp: String? = nil,
                        sourceRect: NSRect? = nil) {
         guard let library else { return }

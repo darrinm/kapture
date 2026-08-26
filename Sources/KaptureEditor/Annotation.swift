@@ -6,7 +6,21 @@ public enum Tool: String, CaseIterable, Codable {
     case select, arrow, line, rect, ellipse, freehand, highlight, text, counter
 }
 
+public extension NSColor {
+    /// "#RRGGBB" or "#RRGGBBAA" (leading # optional).
+    convenience init(hex: String) {
+        var h = hex.trimmingCharacters(in: CharacterSet(charactersIn: "#"))
+        if h.count == 6 { h += "FF" }
+        var v: UInt64 = 0
+        Scanner(string: h).scanHexInt64(&v)
+        self.init(srgbRed: CGFloat((v >> 24) & 0xFF) / 255, green: CGFloat((v >> 16) & 0xFF) / 255,
+                  blue: CGFloat((v >> 8) & 0xFF) / 255, alpha: CGFloat(v & 0xFF) / 255)
+    }
+}
+
 public struct Annotation: Codable, Identifiable {
+    public static let defaultFontSize: CGFloat = 48
+
     public var id: UUID
     public var tool: Tool
     public var points: [CGPoint]      // arrow/line: [from, to] · rect/ellipse/highlight: [a, b] · freehand: path · text/counter: [pos]
@@ -22,14 +36,13 @@ public struct Annotation: Codable, Identifiable {
         self.strokeWidth = strokeWidth; self.text = text; self.number = number; self.fontSize = fontSize
     }
 
-    public var color: NSColor {
-        var hex = colorHex.trimmingCharacters(in: CharacterSet(charactersIn: "#"))
-        if hex.count == 6 { hex += "FF" }
-        var v: UInt64 = 0
-        Scanner(string: hex).scanHexInt64(&v)
-        return NSColor(srgbRed: CGFloat((v >> 24) & 0xFF) / 255, green: CGFloat((v >> 16) & 0xFF) / 255,
-                       blue: CGFloat((v >> 8) & 0xFF) / 255, alpha: CGFloat(v & 0xFF) / 255)
-    }
+    public var color: NSColor { NSColor(hex: colorHex) }
+
+    /// The text tool's font (image-space size).
+    var font: NSFont { .systemFont(ofSize: fontSize ?? Self.defaultFontSize, weight: .semibold) }
+
+    /// Counter badge radius, scaled with stroke width (image-space).
+    var counterRadius: CGFloat { max(strokeWidth * 4, 24) }
 
     var rect: CGRect {
         guard points.count >= 2 else { return CGRect(origin: points.first ?? .zero, size: .zero) }
@@ -37,12 +50,29 @@ public struct Annotation: Codable, Identifiable {
         return CGRect(x: min(a.x, b.x), y: min(a.y, b.y), width: abs(a.x - b.x), height: abs(a.y - b.y))
     }
 
+    /// Image-space bounding box (text measures its string; counter its badge circle).
+    public var bounds: CGRect {
+        guard let first = points.first else { return .zero }
+        switch tool {
+        case .text:
+            guard let text else { break }
+            let size = (text as NSString).size(withAttributes: [.font: font])
+            return CGRect(origin: first, size: size)
+        case .counter:
+            let r = counterRadius
+            return CGRect(x: first.x - r, y: first.y - r, width: r * 2, height: r * 2)
+        default: break
+        }
+        return rect
+    }
+
     /// Draw into a CGContext whose coordinate space is image space (origin top-left, y down).
     public func draw(in ctx: CGContext) {
         ctx.saveGState()
         defer { ctx.restoreGState() }
-        ctx.setStrokeColor(color.cgColor)
-        ctx.setFillColor(color.cgColor)
+        let c = color
+        ctx.setStrokeColor(c.cgColor)
+        ctx.setFillColor(c.cgColor)
         ctx.setLineWidth(strokeWidth)
         ctx.setLineCap(.round)
         ctx.setLineJoin(.round)
@@ -66,19 +96,19 @@ public struct Annotation: Codable, Identifiable {
             ctx.strokePath()
         case .highlight:
             ctx.setBlendMode(.multiply)
-            ctx.setFillColor(color.withAlphaComponent(0.45).cgColor)
+            ctx.setFillColor(c.withAlphaComponent(0.45).cgColor)
             ctx.fill(rect)
         case .text:
             guard let text, let pos = points.first else { break }
             let attrs: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: fontSize ?? 48, weight: .semibold),
-                .foregroundColor: color,
+                .font: font,
+                .foregroundColor: c,
                 .strokeColor: NSColor.black.withAlphaComponent(0.25),
             ]
             drawFlipped(ctx) { (text as NSString).draw(at: pos, withAttributes: attrs) }
         case .counter:
             guard let number, let center = points.first else { break }
-            let r = max(strokeWidth * 4, 24.0)
+            let r = counterRadius
             let circle = CGRect(x: center.x - r, y: center.y - r, width: r * 2, height: r * 2)
             ctx.fillEllipse(in: circle)
             let attrs: [NSAttributedString.Key: Any] = [
@@ -131,12 +161,11 @@ public struct Annotation: Codable, Identifiable {
         switch tool {
         case .text:
             guard let pos = points.first, let text else { return false }
-            let size = (text as NSString).size(withAttributes:
-                [.font: NSFont.systemFont(ofSize: fontSize ?? 48, weight: .semibold)])
+            let size = (text as NSString).size(withAttributes: [.font: font])
             return CGRect(origin: pos, size: size).insetBy(dx: -pad, dy: -pad).contains(p)
         case .counter:
             guard let c = points.first else { return false }
-            return hypot(p.x - c.x, p.y - c.y) < max(strokeWidth * 4, 24) + pad
+            return hypot(p.x - c.x, p.y - c.y) < counterRadius + pad
         case .freehand:
             return points.contains { hypot(p.x - $0.x, p.y - $0.y) < pad }
         case .arrow, .line:
