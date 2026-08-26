@@ -41,14 +41,14 @@ public final class SelectionController {
                 return w
             }
             windows.first?.makeKey()
-            NSCursor.crosshair.set()
+            NSCursor.hide()   // the drawn crosshair replaces the pointer entirely
         }
     }
 
     private func finish(_ sel: SelectionResult?, resume: Bool) {
+        if !windows.isEmpty { NSCursor.unhide() }
         windows.forEach { $0.orderOut(nil) }
         windows = []
-        NSCursor.arrow.set()
         if resume { continuation?.resume(returning: sel); continuation = nil }
     }
 }
@@ -94,6 +94,12 @@ final class SelectionView: NSView {
         window?.acceptsMouseMovedEvents = true
         let area = NSTrackingArea(rect: .zero, options: [.activeAlways, .mouseMoved, .inVisibleRect], owner: self)
         addTrackingArea(area)
+        // seed from the real cursor position so the loupe/crosshair start where the pointer is,
+        // not at the view origin
+        if let window {
+            mouse = convert(window.convertPoint(fromScreen: NSEvent.mouseLocation), from: nil)
+            updateHover()
+        }
     }
 
     override func keyDown(with event: NSEvent) {
@@ -198,7 +204,7 @@ final class SelectionView: NSView {
             ctx.setLineWidth(1)
             ctx.stroke(rect.insetBy(dx: -0.5, dy: -0.5))
             drawDimensions(rect)
-        } else {
+        } else if bounds.contains(mouse) {   // only the display the cursor is on shows chrome
             ctx.setStrokeColor(NSColor.white.withAlphaComponent(0.6).cgColor)
             ctx.setLineWidth(1)
             ctx.strokeLineSegments(between: [CGPoint(x: mouse.x, y: 0), CGPoint(x: mouse.x, y: bounds.height),
