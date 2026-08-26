@@ -193,7 +193,9 @@ final class EditorViewController: NSViewController {
     }
     @objc private func colorTapped(_ sender: NSButton) {
         guard let hex = sender.identifier?.rawValue else { return }
-        if canvas.tool == .select, canvas.recolorSelected(hex) {
+        if canvas.recolorActiveText(hex) {
+            // live-recolored the in-progress text entry
+        } else if canvas.tool == .select, canvas.recolorSelected(hex) {
             // recolored the selected layer; also make it the active color for that tool family
         } else if canvas.tool == .highlight {
             canvas.highlightHex = hex
@@ -454,6 +456,16 @@ final class CanvasView: NSView, NSTextFieldDelegate {
             return true
         }
         return false
+    }
+
+    /// While the inline text field is open, a swatch click recolors it live. Returns false if no field.
+    @discardableResult
+    func recolorActiveText(_ hex: String) -> Bool {
+        guard let field = textField else { return false }
+        colorHex = hex
+        field.textColor = Annotation(tool: .text, points: [], colorHex: hex, strokeWidth: 1).color
+        window?.makeFirstResponder(field)   // keep typing where you were
+        return true
     }
 
     func commitPendingText() {
