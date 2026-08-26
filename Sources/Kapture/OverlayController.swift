@@ -15,14 +15,53 @@ final class OverlayController {
     private var fannedOut = false
     var library: Library?
 
-    func show(record: CaptureRecord, fileURL: URL, image: CGImage) {
+    func show(record: CaptureRecord, fileURL: URL, image: CGImage, from sourceRect: NSRect? = nil) {
         let panel = OverlayPanel(record: record, fileURL: fileURL, image: image) { [weak self] panel in
             self?.remove(panel)
         }
         panels.append(panel)
         fannedOut = false
-        layout()
-        panel.present()
+
+        guard let source = sourceRect, !Tokens.reduceMotion, let screen = NSScreen.main else {
+            layout()
+            panel.present()
+            return
+        }
+        // fly the capture from its on-screen rect down into the corner slot
+        let size = Tokens.overlaySizes[Settings.shared.overlaySizeIndex]
+        let x = Settings.shared.overlayOnLeftEdge
+            ? screen.visibleFrame.minX + Tokens.cornerMargin
+            : screen.visibleFrame.maxX - size.width - Tokens.cornerMargin
+        let target = NSRect(x: x, y: screen.visibleFrame.minY + Tokens.cornerMargin,
+                            width: size.width, height: size.height)
+
+        let flight = NSWindow(contentRect: source, styleMask: .borderless, backing: .buffered, defer: false)
+        flight.isOpaque = false
+        flight.backgroundColor = .clear
+        flight.level = .statusBar
+        flight.hasShadow = true
+        flight.ignoresMouseEvents = true
+        let iv = NSImageView(frame: .zero)
+        iv.image = NSImage(cgImage: image, size: .zero)
+        iv.imageScaling = .scaleProportionallyUpOrDown
+        iv.wantsLayer = true
+        iv.layer?.cornerRadius = Tokens.radiusOverlay
+        iv.layer?.masksToBounds = true
+        flight.contentView = iv
+        flight.orderFrontRegardless()
+
+        panel.alphaValue = 0   // occupies its slot invisibly until the flight lands
+        layout()               // existing cards shift up to make room while the new one is in flight
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.38
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            flight.animator().setFrame(target, display: true)
+        }, completionHandler: {
+            panel.alphaValue = 1
+            panel.setFrame(target, display: true)
+            panel.orderFrontRegardless()
+            flight.orderOut(nil)
+        })
     }
 
     func hideAll() {

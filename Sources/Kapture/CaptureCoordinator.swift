@@ -22,11 +22,13 @@ final class CaptureCoordinator {
                 case .area(let sel):
                     rememberArea(sel)
                     guard let cropped = ScreenshotService.crop(sel.frame, rectInPoints: sel.rectInPoints) else { return }
-                    store(cropped, screenID: Int(sel.frame.display.displayID), windowTitle: nil)
+                    store(cropped, screenID: Int(sel.frame.display.displayID), windowTitle: nil,
+                          sourceRect: nsRect(displayLocal: sel.rectInPoints, on: sel.frame.screen))
                 case .window(let win):
                     let image = try await ScreenshotService.captureWindow(win)
                     store(image, screenID: nil, windowTitle: win.title,
-                          sourceApp: win.owningApplication?.bundleIdentifier)
+                          sourceApp: win.owningApplication?.bundleIdentifier,
+                          sourceRect: nsRect(cgGlobal: win.frame))
                 case nil:
                     break
                 }
@@ -48,7 +50,8 @@ final class CaptureCoordinator {
                     let mouse = NSEvent.mouseLocation
                     let frame = frames.first { $0.screen.frame.contains(mouse) } ?? frames.first
                     guard let frame else { return }
-                    store(frame.image, screenID: Int(frame.display.displayID), windowTitle: nil)
+                    store(frame.image, screenID: Int(frame.display.displayID), windowTitle: nil,
+                          sourceRect: frame.screen.frame)
                 }
             } catch { Log.capture.error("fullscreen capture failed: \(error)") }
         }
@@ -62,7 +65,8 @@ final class CaptureCoordinator {
                 let frames = try await ScreenshotService.freezeAllDisplays()
                 guard let frame = frames.first(where: { $0.display.displayID == displayID }) ?? frames.first,
                       let cropped = ScreenshotService.crop(frame, rectInPoints: rect) else { return }
-                store(cropped, screenID: Int(frame.display.displayID), windowTitle: nil)
+                store(cropped, screenID: Int(frame.display.displayID), windowTitle: nil,
+                      sourceRect: nsRect(displayLocal: rect, on: frame.screen))
             } catch { Log.capture.error("previous-area capture failed: \(error)") }
         }
     }
@@ -87,7 +91,21 @@ final class CaptureCoordinator {
         return (CGDirectDisplayID(p[0]), CGRect(x: p[1], y: p[2], width: p[3], height: p[4]))
     }
 
-    private func store(_ image: CGImage, screenID: Int?, windowTitle: String?, sourceApp: String? = nil) {
+    // MARK: coordinate conversions for the flight animation
+    /// display-local top-left rect → global NS (bottom-left) rect
+    private func nsRect(displayLocal r: CGRect, on screen: NSScreen) -> NSRect {
+        NSRect(x: screen.frame.minX + r.origin.x,
+               y: screen.frame.maxY - r.maxY,
+               width: r.width, height: r.height)
+    }
+    /// CG-global top-left rect (SCWindow.frame) → global NS rect
+    private func nsRect(cgGlobal r: CGRect) -> NSRect {
+        let primaryMaxY = NSScreen.screens.first?.frame.maxY ?? 0
+        return NSRect(x: r.origin.x, y: primaryMaxY - r.maxY, width: r.width, height: r.height)
+    }
+
+    private func store(_ image: CGImage, screenID: Int?, windowTitle: String?, sourceApp: String? = nil,
+                       sourceRect: NSRect? = nil) {
         guard let library, let data = ScreenshotService.pngData(image) else { return }
         let app = sourceApp ?? NSWorkspace.shared.frontmostApplication?.bundleIdentifier
         do {
@@ -98,7 +116,7 @@ final class CaptureCoordinator {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.writeObjects([url as NSURL, NSImage(cgImage: image, size: .zero)])
             }
-            OverlayController.shared.show(record: record, fileURL: url, image: image)
+            OverlayController.shared.show(record: record, fileURL: url, image: image, from: sourceRect)
             NSSound(named: "Tink")?.play()
         } catch { Log.store.error("store failed: \(error)") }
     }
