@@ -174,7 +174,7 @@ public struct Annotation: Codable, Identifiable {
             return distanceToSegment(p, points[0], points[1]) < pad
         default:
             return rect.insetBy(dx: -pad, dy: -pad).contains(p) && !rect.insetBy(dx: pad, dy: pad).contains(p)
-                || tool == .highlight && rect.contains(p)
+                || (tool == .highlight || tool == .crop) && rect.contains(p)
         }
     }
 

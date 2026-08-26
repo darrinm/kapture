@@ -356,6 +356,26 @@ final class CanvasView: NSView, NSTextFieldDelegate {
             let next = (layers.compactMap(\.number).max() ?? 0) + 1
             layers.append(Annotation(tool: .counter, points: [p], colorHex: colorHex,
                                      strokeWidth: strokeWidth, number: next))
+        case .crop:
+            // With a crop already placed, dragging its handles resizes and dragging its inside
+            // moves it; a drag outside starts a replacement crop.
+            if let crop = layers.last(where: { $0.tool == .crop }) {
+                if let h = handleIndex(of: crop, at: p) {
+                    selected = crop.id
+                    preGesture = layers
+                    dragMode = .handle(h)
+                    dragOrigin = p
+                    break
+                }
+                if crop.rect.contains(p) {
+                    selected = crop.id
+                    preGesture = layers
+                    dragMode = .move
+                    dragOrigin = p
+                    break
+                }
+            }
+            draft = Annotation(tool: .crop, points: [p, p], colorHex: colorHex, strokeWidth: strokeWidth)
         default:
             draft = Annotation(tool: tool, points: [p, p],
                                colorHex: tool == .highlight ? highlightHex : colorHex,
@@ -383,7 +403,7 @@ final class CanvasView: NSView, NSTextFieldDelegate {
         if var d = draft {
             if d.tool == .freehand { d.points.append(p) } else { d.points[1] = p }
             draft = d
-        } else if tool == .select, let sel = selected, let origin = dragOrigin,
+        } else if let sel = selected, let origin = dragOrigin,   // select tool, or crop-tool move/resize
                   let i = layers.firstIndex(where: { $0.id == sel }) {
             switch dragMode {
             case .handle(let h) where h < layers[i].points.count:
