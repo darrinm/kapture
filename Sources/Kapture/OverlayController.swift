@@ -51,7 +51,7 @@ final class OverlayController {
         flight.orderFrontRegardless()
 
         panel.alphaValue = 0   // occupies its slot invisibly until the flight lands
-        layout()               // existing cards shift up to make room while the new one is in flight
+        layout()
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = 0.38
             ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
@@ -85,7 +85,7 @@ final class OverlayController {
         layout()
     }
 
-    private func layout() {
+    private func layout(animated: Bool = true) {
         guard let screen = NSScreen.main else { return }
         let size = Tokens.overlaySizes[Settings.shared.overlaySizeIndex]
         let onLeft = Settings.shared.overlayOnLeftEdge
@@ -99,11 +99,22 @@ final class OverlayController {
         let hidden = showAll ? [] : Array(panels.prefix(panels.count - visibleLimit))
 
         for panel in visible.reversed() {   // newest nearest the corner
-            panel.orderFrontRegardless()
-            Tokens.animate(0.25) {
-                panel.animator().alphaValue = 1
-                panel.setFrame(NSRect(origin: CGPoint(x: x, y: y), size: size), display: true)
+            let frame = NSRect(origin: CGPoint(x: x, y: y), size: size)
+            if !panel.placed {
+                // first placement is instant — a fresh panel must never slide in from its
+                // initial (0,0) frame; it appears in place (flight or fade handles entrance)
+                panel.setFrame(frame, display: true)
+                panel.placed = true
+            } else if animated {
+                Tokens.animate(0.25) {
+                    panel.animator().setFrame(frame, display: true)
+                    panel.animator().alphaValue = 1
+                }
+            } else {
+                panel.setFrame(frame, display: true)
+                panel.alphaValue = 1
             }
+            panel.orderFrontRegardless()
             y += size.height + Tokens.stackGap
         }
         hidden.forEach { $0.orderOut(nil) }
@@ -160,6 +171,7 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
     let record: CaptureRecord
     let fileURL: URL
     let onClose: (OverlayPanel) -> Void
+    var placed = false   // set on first layout; first placement never animates
 
     init(record: CaptureRecord, fileURL: URL, image: CGImage, onClose: @escaping (OverlayPanel) -> Void) {
         self.record = record; self.fileURL = fileURL; self.onClose = onClose
