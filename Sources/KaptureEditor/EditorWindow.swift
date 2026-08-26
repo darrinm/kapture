@@ -210,7 +210,16 @@ final class EditorViewController: NSViewController {
             b.layer?.borderColor = isActive ? NSColor.controlAccentColor.cgColor : NSColor.separatorColor.cgColor
         }
     }
-    @objc private func widthChanged(_ sender: NSSlider) { canvas.strokeWidth = CGFloat(sender.doubleValue) }
+    private var sliderGestureActive = false
+    @objc private func widthChanged(_ sender: NSSlider) {
+        let w = CGFloat(sender.doubleValue)
+        if canvas.tool == .select {
+            canvas.rewidthSelected(w, recordUndo: !sliderGestureActive)
+        } else {
+            canvas.strokeWidth = w
+        }
+        sliderGestureActive = NSApp.currentEvent?.type != .leftMouseUp
+    }
     @objc private func copyTapped() {
         canvas.commitPendingText()
         onDone(canvas.layers, false)   // flatten + persist without dismissing
@@ -268,6 +277,15 @@ final class CanvasView: NSView, NSTextFieldDelegate {
 
     func selectMostRecent() {
         selected = layers.last?.id
+        needsDisplay = true
+    }
+
+    /// Change the selected layer's stroke width; one undo entry per slider gesture.
+    func rewidthSelected(_ width: CGFloat, recordUndo: Bool) {
+        strokeWidth = width
+        guard let sel = selected, let i = layers.firstIndex(where: { $0.id == sel }) else { return }
+        if recordUndo { pushUndo() }
+        layers[i].strokeWidth = width
         needsDisplay = true
     }
 
