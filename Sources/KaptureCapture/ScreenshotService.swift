@@ -20,13 +20,16 @@ public enum ScreenshotService {
     }
 
     /// Freeze every display concurrently (spec §3.1). Returns one frame per display.
+    /// Kapture's own windows (overlays, onboarding) are excluded so they never appear in captures.
     public static func freezeAllDisplays() async throws -> [FrozenFrame] {
-        guard let content = await ContentCache.shared.current() else { throw CaptureError.noContent }
+        guard let content = await ContentCache.shared.refresh() else { throw CaptureError.noContent }
+        let pid = ProcessInfo.processInfo.processIdentifier
+        let ownWindows = content.windows.filter { $0.owningApplication?.processID == pid }
         return try await withThrowingTaskGroup(of: FrozenFrame?.self) { group in
             for display in content.displays {
                 group.addTask {
                     guard let screen = screen(for: display) else { return nil }
-                    let filter = SCContentFilter(display: display, excludingWindows: [])
+                    let filter = SCContentFilter(display: display, excludingWindows: ownWindows)
                     let config = SCStreamConfiguration()
                     let scale = screen.backingScaleFactor
                     config.width = Int(CGFloat(display.width) * scale)
