@@ -19,6 +19,8 @@ final class RecordingCoordinator {
     private var border: BorderWindow?
     private var timer: Timer?
     private var frontApp: String?
+    private var pauseStart: Date?
+    private var pausedTotal: TimeInterval = 0
 
     var isRecording: Bool { session != nil }
     var isPaused: Bool { session?.isPaused ?? false }
@@ -27,6 +29,13 @@ final class RecordingCoordinator {
         guard let session else { return }
         let next = !session.isPaused
         session.setPaused(next)
+        // the timer shows RECORDED time, so paused spans are subtracted
+        if next {
+            pauseStart = Date()
+        } else if let began = pauseStart {
+            pausedTotal += Date().timeIntervalSince(began)
+            pauseStart = nil
+        }
         RecordingHUD.shared.stop()
         if !next {
             RecordingHUD.shared.start(showClicks: Settings.shared.showClicksWhileRecording,
@@ -75,6 +84,8 @@ final class RecordingCoordinator {
                 try await session.start()
                 Log.capture.info("record: capturing \(session.pixelWidth)x\(session.pixelHeight)")
                 self.session = session
+                pauseStart = nil
+                pausedTotal = 0
                 if let rect = borderRect { showBorder(around: rect) }
                 RecordingHUD.shared.start(showClicks: Settings.shared.showClicksWhileRecording,
                                           showKeys: Settings.shared.showKeysWhileRecording)
@@ -125,9 +136,12 @@ final class RecordingCoordinator {
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
             Task { @MainActor in
-                guard let started = RecordingCoordinator.shared.session?.startedAt else { return }
-                let s = Int(Date().timeIntervalSince(started))
-                RecordingCoordinator.shared.onTick?(String(format: "%d:%02d", s / 60, s % 60))
+                let c = RecordingCoordinator.shared
+                guard let started = c.session?.startedAt else { return }
+                var elapsed = Date().timeIntervalSince(started) - c.pausedTotal
+                if let began = c.pauseStart { elapsed -= Date().timeIntervalSince(began) }
+                let s = Int(max(0, elapsed))
+                c.onTick?(String(format: "%d:%02d", s / 60, s % 60))
             }
         }
     }
