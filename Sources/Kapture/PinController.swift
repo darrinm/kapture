@@ -130,10 +130,24 @@ final class PinView: NSImageView {
         panel.alphaValue = min(1.0, max(0.2, panel.alphaValue + delta))
     }
 
+    private var dragOffset: NSPoint?
+
     override func mouseDown(with event: NSEvent) {
         if event.clickCount == 2 { panel.alphaValue = 1.0; return }
-        super.mouseDown(with: event)
+        let mouseInScreen = NSEvent.mouseLocation
+        dragOffset = NSPoint(x: mouseInScreen.x - panel.frame.origin.x,
+                             y: mouseInScreen.y - panel.frame.origin.y)
+        panel.makeKey()
+        panel.makeFirstResponder(self)
     }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let offset = dragOffset else { return }
+        let mouseInScreen = NSEvent.mouseLocation
+        panel.setFrameOrigin(NSPoint(x: mouseInScreen.x - offset.x, y: mouseInScreen.y - offset.y))
+    }
+
+    override func mouseUp(with event: NSEvent) { dragOffset = nil }
 
     override func keyDown(with event: NSEvent) {
         let step: CGFloat = event.modifierFlags.contains(.shift) ? 10 : 1
