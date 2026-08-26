@@ -234,15 +234,21 @@ final class OverlayView: NSView, NSDraggingSource {
         layer?.masksToBounds = true
 
         func button(_ symbol: String, _ tip: String, _ action: Selector) -> NSButton {
-            let b = NSButton(image: NSImage(systemSymbolName: symbol, accessibilityDescription: tip)!,
-                             target: self, action: action)
+            let image = NSImage(systemSymbolName: symbol, accessibilityDescription: tip)!
+                .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))!
+            let b = NSButton(image: image, target: self, action: action)
             b.isBordered = false
             b.contentTintColor = .white
             b.toolTip = tip
+            b.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([
+                b.widthAnchor.constraint(equalToConstant: 22),
+                b.heightAnchor.constraint(equalToConstant: 22),
+            ])
             return b
         }
         chrome.orientation = .horizontal
-        chrome.spacing = 6
+        chrome.spacing = 4
         chrome.addArrangedSubview(button("xmark", "Keep & close (⌘W)", #selector(closeTapped)))
         chrome.addArrangedSubview(NSView())
         chrome.addArrangedSubview(button("doc.on.doc", "Copy (⌘C)", #selector(copyTapped)))
@@ -253,6 +259,7 @@ final class OverlayView: NSView, NSDraggingSource {
         chrome.translatesAutoresizingMaskIntoConstraints = false
 
         trashButton.image = NSImage(systemSymbolName: "trash", accessibilityDescription: "Discard")!
+            .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))!
         trashButton.isBordered = false
         trashButton.contentTintColor = .white
         trashButton.toolTip = "Discard (⌘⌫) — recoverable for 7 days"
@@ -263,11 +270,14 @@ final class OverlayView: NSView, NSDraggingSource {
         trashButton.translatesAutoresizingMaskIntoConstraints = false
 
         NSLayoutConstraint.activate([
-            chrome.topAnchor.constraint(equalTo: topAnchor, constant: 6),
-            chrome.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
-            chrome.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
-            trashButton.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6),
-            trashButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+            chrome.topAnchor.constraint(equalTo: topAnchor, constant: 5),
+            chrome.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            chrome.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            chrome.heightAnchor.constraint(equalToConstant: 22),
+            trashButton.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -5),
+            trashButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            trashButton.widthAnchor.constraint(equalToConstant: 22),
+            trashButton.heightAnchor.constraint(equalToConstant: 22),
         ])
         let area = NSTrackingArea(rect: .zero, options: [.activeAlways, .mouseEnteredAndExited, .inVisibleRect],
                                   owner: self)
@@ -366,9 +376,10 @@ final class OverlayView: NSView, NSDraggingSource {
         }
         ctx.draw(image, in: r)
         if hovering {
+            // scrim bands sized to the 22pt button rows + 5pt insets
             ctx.setFillColor(Tokens.overlayScrim.cgColor)
-            ctx.fill(CGRect(x: 0, y: bounds.height - 30, width: bounds.width, height: 30))
-            ctx.fill(CGRect(x: 0, y: 0, width: bounds.width, height: 28))
+            ctx.fill(CGRect(x: 0, y: bounds.height - 32, width: bounds.width, height: 32))
+            ctx.fill(CGRect(x: 0, y: 0, width: bounds.width, height: 32))
         }
     }
 }
