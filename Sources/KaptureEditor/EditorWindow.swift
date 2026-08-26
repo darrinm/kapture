@@ -193,7 +193,13 @@ final class EditorViewController: NSViewController {
     }
     @objc private func colorTapped(_ sender: NSButton) {
         guard let hex = sender.identifier?.rawValue else { return }
-        if canvas.tool == .highlight { canvas.highlightHex = hex } else { canvas.colorHex = hex }
+        if canvas.tool == .select, canvas.recolorSelected(hex) {
+            // recolored the selected layer; also make it the active color for that tool family
+        } else if canvas.tool == .highlight {
+            canvas.highlightHex = hex
+        } else {
+            canvas.colorHex = hex
+        }
         updateColorSelection()
     }
     private func updateColorSelection() {
@@ -263,6 +269,17 @@ final class CanvasView: NSView, NSTextFieldDelegate {
     func selectMostRecent() {
         selected = layers.last?.id
         needsDisplay = true
+    }
+
+    /// Recolor the selected layer (undoable). Returns false if nothing is selected.
+    @discardableResult
+    func recolorSelected(_ hex: String) -> Bool {
+        guard let sel = selected, let i = layers.firstIndex(where: { $0.id == sel }) else { return false }
+        pushUndo()
+        layers[i].colorHex = hex
+        if layers[i].tool == .highlight { highlightHex = hex } else { colorHex = hex }
+        needsDisplay = true
+        return true
     }
 
     func compositeImage() -> NSImage? {
