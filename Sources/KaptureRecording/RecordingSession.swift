@@ -121,14 +121,33 @@ public final class RecordingSession: NSObject, SCStreamOutput, @unchecked Sendab
         return RecordingResult(url: outputURL, width: pixelWidth, height: pixelHeight, duration: duration)
     }
 
+    private var sampleCounts: [Int: Int] = [:]
+
     public func stream(_ stream: SCStream, didOutputSampleBuffer sb: CMSampleBuffer, of type: SCStreamOutputType) {
+        let n = (sampleCounts[Int(type.rawValue)] ?? 0) + 1
+        sampleCounts[Int(type.rawValue)] = n
+        if n == 1 {
+            Log.capture.info("record: first sample type=\(type.rawValue) valid=\(sb.isValid) ready=\(CMSampleBufferDataIsReady(sb))")
+        }
         guard sb.isValid, CMSampleBufferDataIsReady(sb) else { return }
+        // With sourceRect, SCK's first frames can arrive at full display size before the crop
+        // applies; appending a mismatched frame into the sized encoder fails the writer (-16122).
+        // Only frames at the configured dimensions start the session or get appended.
+        if type == .screen {
+            guard let pb = CMSampleBufferGetImageBuffer(sb),
+                  CVPixelBufferGetWidth(pb) == pixelWidth,
+                  CVPixelBufferGetHeight(pb) == pixelHeight else {
+                if n <= 3 { Log.capture.info("record: skipping off-size frame #\(n)") }
+                return
+            }
+        }
         if !started {
             guard type == .screen else { return }
-            writer.startWriting()
+            let ok = writer.startWriting()
             sessionStart = sb.presentationTimeStamp
             writer.startSession(atSourceTime: sessionStart)
             started = true
+            Log.capture.info("record: writer started ok=\(ok) status=\(self.writer.status.rawValue)")
         }
         guard sb.presentationTimeStamp >= sessionStart else { return }   // pre-session audio corrupts
         let input: AVAssetWriterInput?

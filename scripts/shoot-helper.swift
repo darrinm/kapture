@@ -20,7 +20,10 @@ case "key":
     let f = flags(Array(args.dropFirst(3)))
     for down in [true, false] {
         let e = CGEvent(keyboardEventSource: src, virtualKey: code, keyDown: down)!
-        e.flags = f
+        // key-up must clear the modifiers — carrying them latches shift/cmd into the session
+        // state, and later synthetic drags inherit it (the chrome's shift axis-lock then
+        // flattens every drag to zero height)
+        e.flags = down ? f : []
         e.post(tap: .cghidEventTap)
         usleep(30_000)
     }

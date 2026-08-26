@@ -28,14 +28,17 @@ final class RecordingCoordinator {
 
     func start() {
         guard !isRecording else { return }
+        Log.capture.info("record: begin")
         Task {
             guard ScreenshotService.hasPermission else { Onboarding.shared.show(); return }
             do {
                 async let framesTask = ScreenshotService.freezeAllDisplays()
                 let content = await ContentCache.shared.current()
                 let frames = try await framesTask
-                guard let result = await SelectionController.shared.select(
-                    frames: frames, windows: content?.windows ?? []) else { return }
+                let selection = await SelectionController.shared.select(
+                    frames: frames, windows: content?.windows ?? [])
+                guard let result = selection else { Log.capture.info("record: selection cancelled"); return }
+                Log.capture.info("record: selection made")
 
                 frontApp = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
                 let pid = ProcessInfo.processInfo.processIdentifier
@@ -55,6 +58,7 @@ final class RecordingCoordinator {
                     captureMic: Settings.shared.recordMicrophone,
                     captureSystemAudio: Settings.shared.recordSystemAudio)
                 try await session.start()
+                Log.capture.info("record: capturing \(session.pixelWidth)x\(session.pixelHeight)")
                 self.session = session
                 if let rect = borderRect { showBorder(around: rect) }
                 startTimer()
@@ -68,6 +72,7 @@ final class RecordingCoordinator {
     }
 
     func stop() {
+        Log.capture.info("record: stop requested (active: \(self.session != nil))")
         guard let session else { return }
         self.session = nil
         timer?.invalidate(); timer = nil
