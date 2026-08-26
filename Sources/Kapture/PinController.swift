@@ -82,6 +82,7 @@ final class PinPanel: NSPanel {
 
 final class PinView: NSImageView {
     unowned let panel: PinPanel
+    private let closeButton = NSButton()
 
     init(panel: PinPanel, image: NSImage) {
         self.panel = panel
@@ -93,8 +94,34 @@ final class PinView: NSImageView {
         layer?.masksToBounds = true
         layer?.borderWidth = 1
         layer?.borderColor = NSColor.separatorColor.cgColor
+
+        closeButton.image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Close pin")!
+            .withSymbolConfiguration(.init(pointSize: 16, weight: .semibold))
+        closeButton.isBordered = false
+        closeButton.contentTintColor = .white
+        closeButton.wantsLayer = true
+        closeButton.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.45).cgColor
+        closeButton.layer?.cornerRadius = 10
+        closeButton.toolTip = "Close pin (esc)"
+        closeButton.target = self
+        closeButton.action = #selector(closeTapped)
+        closeButton.isHidden = true
+        addSubview(closeButton)
+        closeButton.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            closeButton.topAnchor.constraint(equalTo: topAnchor, constant: 6),
+            closeButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
+            closeButton.widthAnchor.constraint(equalToConstant: 20),
+            closeButton.heightAnchor.constraint(equalToConstant: 20),
+        ])
+        let area = NSTrackingArea(rect: .zero, options: [.activeAlways, .mouseEnteredAndExited, .inVisibleRect],
+                                  owner: self)
+        addTrackingArea(area)
     }
     required init?(coder: NSCoder) { fatalError() }
+
+    override func mouseEntered(with event: NSEvent) { closeButton.isHidden = false }
+    override func mouseExited(with event: NSEvent) { closeButton.isHidden = true }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
