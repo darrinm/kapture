@@ -443,13 +443,15 @@ final class CanvasView: NSView, NSTextFieldDelegate {
         if let d = draft { d.draw(in: ctx) }
         if let sel = selected, let l = layers.first(where: { $0.id == sel }) {
             let px = CGFloat(image.width) / r.width   // 1 view point in image units
-            ctx.setStrokeColor(Tokens.accent.cgColor)
-            ctx.setLineWidth(2 * px)
-            ctx.setLineDash(phase: 0, lengths: [6 * px])
-            ctx.stroke(boundsOf(l).insetBy(dx: -10, dy: -10))
-            ctx.setLineDash(phase: 0, lengths: [])
-            // control-point handles
-            for h in handlePositions(of: l) {
+            let handles = handlePositions(of: l)
+            if handles.isEmpty {   // handle-less layers (text, counter, pen) keep the dashed bounds
+                ctx.setStrokeColor(Tokens.accent.cgColor)
+                ctx.setLineWidth(2 * px)
+                ctx.setLineDash(phase: 0, lengths: [6 * px])
+                ctx.stroke(boundsOf(l).insetBy(dx: -10, dy: -10))
+                ctx.setLineDash(phase: 0, lengths: [])
+            }
+            for h in handles {
                 let hr = 6 * px
                 let rect = CGRect(x: h.x - hr, y: h.y - hr, width: hr * 2, height: hr * 2)
                 ctx.setFillColor(NSColor.white.cgColor)
