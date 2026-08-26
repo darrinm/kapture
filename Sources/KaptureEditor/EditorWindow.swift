@@ -492,7 +492,15 @@ final class CanvasView: NSView, NSTextFieldDelegate {
         if let sel = selected, let l = layers.first(where: { $0.id == sel }) {
             let px = CGFloat(image.width) / r.width   // 1 view point in image units
             let handles = handlePositions(of: l)
-            if handles.isEmpty {   // handle-less layers (text, counter, pen) keep the dashed bounds
+            if l.tool == .freehand {
+                // halo along the stroke instead of a box
+                var halo = l
+                halo.colorHex = "#C7423A55"
+                halo.strokeWidth = l.strokeWidth + 8 * px
+                ctx.saveGState()
+                halo.draw(in: ctx)
+                ctx.restoreGState()
+            } else if handles.isEmpty {   // text, counter: dashed bounds
                 ctx.setStrokeColor(Tokens.accent.cgColor)
                 ctx.setLineWidth(2 * px)
                 ctx.setLineDash(phase: 0, lengths: [6 * px])
@@ -513,8 +521,15 @@ final class CanvasView: NSView, NSTextFieldDelegate {
     }
 
     private func boundsOf(_ l: Annotation) -> CGRect {
-        if l.points.count >= 2 { return l.rect }
-        if let p = l.points.first { return CGRect(x: p.x - 30, y: p.y - 30, width: 60, height: 60) }
-        return .zero
+        guard let first = l.points.first else { return .zero }
+        guard l.points.count > 1 else {
+            return CGRect(x: first.x - 30, y: first.y - 30, width: 60, height: 60)
+        }
+        var minX = first.x, minY = first.y, maxX = first.x, maxY = first.y
+        for p in l.points {
+            minX = min(minX, p.x); minY = min(minY, p.y)
+            maxX = max(maxX, p.x); maxY = max(maxY, p.y)
+        }
+        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
     }
 }
