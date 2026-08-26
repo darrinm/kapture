@@ -96,6 +96,12 @@ final class EditorViewController: NSViewController {
     private var sizeLabel: NSTextField!
     private var sizeSlider: NSSlider!
     private var fillCheck: NSButton!
+    private var ratioPopup: NSPopUpButton!
+    /// menu order matches: nil = Free, .infinity sentinel = image's own aspect ("Original")
+    private let ratioChoices: [(String, CGFloat?)] = [
+        ("Free", nil), ("Original", .infinity), ("1:1", 1), ("4:3", 4.0 / 3),
+        ("3:2", 1.5), ("16:9", 16.0 / 9), ("9:16", 9.0 / 16),
+    ]
 
     /// Programmatic tool switch (e.g. after applying a crop): canvas, rail radio, and bars agree.
     private func selectTool(_ tool: Tool) {
@@ -195,6 +201,12 @@ final class EditorViewController: NSViewController {
         fillCheck = NSButton(checkboxWithTitle: "Fill", target: self, action: #selector(fillTapped(_:)))
         options.addArrangedSubview(fillCheck)
 
+        ratioPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+        ratioPopup.addItems(withTitles: ratioChoices.map(\.0))
+        ratioPopup.target = self
+        ratioPopup.action = #selector(ratioChanged(_:))
+        options.addArrangedSubview(ratioPopup)
+
         options.addArrangedSubview(NSView())
         updateOptionsBar()
 
@@ -261,9 +273,10 @@ final class EditorViewController: NSViewController {
         let effective = selectedLayer?.tool ?? canvas.tool
 
         var showColor = true, showWidth = false, showSize = false, showFill = false
+        var showRatio = false
         var widthTitle = "Width"
         switch effective {
-        case .crop: showColor = false
+        case .crop: showColor = false; showRatio = true
         case .highlight: break
         case .text: showSize = true
         case .counter: showWidth = true; widthTitle = "Size"
@@ -277,6 +290,7 @@ final class EditorViewController: NSViewController {
         sizeLabel.isHidden = !showSize
         sizeSlider.isHidden = !showSize
         fillCheck.isHidden = !showFill
+        ratioPopup.isHidden = !showRatio
 
         // sync control values to the selected layer (or the tool defaults)
         if let layer = selectedLayer {
@@ -299,6 +313,13 @@ final class EditorViewController: NSViewController {
     @objc private func fillTapped(_ sender: NSButton) {
         let on = sender.state == .on
         if !canvas.refillSelected(on) { canvas.fillShapes = on }
+    }
+
+    @objc private func ratioChanged(_ sender: NSPopUpButton) {
+        let choice = ratioChoices[max(0, sender.indexOfSelectedItem)].1
+        let ratio = choice == .infinity ? canvas.imageAspect : choice
+        canvas.cropAspect = ratio
+        canvas.reshapeCrop(toRatio: ratio)   // undoable; no-op with no crop or Free
     }
 
     private func updateColorSelection() {
@@ -439,6 +460,40 @@ final class CanvasView: NSView, NSTextFieldDelegate {
         return true
     }
 
+    // MARK: crop aspect constraint (width/height; nil = free)
+    var cropAspect: CGFloat?
+    var imageAspect: CGFloat { CGFloat(image.width) / CGFloat(image.height) }
+
+    /// Largest ratio-true rect from `anchor` toward `p`, kept inside the image.
+    private func ratioRect(anchor a: CGPoint, toward p: CGPoint, ratio r: CGFloat) -> CGRect {
+        let sx: CGFloat = p.x >= a.x ? 1 : -1
+        let sy: CGFloat = p.y >= a.y ? 1 : -1
+        var w = max(abs(p.x - a.x), abs(p.y - a.y) * r)
+        let maxW = sx > 0 ? imageBounds.maxX - a.x : a.x - imageBounds.minX
+        let maxH = sy > 0 ? imageBounds.maxY - a.y : a.y - imageBounds.minY
+        w = min(w, maxW, maxH * r)
+        let h = w / r
+        return CGRect(x: min(a.x, a.x + sx * w), y: min(a.y, a.y + sy * h), width: w, height: h)
+    }
+
+    /// Reshape the existing crop to `ratio` (undoable): keep its center, fit within its span and
+    /// the image. No-op without a crop.
+    func reshapeCrop(toRatio r: CGFloat?) {
+        guard let ratio = r, let i = cropLayerIndex else { return }
+        let cur = layers[i].rect
+        pushUndo()
+        var w = min(cur.width, cur.height * ratio)
+        var h = w / ratio
+        // grow back up to the current span's larger side where the image allows
+        let growW = min(max(cur.width, cur.height * ratio), imageBounds.width, imageBounds.height * ratio)
+        w = max(w, min(growW, imageBounds.width)); h = w / ratio
+        var rect = CGRect(x: cur.midX - w / 2, y: cur.midY - h / 2, width: w, height: h)
+        rect.origin.x = min(max(rect.origin.x, 0), imageBounds.width - rect.width)
+        rect.origin.y = min(max(rect.origin.y, 0), imageBounds.height - rect.height)
+        layers[i].points = [rect.origin, CGPoint(x: rect.maxX, y: rect.maxY)]
+        needsDisplay = true
+    }
+
     // MARK: crop apply/remove — in-editor, undoable (the flag lives in the layer stack)
     var onCropApplied: (() -> Void)?
 
@@ -572,6 +627,35 @@ final class CanvasView: NSView, NSTextFieldDelegate {
     /// then edge midpoints top/bottom/left/right). Edges crossing over are re-standardized.
     private func resizeCrop(_ layer: inout Annotation, handle h: Int, to p: CGPoint) {
         let r = layer.rect
+        if let ratio = cropAspect {
+            // corners resize ratio-true from the opposite corner; edges resize their dimension
+            // with the other derived, centered on the rect's other axis
+            switch h {
+            case 0...3:
+                let anchor = [CGPoint(x: r.maxX, y: r.maxY), CGPoint(x: r.minX, y: r.maxY),
+                              CGPoint(x: r.maxX, y: r.minY), CGPoint(x: r.minX, y: r.minY)][h]
+                let out = ratioRect(anchor: anchor, toward: p, ratio: ratio)
+                layer.points = [out.origin, CGPoint(x: out.maxX, y: out.maxY)]
+            case 4...7:
+                var w: CGFloat
+                if h <= 5 {   // top/bottom edge drives height
+                    let hgt = h == 4 ? r.maxY - p.y : p.y - r.minY
+                    w = max(hgt, 1) * ratio
+                } else {      // left/right edge drives width
+                    w = max(h == 6 ? r.maxX - p.x : p.x - r.minX, 1)
+                }
+                // center the derived dimension; shrink to what the image allows around the centers
+                let cx = r.midX, cy = r.midY
+                w = min(w, 2 * min(cx, imageBounds.width - cx))
+                var hgt = w / ratio
+                let maxHgt = 2 * min(cy, imageBounds.height - cy)
+                if hgt > maxHgt { hgt = maxHgt; w = hgt * ratio }
+                let out = CGRect(x: cx - w / 2, y: cy - hgt / 2, width: w, height: hgt)
+                layer.points = [out.origin, CGPoint(x: out.maxX, y: out.maxY)]
+            default: break
+            }
+            return
+        }
         var minX = r.minX, minY = r.minY, maxX = r.maxX, maxY = r.maxY
         switch h {
         case 0: minX = p.x; minY = p.y
@@ -603,8 +687,18 @@ final class CanvasView: NSView, NSTextFieldDelegate {
     override func mouseDragged(with event: NSEvent) {
         let p = toImage(convert(event.locationInWindow, from: nil))
         if var d = draft {
-            if d.tool == .freehand { d.points.append(p) }
-            else { d.points[1] = d.tool == .crop ? clampToImage(p) : p }
+            if d.tool == .freehand {
+                d.points.append(p)
+            } else if d.tool == .crop {
+                if let ratio = cropAspect {
+                    let r = ratioRect(anchor: d.points[0], toward: clampToImage(p), ratio: ratio)
+                    d.points = [r.origin, CGPoint(x: r.maxX, y: r.maxY)]
+                } else {
+                    d.points[1] = clampToImage(p)
+                }
+            } else {
+                d.points[1] = p
+            }
             draft = d
         } else if let sel = selected, let origin = dragOrigin,   // select tool, or crop-tool move/resize
                   let i = layers.firstIndex(where: { $0.id == sel }) {
