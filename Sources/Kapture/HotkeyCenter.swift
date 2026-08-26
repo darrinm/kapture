@@ -12,6 +12,7 @@ final class HotkeyCenter {
         case area = 2           // ⌘⇧4
         case record = 3         // ⌘⇧5 (stub until M3)
         case previousArea = 4   // ⌥⇧4
+        case pinClipboard = 5   // ⌘⇧1
     }
     private var refs: [EventHotKeyRef?] = []
     var handler: ((Action) -> Void)?
@@ -35,6 +36,7 @@ final class HotkeyCenter {
             (21, UInt32(cmdKey | shiftKey), .area),
             (23, UInt32(cmdKey | shiftKey), .record),
             (21, UInt32(optionKey | shiftKey), .previousArea),
+            (18, UInt32(cmdKey | shiftKey), .pinClipboard),
         ]
         for (keyCode, modifiers, action) in bindings {
             var ref: EventHotKeyRef?

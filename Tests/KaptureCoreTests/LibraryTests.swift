@@ -36,6 +36,45 @@ final class LibraryTests: XCTestCase {
         XCTAssertEqual(status, "kept")
     }
 
+    func testDiscardRestoreRoundTrip() throws {
+        let (lib, dir) = try makeTempLibrary()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let (record, url) = try lib.storePNG(Data([1, 2, 3]), width: 1, height: 1, sourceApp: nil, windowTitle: nil, screenID: nil)
+
+        try lib.discard(record)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+        let trashed = try lib.db.queue.read { try CaptureRecord.fetchOne($0, key: record.id) }
+        XCTAssertEqual(trashed?.status, .trashed)
+        XCTAssertTrue(trashed!.relPath.hasPrefix(".trash/"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: lib.root.appendingPathComponent(trashed!.relPath).path))
+
+        let restored = try lib.restoreLastDiscarded()
+        XCTAssertEqual(restored?.id, record.id)
+        XCTAssertEqual(restored?.status, .kept)
+        XCTAssertEqual(restored?.relPath, record.relPath)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+        // journal fully cleared
+        let journal = try lib.db.queue.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM op_journal") }
+        XCTAssertEqual(journal, 0)
+    }
+
+    func testSweepDeletesOnlyExpired() throws {
+        let (lib, dir) = try makeTempLibrary()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let (a, _) = try lib.storePNG(Data([1]), width: 1, height: 1, sourceApp: nil, windowTitle: nil, screenID: nil)
+        let (b, _) = try lib.storePNG(Data([2]), width: 1, height: 1, sourceApp: nil, windowTitle: nil, screenID: nil)
+        try lib.discard(a)
+        try lib.discard(b)
+        // age a's trash timestamp past the cutoff
+        try lib.db.queue.write { d in
+            try d.execute(sql: "UPDATE captures SET trashedAt = ? WHERE id = ?",
+                          arguments: [Date().addingTimeInterval(-8 * 86400), a.id])
+        }
+        lib.sweepTrash(olderThanDays: 7)
+        let remaining = try lib.db.queue.read { try CaptureRecord.fetchAll($0, sql: "SELECT * FROM captures") }
+        XCTAssertEqual(remaining.map(\.id), [b.id])
+    }
+
     func testULIDSortsByTime() {
         let a = ULID.generate(now: Date(timeIntervalSince1970: 1000))
         let b = ULID.generate(now: Date(timeIntervalSince1970: 2000))

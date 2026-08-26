@@ -26,12 +26,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case .area: CaptureCoordinator.shared.captureArea()
             case .fullscreen: CaptureCoordinator.shared.captureFullscreen()
             case .previousArea: CaptureCoordinator.shared.capturePreviousArea()
+            case .pinClipboard: PinController.shared.pinFromClipboard()
             case .record: break   // M3
             }
         }
         HotkeyCenter.shared.install()
         installStatusItem()
         Onboarding.shared.showIfNeeded()
+
+        // trash sweep at launch + every 6h (7-day retention)
+        let library = CaptureCoordinator.shared.library
+        Task.detached(priority: .utility) { library?.sweepTrash() }
+        Timer.scheduledTimer(withTimeInterval: 6 * 3600, repeats: true) { _ in
+            Task.detached(priority: .utility) { library?.sweepTrash() }
+        }
     }
 
     private func installStatusItem() {
@@ -54,11 +62,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         timerItem.submenu = timerMenu
         menu.addItem(timerItem)
         menu.addItem(.separator())
+        menu.addItem(withTitle: "Pin from Clipboard", action: #selector(menuPinClipboard), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Restore Last Discarded", action: #selector(menuRestore), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Show Overlays", action: #selector(menuShowOverlays), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Close All Overlays (keep)", action: #selector(menuCloseOverlays), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Close All Pins", action: #selector(menuClosePins), keyEquivalent: "").target = self
+        menu.addItem(.separator())
         menu.addItem(withTitle: "Open Library Folder", action: #selector(menuLibrary), keyEquivalent: "").target = self
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit Kapture", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         statusItem.menu = menu
     }
+
+    @objc private func menuPinClipboard() { PinController.shared.pinFromClipboard() }
+    @objc private func menuRestore() {
+        guard let library = CaptureCoordinator.shared.library else { return }
+        if let restored = try? library.restoreLastDiscarded(), restored != nil {
+            NSSound(named: "Pop")?.play()
+        }
+    }
+    @objc private func menuShowOverlays() { OverlayController.shared.showAll() }
+    @objc private func menuCloseOverlays() { OverlayController.shared.closeAllKeeping() }
+    @objc private func menuClosePins() { PinController.shared.closeAll() }
 
     @objc private func menuArea() { CaptureCoordinator.shared.captureArea() }
     @objc private func menuWindow() { CaptureCoordinator.shared.captureWindow() }

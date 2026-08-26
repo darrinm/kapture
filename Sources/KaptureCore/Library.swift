@@ -69,4 +69,123 @@ public final class Library {
             try d.execute(sql: "UPDATE captures SET status = ? WHERE id = ?", arguments: [status.rawValue, id])
         }
     }
+
+    // MARK: - Trash (spec §2.2 F7)
+
+    struct Tombstone: Codable {
+        var id: String
+        var originalRelPath: String
+        var trashedAt: Date
+    }
+
+    public var trashDir: URL { root.appendingPathComponent(".trash", isDirectory: true) }
+
+    private func tombstoneURL(_ id: String) -> URL {
+        trashDir.appendingPathComponent("\(id).tombstone.json")
+    }
+
+    /// Discard: journal → move file (+sidecar) into .trash/ + write tombstone → status=trashed.
+    public func discard(_ record: CaptureRecord) throws {
+        let fm = FileManager.default
+        let src = root.appendingPathComponent(record.relPath)
+        let trashShard = trashDir.appendingPathComponent((record.relPath as NSString).deletingLastPathComponent,
+                                                         isDirectory: true)
+        try fm.createDirectory(at: trashShard, withIntermediateDirectories: true)
+        var dst = trashShard.appendingPathComponent(src.lastPathComponent)
+        if fm.fileExists(atPath: dst.path) {
+            dst = trashShard.appendingPathComponent("\(record.id)-\(src.lastPathComponent)")
+        }
+        let trashRel = dst.path.replacingOccurrences(of: root.path + "/", with: "")
+
+        _ = try OpJournal.run(db, op: "discard", captureId: record.id, src: record.relPath, dst: trashRel,
+            fileOp: {
+                try fm.moveItem(at: src, to: dst)
+                let sidecar = Sidecar.url(for: src)
+                if fm.fileExists(atPath: sidecar.path) {
+                    try? fm.moveItem(at: sidecar, to: Sidecar.url(for: dst))
+                }
+                let tomb = Tombstone(id: record.id, originalRelPath: record.relPath, trashedAt: Date())
+                let enc = JSONEncoder(); enc.dateEncodingStrategy = .iso8601
+                try enc.encode(tomb).write(to: self.tombstoneURL(record.id), options: .atomic)
+            },
+            stateUpdate: { d, _ in
+                try d.execute(sql: "UPDATE captures SET status = 'trashed', trashedAt = ?, relPath = ? WHERE id = ?",
+                              arguments: [Date(), trashRel, record.id])
+            })
+        Log.store.info("discarded \(record.relPath, privacy: .public)")
+    }
+
+    /// Restore the most recently discarded capture. Status flips first (fails if sweeping),
+    /// then the file moves back; returns the restored record.
+    @discardableResult
+    public func restoreLastDiscarded() throws -> CaptureRecord? {
+        guard let record = try db.queue.read({ d in
+            try CaptureRecord.fetchOne(d, sql: "SELECT * FROM captures WHERE status = 'trashed' ORDER BY trashedAt DESC LIMIT 1")
+        }) else { return nil }
+
+        let fm = FileManager.default
+        let tombURL = tombstoneURL(record.id)
+        let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
+        let originalRel = (try? dec.decode(Tombstone.self, from: Data(contentsOf: tombURL)))?.originalRelPath
+            ?? record.relPath.replacingOccurrences(of: ".trash/", with: "")
+
+        // flip status first inside the queue — a sweeping row refuses restore
+        let flipped = try db.queue.write { d -> Bool in
+            let status = try String.fetchOne(d, sql: "SELECT status FROM captures WHERE id = ?", arguments: [record.id])
+            guard status == "trashed" else { return false }
+            try d.execute(sql: "UPDATE captures SET status = 'kept', trashedAt = NULL WHERE id = ?", arguments: [record.id])
+            return true
+        }
+        guard flipped else { return nil }
+
+        var dst = root.appendingPathComponent(originalRel)
+        try fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if fm.fileExists(atPath: dst.path) {
+            let base = dst.deletingPathExtension().lastPathComponent
+            dst = dst.deletingLastPathComponent().appendingPathComponent("\(base)-restored.png")
+        }
+        let src = root.appendingPathComponent(record.relPath)
+        _ = try OpJournal.run(db, op: "restore", captureId: record.id, src: record.relPath,
+                              dst: dst.path.replacingOccurrences(of: root.path + "/", with: ""),
+            fileOp: {
+                try fm.moveItem(at: src, to: dst)
+                let sidecar = Sidecar.url(for: src)
+                if fm.fileExists(atPath: sidecar.path) { try? fm.moveItem(at: sidecar, to: Sidecar.url(for: dst)) }
+                try? fm.removeItem(at: tombURL)
+            },
+            stateUpdate: { d, _ in
+                try d.execute(sql: "UPDATE captures SET relPath = ? WHERE id = ?",
+                              arguments: [dst.path.replacingOccurrences(of: self.root.path + "/", with: ""), record.id])
+            })
+        Log.store.info("restored \(originalRel, privacy: .public)")
+        return try db.queue.read { try CaptureRecord.fetchOne($0, key: record.id) }
+    }
+
+    /// Hard-delete trashed captures older than `days`. Per item: mark sweeping (aborts unless
+    /// still trashed and expired) → unlink → delete row. Never touches share links.
+    public func sweepTrash(olderThanDays days: Int = 7) {
+        let cutoff = Date().addingTimeInterval(-Double(days) * 86400)
+        let fm = FileManager.default
+        let expired = (try? db.queue.read { d in
+            try CaptureRecord.fetchAll(d, sql: "SELECT * FROM captures WHERE status = 'trashed' AND trashedAt < ?",
+                                       arguments: [cutoff])
+        }) ?? []
+        for record in expired {
+            let marked = (try? db.queue.write { d -> Bool in
+                let status = try String.fetchOne(d, sql: "SELECT status FROM captures WHERE id = ?", arguments: [record.id])
+                guard status == "trashed" else { return false }
+                try d.execute(sql: "UPDATE captures SET status = 'sweeping' WHERE id = ?", arguments: [record.id])
+                return true
+            }) ?? false
+            guard marked else { continue }
+            let file = root.appendingPathComponent(record.relPath)
+            try? fm.removeItem(at: file)
+            try? fm.removeItem(at: Sidecar.url(for: file))
+            try? fm.removeItem(at: tombstoneURL(record.id))
+            try? db.queue.write { d in
+                try d.execute(sql: "DELETE FROM captures WHERE id = ?", arguments: [record.id])
+            }
+        }
+        if !expired.isEmpty { Log.store.info("swept \(expired.count) trashed captures") }
+    }
 }
