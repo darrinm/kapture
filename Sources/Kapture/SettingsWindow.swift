@@ -33,6 +33,7 @@ struct SettingsView: View {
     @State private var autoClose = Settings.shared.autoCloseEnabled
     @State private var autoCloseInterval = Settings.shared.autoCloseInterval
     @State private var autoCloseSaves = Settings.shared.autoCloseSaves
+    @State private var hoverShortcuts = Settings.shared.hoverShortcutsEnabled
 
     var body: some View {
         TabView {
@@ -62,9 +63,54 @@ struct SettingsView: View {
                     Button("Choose…") { chooseExportLocation() }
                 }
             }
+            Toggle("Hover shortcuts on overlay cards", isOn: $hoverShortcuts)
+                .onChange(of: hoverShortcuts) { _, v in
+                    Settings.shared.hoverShortcutsEnabled = v
+                    if v {
+                        if EventTapCenter.hasAccessibility {
+                            EventTapCenter.shared.startIfPossible()
+                        } else {
+                            EventTapCenter.requestAccessibility()
+                            pollForAccessibility()
+                        }
+                    } else {
+                        EventTapCenter.shared.stop()
+                    }
+                }
+            Text("⌘W · ⌘C · ⌘S · ⌘⌫ · space act on the card under the cursor without clicking. Needs Accessibility access.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Section {
+                Button("Uninstall Kapture…", role: .destructive) { uninstall() }
+            }
         }
         .formStyle(.grouped)
         .padding(.top, 4)
+    }
+
+    private func pollForAccessibility() {
+        Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { timer in
+            Task { @MainActor in
+                if EventTapCenter.hasAccessibility {
+                    timer.invalidate()
+                    EventTapCenter.shared.startIfPossible()
+                }
+            }
+        }
+    }
+
+    private func uninstall() {
+        let alert = NSAlert()
+        alert.messageText = "Uninstall Kapture?"
+        alert.informativeText = "Removes the login item and moves the app to the Trash. Your library in \((Settings.shared.libraryRoot.path as NSString).abbreviatingWithTildeInPath) is kept — delete it in Finder if you want it gone too. System screenshot shortcuts work again the moment Kapture quits."
+        alert.addButton(withTitle: "Uninstall")
+        alert.addButton(withTitle: "Cancel")
+        alert.alertStyle = .warning
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        try? SMAppService.mainApp.unregister()
+        NSWorkspace.shared.recycle([Bundle.main.bundleURL]) { _, _ in
+            DispatchQueue.main.async { NSApp.terminate(nil) }
+        }
     }
 
     var overlay: some View {

@@ -28,7 +28,21 @@ Support) · clipboard destination · quick-access overlay (hover chrome keep/cop
 w/ close-after-drag, click-to-key ⌘W/⌘C/⌘S) · two-screen onboarding with relaunch-after-grant ·
 app icon (gpt-image-2 + squircle mask, `scripts/build-icns.sh`) · MIT license · CI.
 
-M0 remaining: shadowing verify-by-fire in onboarding · design pass.
+M0 remaining: shadowing verify-by-fire in onboarding.
+
+## M1 status (It triages)
+
+Done: journaled trash (.trash/ + tombstones, 7-day sweep every 6h, sweep-safe restore) ·
+discard gestures (hover trash, ⌘⌫, swipe-toward-edge; swipe-down hides all) · Restore Last
+Discarded · +n stack collapse past 5 · Quick Look (space) · right-click menu · pins (drag,
+opacity scroll, nudge, lock/click-through, hover ×, ⌘⇧1 from clipboard) · capture→corner
+flight animation · Settings window (General/Overlay: clipboard, sounds, launch-at-login,
+export location, overlay position/size, auto-close w/ save-and-close) · hover-shortcut
+event-tap tier (Accessibility JIT, tap re-enable, click-to-key floor) · uninstall flow ·
+design pass v1 (scripted photo shoot in scripts/shoot.command).
+
+M1 remaining: After-Capture action list UI (destinations model exists) · rotate/flip &
+scale-Retina on right-click (needs editor plumbing, lands with M2).
 
 Architecture and staging follow the implementation spec (v2.1); deviations: SwiftPM-only for
 now (no .xcodeproj — `scripts/bundle.sh` assembles the app), KeyboardShortcuts dep deferred

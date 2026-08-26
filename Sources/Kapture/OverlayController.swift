@@ -14,6 +14,7 @@ final class OverlayController {
     private var collapseChip: CollapseChip?
     private var fannedOut = false
     var library: Library?
+    weak var hoveredPanel: OverlayPanel?   // consulted by the event-tap tier
 
     func show(record: CaptureRecord, fileURL: URL, image: CGImage, from sourceRect: NSRect? = nil) {
         let panel = OverlayPanel(record: record, fileURL: fileURL, image: image) { [weak self] panel in
@@ -210,8 +211,13 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
     }
 
     func hoverChanged(_ hovering: Bool) {
-        if hovering { autoCloseTimer?.invalidate(); autoCloseTimer = nil }
-        else { scheduleAutoClose() }
+        if hovering {
+            autoCloseTimer?.invalidate(); autoCloseTimer = nil
+            OverlayController.shared.hoveredPanel = self
+        } else {
+            scheduleAutoClose()
+            if OverlayController.shared.hoveredPanel === self { OverlayController.shared.hoveredPanel = nil }
+        }
     }
 
     // MARK: keep / discard

@@ -69,6 +69,12 @@ public struct Settings {
         get { d.bool(forKey: "autoCloseSaves") }
         set { d.set(newValue, forKey: "autoCloseSaves") }
     }
+
+    /// Route ⌘W/⌘C/⌘S/⌘⌫/space to the hovered overlay without clicking (needs Accessibility).
+    public var hoverShortcutsEnabled: Bool {
+        get { d.object(forKey: "hoverShortcutsEnabled") as? Bool ?? true }
+        set { d.set(newValue, forKey: "hoverShortcutsEnabled") }
+    }
 }
 
 /// One place that plays UI sounds, honoring the master toggle.

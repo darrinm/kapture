@@ -31,6 +31,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         HotkeyCenter.shared.install()
+        EventTapCenter.shared.startIfPossible()   // silent no-op without the Accessibility grant
         installStatusItem()
         Onboarding.shared.showIfNeeded()
 
