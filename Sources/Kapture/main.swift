@@ -54,12 +54,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func installStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         statusItem.button?.image = NSImage(systemSymbolName: "camera.viewfinder", accessibilityDescription: "Kapture")
+        func item(_ title: String, _ action: Selector, key: String = "",
+                  mods: NSEvent.ModifierFlags = []) -> NSMenuItem {
+            let i = NSMenuItem(title: title, action: action, keyEquivalent: key)
+            i.keyEquivalentModifierMask = mods
+            i.target = self
+            return i
+        }
         let menu = NSMenu()
-        menu.addItem(withTitle: "Capture Area", action: #selector(menuArea), keyEquivalent: "").target = self
-        menu.addItem(withTitle: "Capture Window", action: #selector(menuWindow), keyEquivalent: "").target = self
-        menu.addItem(withTitle: "Capture Fullscreen", action: #selector(menuFullscreen), keyEquivalent: "").target = self
-        menu.addItem(withTitle: "Capture All Displays", action: #selector(menuAllDisplays), keyEquivalent: "").target = self
-        menu.addItem(withTitle: "Capture Previous Area", action: #selector(menuPreviousArea), keyEquivalent: "").target = self
+        menu.addItem(item("Capture Area", #selector(menuArea), key: "4", mods: [.command, .shift]))
+        menu.addItem(item("Capture Window", #selector(menuWindow)))
+        menu.addItem(item("Capture Fullscreen", #selector(menuFullscreen), key: "3", mods: [.command, .shift]))
+        menu.addItem(item("Capture All Displays", #selector(menuAllDisplays)))
+        menu.addItem(item("Capture Previous Area", #selector(menuPreviousArea), key: "4", mods: [.option, .shift]))
         let timerMenu = NSMenu()
         for s in [3, 5, 10] {
             let item = NSMenuItem(title: "Capture Area in \(s)s", action: #selector(menuTimer(_:)), keyEquivalent: "")
@@ -71,7 +78,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         timerItem.submenu = timerMenu
         menu.addItem(timerItem)
         menu.addItem(.separator())
-        menu.addItem(withTitle: "Pin from Clipboard", action: #selector(menuPinClipboard), keyEquivalent: "").target = self
+        menu.addItem(item("Pin from Clipboard", #selector(menuPinClipboard), key: "1", mods: [.command, .shift]))
         menu.addItem(withTitle: "Restore Last Discarded", action: #selector(menuRestore), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Show Overlays", action: #selector(menuShowOverlays), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Close All Overlays (keep)", action: #selector(menuCloseOverlays), keyEquivalent: "").target = self
