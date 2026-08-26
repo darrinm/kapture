@@ -321,6 +321,12 @@ final class CanvasView: NSView, NSTextFieldDelegate {
         let p = toImage(convert(event.locationInWindow, from: nil))
         switch tool {
         case .select:
+            // double-click on a text layer re-opens it for editing
+            if event.clickCount == 2,
+               let textLayer = layers.last(where: { $0.tool == .text && $0.hitTest(p) }) {
+                beginEditingExistingText(textLayer)
+                break
+            }
             // a handle on the already-selected layer wins over re-selection
             if let sel = selected, let layer = layers.first(where: { $0.id == sel }),
                let h = handleIndex(of: layer, at: p) {
@@ -424,9 +430,28 @@ final class CanvasView: NSView, NSTextFieldDelegate {
     }
 
     // MARK: text tool
-    private func beginText(atImagePoint p: CGPoint, viewPoint: CGPoint) {
+    private var pendingFontSize: CGFloat = 48
+
+    /// Re-open a committed text layer for editing: remove it (undoable) and show the field
+    /// pre-filled at its position, in its color and size.
+    private func beginEditingExistingText(_ layer: Annotation) {
+        guard let pos = layer.points.first else { return }
+        pushUndo()
+        layers.removeAll { $0.id == layer.id }
+        selected = nil
+        colorHex = layer.colorHex
+        pendingFontSize = layer.fontSize ?? 48
+        let r = imageRect
+        let scale = r.width / CGFloat(image.width)
+        let viewPoint = CGPoint(x: r.minX + pos.x * scale, y: r.maxY - pos.y * scale)
+        beginText(atImagePoint: pos, viewPoint: viewPoint, initialText: layer.text ?? "")
+        needsDisplay = true
+    }
+
+    private func beginText(atImagePoint p: CGPoint, viewPoint: CGPoint, initialText: String = "") {
         let scale = imageRect.width / CGFloat(image.width)
-        let fontSize = max(11, 48 * scale)
+        if initialText.isEmpty { pendingFontSize = 48 }
+        let fontSize = max(11, pendingFontSize * scale)
         let height = ceil(fontSize * 1.4)
         // rendered text's top-left lands at the click point; align the field to match
         let field = NSTextField(frame: NSRect(x: viewPoint.x - 2, y: viewPoint.y - height,
@@ -438,6 +463,7 @@ final class CanvasView: NSView, NSTextFieldDelegate {
         field.isBordered = false
         field.focusRingType = .none
         field.placeholderString = "Text"
+        field.stringValue = initialText
         field.delegate = self
         addSubview(field)
         window?.makeFirstResponder(field)
@@ -477,8 +503,9 @@ final class CanvasView: NSView, NSTextFieldDelegate {
         if !value.isEmpty {
             pushUndo()
             layers.append(Annotation(tool: .text, points: [pos], colorHex: colorHex,
-                                     strokeWidth: strokeWidth, text: value, fontSize: 48))
+                                     strokeWidth: strokeWidth, text: value, fontSize: pendingFontSize))
         }
+        pendingFontSize = 48
         needsDisplay = true
     }
 
