@@ -72,6 +72,49 @@ public final class Library: @unchecked Sendable {
         }
     }
 
+    // MARK: - Edits (spec §2.3: originals + flatten)
+
+    /// First edit moves the pristine pixels to .originals/; every flatten rewrites rel_path,
+    /// updates identity, marks any share stale, and records the layer stack in the sidecar.
+    public func applyEdit(_ id: String, flattenedPNG: Data, layersJSON: String,
+                          width: Int, height: Int) throws {
+        guard let record = try db.queue.read({ try CaptureRecord.fetchOne($0, key: id) }) else { return }
+        let fm = FileManager.default
+        let fileURL = root.appendingPathComponent(record.relPath)
+        let originalRel = ".originals/" + record.relPath
+        let originalURL = root.appendingPathComponent(originalRel)
+
+        _ = try OpJournal.run(db, op: "flatten", captureId: id, src: record.relPath, dst: record.relPath,
+            fileOp: {
+                if !fm.fileExists(atPath: originalURL.path) {
+                    try fm.createDirectory(at: originalURL.deletingLastPathComponent(),
+                                           withIntermediateDirectories: true)
+                    try fm.copyItem(at: fileURL, to: originalURL)
+                }
+                try flattenedPNG.write(to: fileURL, options: .atomic)
+                var sidecar = Sidecar.read(for: fileURL)
+                    ?? Sidecar(id: id, created: record.createdAt, app: record.sourceApp, window: record.windowTitle)
+                sidecar.annotations = .init(original: originalRel, layersJSON: layersJSON)
+                try sidecar.write(next: fileURL)
+            },
+            stateUpdate: { d, _ in
+                try d.execute(sql: """
+                    UPDATE captures SET bytes = ?, width = ?, height = ?, fastID = ?, contentHash = NULL,
+                        shareStale = (shareURL IS NOT NULL) WHERE id = ?
+                    """, arguments: [flattenedPNG.count, width, height,
+                                     Library.fastID(of: fileURL), id])
+            })
+        Log.store.info("flattened edit onto \(record.relPath, privacy: .public)")
+    }
+
+    /// The image the editor should open: pristine original if one exists, else the file itself.
+    public func editBase(for record: CaptureRecord) -> (image: URL, layersJSON: String?) {
+        let fileURL = root.appendingPathComponent(record.relPath)
+        guard let ann = Sidecar.read(for: fileURL)?.annotations else { return (fileURL, nil) }
+        let orig = root.appendingPathComponent(ann.original)
+        return (FileManager.default.fileExists(atPath: orig.path) ? orig : fileURL, ann.layersJSON)
+    }
+
     // MARK: - Trash (spec §2.2 F7)
 
     struct Tombstone: Codable {

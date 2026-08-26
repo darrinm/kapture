@@ -6,6 +6,7 @@ import AppKit
 import Quartz
 import KaptureCore
 import KaptureDesign
+import KaptureEditor
 
 @MainActor
 final class OverlayController {
@@ -265,6 +266,19 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
         keepAndClose()
     }
 
+    func edit() {
+        try? OverlayController.shared.library?.setStatus(record.id, .kept)
+        EditorController.shared.open(recordID: record.id)
+        fadeOutKeeping()
+    }
+
+    private func fadeOutKeeping() {
+        Tokens.animate(0.2, { self.animator().alphaValue = 0 }) {
+            self.orderOut(nil)
+            self.onClose(self)
+        }
+    }
+
     func quickLook() {
         makeKey()
         guard let ql = QLPreviewPanel.shared() else { return }
@@ -338,6 +352,7 @@ final class OverlayView: NSView, NSDraggingSource {
         chrome.addArrangedSubview(NSView())
         chrome.addArrangedSubview(button("doc.on.doc", "Copy (⌘C)", #selector(copyTapped)))
         chrome.addArrangedSubview(button("square.and.arrow.down", "Save (⌘S)", #selector(saveTapped)))
+        chrome.addArrangedSubview(button("pencil", "Edit (⌘E)", #selector(editTapped)))
         chrome.addArrangedSubview(button("pin", "Pin to screen", #selector(pinTapped)))
         chrome.isHidden = true
         addSubview(chrome)
@@ -374,12 +389,14 @@ final class OverlayView: NSView, NSDraggingSource {
     @objc func copyTapped() { panel.copyToClipboard() }
     @objc func saveTapped() { panel.saveToExportLocation() }
     @objc func pinTapped() { panel.pin() }
+    @objc func editTapped() { panel.edit() }
     @objc func discardTapped() { panel.discard() }
 
     // MARK: keyboard (click-to-key tier)
     override var acceptsFirstResponder: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override func mouseDown(with event: NSEvent) {
+        if event.clickCount == 2 { panel.edit(); return }
         panel.makeKey()
         panel.makeFirstResponder(self)
     }
@@ -391,6 +408,7 @@ final class OverlayView: NSView, NSDraggingSource {
         case (true, "w"): panel.keepAndClose()
         case (true, "c"): panel.copyToClipboard()
         case (true, "s"): panel.saveToExportLocation()
+        case (true, "e"): panel.edit()
         default: super.keyDown(with: event)
         }
     }
@@ -398,6 +416,7 @@ final class OverlayView: NSView, NSDraggingSource {
     // MARK: right-click
     override func menu(for event: NSEvent) -> NSMenu? {
         let menu = NSMenu()
+        menu.addItem(withTitle: "Edit…", action: #selector(editTapped), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Pin to Screen", action: #selector(pinTapped), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Copy", action: #selector(copyTapped), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Save As…", action: #selector(saveAsTapped), keyEquivalent: "").target = self

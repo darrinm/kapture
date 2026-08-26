@@ -1,6 +1,7 @@
 import AppKit
 import KaptureCore
 import KaptureCapture
+import KaptureEditor
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -12,6 +13,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let library = try Library(db: db)
             CaptureCoordinator.shared.library = library
             OverlayController.shared.library = library
+            EditorController.shared.library = library
         } catch {
             Log.shell.error("store init failed: \(error)")
         }

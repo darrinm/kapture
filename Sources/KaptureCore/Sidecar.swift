@@ -10,11 +10,25 @@ public struct Sidecar: Codable {
         public var app: String?
         public var window: String?
     }
-    // annotations / ai / share sections extend this in later milestones
+    public struct Annotations: Codable {
+        /// original (pre-flatten) pixels, relative to library root, under .originals/
+        public var original: String
+        /// editor layer stack, JSON-encoded by KaptureEditor (opaque to Core)
+        public var layersJSON: String
+    }
+    public var annotations: Annotations?
+    // ai / share sections extend this in later milestones
 
     public init(id: String, created: Date, app: String?, window: String?) {
         self.v = 1; self.id = id; self.created = created
         self.source = Source(app: app, window: window)
+    }
+
+    public static func read(for fileURL: URL) -> Sidecar? {
+        let dec = JSONDecoder()
+        dec.dateDecodingStrategy = .iso8601
+        guard let data = try? Data(contentsOf: url(for: fileURL)) else { return nil }
+        return try? dec.decode(Sidecar.self, from: data)
     }
 
     public static func url(for fileURL: URL) -> URL {
