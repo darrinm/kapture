@@ -91,7 +91,10 @@ export function notFound(): Response {
  */
 export async function loadOwners(env: Env): Promise<OwnerTable> {
   const stored = (await env.QUOTAS.get(OWNERS_KEY, "json")) as OwnerTable | null;
-  if (stored && Object.keys(stored).length > 0) return stored;
+  // Presence, not emptiness. A table that has been written and is now empty is a deliberate
+  // state — the last owner was revoked — and reading it as "never seeded" would go back to the
+  // secret and hand every revoked token straight back.
+  if (stored) return stored;
   return seedFromSecret(env);
 }
 

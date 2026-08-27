@@ -38,8 +38,12 @@ public enum Keychain {
         // of a share token is the one in here. Nothing is removed until a replacement exists.
         var synced = true
         var status = write(data, for: account, synchronizable: true)
-        if status == errSecMissingEntitlement {
-            // Unentitled: a local build, or a release whose provisioning profile went missing.
+        // errSecMissingEntitlement is what an unentitled build normally gets — a local build, or
+        // a release whose provisioning profile went missing — but a build signed ad-hoc can be
+        // told errSecNotAvailable instead. Both mean the same thing: this process has no data
+        // protection keychain. Neither is a reason to lose what the user just typed. A locked
+        // keybag is *not* in this set: that is transient, and the existing secret still stands.
+        if status == errSecMissingEntitlement || status == errSecNotAvailable {
             synced = false
             status = write(data, for: account, synchronizable: false)
             if status == errSecSuccess { Log.shell.info("keychain: \(account) kept on this Mac") }

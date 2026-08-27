@@ -12,7 +12,7 @@ import {
   Env, OwnerTable, SECURITY_HEADERS, THEME_CSS, escapeHTML, formatBytes, loadOwners,
   newToken, notFound, ownerForToken, saveOwners, sha256Hex, validOwnerName,
 } from "./common";
-import { accessTokenFrom, issuerFor, loadJWKS, verifyAccessToken } from "./access";
+import { accessTokenFrom, issuerFor, kidOf, loadJWKS, verifyAccessToken } from "./access";
 
 const COOKIE = "kapture_admin";
 const SESSION_SECONDS = 12 * 60 * 60;
@@ -105,7 +105,13 @@ async function adminIdentity(request: Request, env: Env): Promise<string | null>
   if (accessConfigured(env)) {
     const token = accessTokenFrom(request);
     if (!token) return null;
-    const jwks = await loadJWKS(env.ACCESS_TEAM_DOMAIN!, env.QUOTAS);
+    let jwks = await loadJWKS(env.ACCESS_TEAM_DOMAIN!, env.QUOTAS);
+    // A key id the cache has never heard of is what a rotation looks like from here, so fetch
+    // once past the cache rather than turning the admin away for the rest of the hour.
+    const kid = kidOf(token);
+    if (jwks && kid && !jwks.keys.some((candidate) => candidate.kid === kid)) {
+      jwks = (await loadJWKS(env.ACCESS_TEAM_DOMAIN!, env.QUOTAS, true)) ?? jwks;
+    }
     if (!jwks) return null;
     const identity = await verifyAccessToken(token, jwks, {
       audience: env.ACCESS_AUD!,
@@ -133,7 +139,10 @@ function sameOrigin(request: Request, url: URL): boolean {
 }
 
 function redirect(to: string, extraHeaders: HeadersInit = {}): Response {
-  return new Response(null, { status: 303, headers: { location: to, ...extraHeaders } });
+  return new Response(null, {
+    status: 303,
+    headers: { location: to, "cache-control": "no-store", ...SECURITY_HEADERS, ...extraHeaders },
+  });
 }
 
 interface ShareRow {
@@ -174,9 +183,24 @@ async function usageToday(env: Env, owner: string): Promise<{ bytes: number; obj
   return { bytes: Number(used?.bytes) || 0, objects: Number(used?.objects) || 0 };
 }
 
-async function dashboard(env: Env, minted?: { owner: string; token: string },
-                         signedInAs?: string): Promise<Response> {
-  const owners = await loadOwners(env);
+interface DashboardView {
+  /** Shown once, immediately after minting. */
+  minted?: { owner: string; token: string };
+  /** The Access identity, when Access is what let them in. */
+  signedInAs?: string;
+  /** Why the last action did nothing. Silence on a page that hands out credentials is worse. */
+  notice?: string;
+  /**
+   * The table just written, rather than one read back. KV is only eventually consistent, so a
+   * read straight after a put can still answer with the old value — and a page that shows a
+   * freshly minted token above a list that does not contain its owner reads as a failure.
+   */
+  owners?: OwnerTable;
+}
+
+async function dashboard(env: Env, view: DashboardView = {}): Promise<Response> {
+  const { minted, signedInAs, notice } = view;
+  const owners = view.owners ?? await loadOwners(env);
   const shares = await allShares(env);
   const perOwner = new Map<string, { count: number; bytes: number }>();
   for (const share of shares) {
@@ -234,6 +258,8 @@ async function dashboard(env: Env, minted?: { owner: string; token: string },
       </form>`}
     </div>
 
+    ${notice ? `<p class="sub" style="color:var(--accent);margin-top:16px">${escapeHTML(notice)}</p>` : ""}
+
     ${minted ? `<div class="token">
       <strong>Token for ${escapeHTML(minted.owner)}</strong>
       <p class="muted" style="margin:6px 0 0">Copy it now — it is not stored and cannot be shown again.
@@ -268,6 +294,12 @@ export async function handleAdmin(request: Request, env: Env, url: URL): Promise
   const path = url.pathname;
   if (path !== "/admin" && !path.startsWith("/admin/")) return null;
 
+  // Before any POST is acted on, including sign-in and sign-out: those two change who the
+  // browser is, which is exactly what a cross-site form is for.
+  if (request.method === "POST" && !sameOrigin(request, url)) {
+    return new Response("Cross-origin form post refused", { status: 403, headers: SECURITY_HEADERS });
+  }
+
   // With Access in front, its own sign-in page is the only one; ours would be a second,
   // weaker door into the same room.
   if (accessConfigured(env) && (path === "/admin/login" || path === "/admin/logout")) {
@@ -301,22 +333,26 @@ export async function handleAdmin(request: Request, env: Env, url: URL): Promise
     return path === "/admin" ? loginPage() : loginPage("Sign in first.");
   }
 
-  if (path === "/admin" && request.method === "GET") return dashboard(env, undefined, admin);
-
-  if (request.method === "POST" && !sameOrigin(request, url)) {
-    return new Response("Cross-origin form post refused", { status: 403, headers: SECURITY_HEADERS });
-  }
+  if (path === "/admin" && request.method === "GET") return dashboard(env, { signedInAs: admin });
 
   if (path === "/admin/mint" && request.method === "POST") {
     const form = await request.formData();
     const owner = String(form.get("owner") ?? "").trim();
-    if (!validOwnerName(owner)) return dashboard(env, undefined, admin);
+    // Both refusals say so. A form that reloads unchanged is indistinguishable from one that
+    // worked, and the thing it hands out is a credential.
+    if (!validOwnerName(owner)) {
+      return dashboard(env, { signedInAs: admin, notice: "A name is letters and digits, then " +
+        "letters, digits, - or _ — up to 32 characters, no spaces." });
+    }
     const owners: OwnerTable = await loadOwners(env);
-    if (owners[owner]) return dashboard(env, undefined, admin);   // never re-mint silently
+    if (owners[owner]) {   // never re-mint silently
+      return dashboard(env, { signedInAs: admin, owners,
+        notice: `${owner} already has a token. Revoke it first if they need a new one.` });
+    }
     const token = newToken();
     owners[owner] = { hash: await sha256Hex(token), createdAt: new Date().toISOString() };
     await saveOwners(env, owners);
-    return dashboard(env, { owner, token }, admin);
+    return dashboard(env, { minted: { owner, token }, signedInAs: admin, owners });
   }
 
   if (path === "/admin/revoke" && request.method === "POST") {

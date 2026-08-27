@@ -116,13 +116,25 @@ export function issuerFor(teamDomain: string): string {
   return `https://${teamDomain}`;
 }
 
+/** The key id a token names, so a rotation can be noticed without trusting anything in it. */
+export function kidOf(token: string): string {
+  const header = decodeSegment(token.split(".")[0] ?? "");
+  return typeof header?.kid === "string" ? header.kid : "";
+}
+
 /**
  * The team's public keys, cached in KV. Access rotates them, so this is a short cache rather
  * than a permanent one, and a fetch failure is never cached.
+ *
+ * `refresh` skips the cached copy: the caller uses it when a token names a key the cache has
+ * never heard of, which is what a rotation looks like from here. Without it a rotation locks
+ * the admin out of their own dashboard until the hour is up.
  */
-export async function loadJWKS(teamDomain: string, cache: KVNamespace): Promise<JWKS | null> {
+export async function loadJWKS(
+  teamDomain: string, cache: KVNamespace, refresh = false,
+): Promise<JWKS | null> {
   const key = `access-jwks:${teamDomain}`;
-  const cached = (await cache.get(key, "json")) as JWKS | null;
+  const cached = refresh ? null : ((await cache.get(key, "json")) as JWKS | null);
   if (cached?.keys?.length) return cached;
   try {
     const response = await fetch(certsURL(teamDomain));

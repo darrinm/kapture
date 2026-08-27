@@ -14,6 +14,14 @@ export default defineWorkersConfig({
             }),
             ADMIN_OWNER: "darrin",
             RELEASES_BASE: "https://github.com/darrinm/kapture/releases",
+            // wrangler.jsonc names the real Access application, and these vars come through
+            // with the rest of it. Left set, every request in this suite is answered by the
+            // Access branch — 403 for want of a JWT no test can mint — so the dashboard's own
+            // rules would go untested. Blanked here to exercise the token fallback; the Access
+            // branch is covered by test/access.test.ts against generated keys.
+            ACCESS_TEAM_DOMAIN: "",
+            ACCESS_AUD: "",
+            ADMIN_EMAIL: "",
           },
         },
       },
