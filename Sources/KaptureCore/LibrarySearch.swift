@@ -26,13 +26,14 @@ extension Library {
     }
 
     public enum SearchScope: String, CaseIterable, Sendable {
-        case all, screenshots, recordings, trash
+        case all, screenshots, recordings, shared, trash
 
         public var title: String {
             switch self {
             case .all: "All"
             case .screenshots: "Screenshots"
             case .recordings: "Recordings"
+            case .shared: "Shared"
             case .trash: "Trash"
             }
         }
@@ -87,6 +88,7 @@ extension Library {
         switch scope {
         case .screenshots: clauses.append("c.kind IN ('screenshot', 'gif')")
         case .recordings: clauses.append("c.kind = 'recording'")
+        case .shared: clauses.append("c.shareURL IS NOT NULL")
         case .all, .trash: break
         }
         if let app {

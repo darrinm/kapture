@@ -4,9 +4,18 @@ import AppKit
 import ServiceManagement
 import KaptureCore
 
+/// Which pane the window is showing. Held outside the view so callers can open the window
+/// straight to the pane the user needs — a failed share should land on Sharing, not on General
+/// with the real setting two clicks away.
+@MainActor
+final class SettingsSelection: ObservableObject {
+    @Published var tab: SettingsView.Tab = .general
+}
+
 @MainActor
 final class SettingsWindowController {
     static let shared = SettingsWindowController()
+    let selection = SettingsSelection()
     private var window: NSWindow?
     private var axPollTimer: Timer?
     private var axPollTicks = 0
@@ -32,7 +41,8 @@ final class SettingsWindowController {
         }
     }
 
-    func show() {
+    func show(tab: SettingsView.Tab? = nil) {
+        if let tab { selection.tab = tab }
         if let window {
             // re-show must re-acquire — the willClose observer releases on every close,
             // so skipping acquire here underflows the hold count and leaves the app .accessory
@@ -40,10 +50,10 @@ final class SettingsWindowController {
             window.makeKeyAndOrderFront(nil)
             return
         }
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 440, height: 360),
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 560),
                          styleMask: [.titled, .closable], backing: .buffered, defer: false)
         w.title = "Kapture Settings"
-        w.contentViewController = NSHostingController(rootView: SettingsView())
+        w.contentViewController = NSHostingController(rootView: SettingsView(selection: selection))
         w.center()
         w.isReleasedWhenClosed = false
         window = w
@@ -57,9 +67,12 @@ final class SettingsWindowController {
 }
 
 struct SettingsView: View {
+    enum Tab: Hashable { case general, overlay, recording, library, shortcuts, sharing }
+
+    @ObservedObject var selection: SettingsSelection
+
     // @AppStorage binds straight to the UserDefaults keys the Settings facade reads;
     // defaults mirror the facade's fallbacks.
-    @AppStorage("copyAfterCapture") private var copyAfterCapture = true
     @AppStorage("soundsEnabled") private var sounds = true
     @AppStorage("overlayOnLeftEdge") private var overlayLeft = false
     @AppStorage("overlaySizeIndex") private var overlaySize = 1
@@ -74,13 +87,16 @@ struct SettingsView: View {
     @AppStorage("filenameTemplate") private var filenameTemplate = "%n %Y-%m-%d at %H.%M.%S"
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @State private var exportPath = Settings.shared.exportLocation.path
-    // Not @AppStorage: this key's default depends on whether an API key is set, so a plain
-    // `= false` default would show the toggle off while ingest was busy renaming captures.
-    @State private var aiNaming = Settings.shared.aiNamingEnabled
+    // Not @AppStorage: this key's default depends on whether an API key is set. Seeded in
+    // `refreshKeychainState()` rather than here — see the note on hasStoredKey.
+    @State private var aiNaming = false
     // The stored key is never shown; the field starts empty and only what the user types is
     // committed, so an untouched field can't wipe a key that's already there.
     @State private var anthropicKey = ""
-    @State private var hasStoredKey = Keychain.anthropicKey?.isEmpty == false
+    // Seeded asynchronously: even the attribute-only existence check is a blocking XPC call,
+    // and three of them during view construction stall the main thread every time this window
+    // opens — and hang outright when the Keychain can't be reached (a locked screen).
+    @State private var hasStoredKey = false
     // A Keychain write is a SecItemDelete + SecItemAdd pair of blocking XPC calls, so it can't
     // ride every keystroke — an `sk-ant-…` key is ~100 of them. Debounce, and flush on the way
     // out so a key typed and immediately dismissed still lands.
@@ -88,28 +104,68 @@ struct SettingsView: View {
     @State private var keyEdited = false
     @AppStorage("copyShareLink") private var copyShareLink = true
     @State private var shareToken = ""
-    @State private var hasShareToken = Keychain.shareToken?.isEmpty == false
+    @State private var hasShareToken = false
     @State private var shareCommit: Task<Void, Never>?
     @State private var shareTokenEdited = false
+    // not @AppStorage: the value is an ordered array behind a Settings accessor that also
+    // migrates the old single copy-after-capture flag
+    @State private var afterCapture = Set(Settings.shared.afterCaptureActions.map(\.rawValue))
+    @State private var bindings: [UInt32: HotkeyBinding] = [:]
+    @State private var shortcutError = ""
     @State private var shareStatus = ""
     @State private var shareStatusIsError = false
     @State private var checkingShare = false
 
     var body: some View {
-        TabView {
-            general.tabItem { Label("General", systemImage: "gearshape") }
+        TabView(selection: $selection.tab) {
+            general.tabItem { Label("General", systemImage: "gearshape") }.tag(Tab.general)
             overlay.tabItem { Label("Overlay", systemImage: "rectangle.bottomright.filled.and.rectangle") }
-            recording.tabItem { Label("Recording", systemImage: "record.circle") }
-            intelligence.tabItem { Label("Library", systemImage: "sparkles") }
-            sharing.tabItem { Label("Sharing", systemImage: "link") }
+                .tag(Tab.overlay)
+            recording.tabItem { Label("Recording", systemImage: "record.circle") }.tag(Tab.recording)
+            intelligence.tabItem { Label("Library", systemImage: "sparkles") }.tag(Tab.library)
+            shortcuts.tabItem { Label("Shortcuts", systemImage: "command") }.tag(Tab.shortcuts)
+            sharing.tabItem { Label("Sharing", systemImage: "link") }.tag(Tab.sharing)
         }
-        .frame(width: 420)
+        .frame(width: 500)
         .padding(.bottom, 12)
+        .task { await refreshKeychainState() }
+    }
+
+    /// Reads what the Keychain holds off the main thread, then reflects it in the UI. Only
+    /// whether a secret exists is read here; the secrets themselves are never shown.
+    private func refreshKeychainState() async {
+        let state = await Task.detached {
+            (anthropic: Keychain.hasAnthropicKey,
+             share: Keychain.hasShareToken,
+             naming: Settings.shared.aiNamingEnabled)
+        }.value
+        hasStoredKey = state.anthropic
+        hasShareToken = state.share
+        aiNaming = state.naming
     }
 
     var general: some View {
         Form {
-            Toggle("Copy capture to clipboard", isOn: $copyAfterCapture)
+            Section("After a capture") {
+                ForEach(CaptureAction.allCases, id: \.rawValue) { action in
+                    Toggle(isOn: Binding(
+                        get: { afterCapture.contains(action.rawValue) },
+                        set: { enabled in
+                            Settings.shared.setAfterCaptureAction(action, enabled: enabled)
+                            afterCapture = Set(Settings.shared.afterCaptureActions.map(\.rawValue))
+                        })) {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(action.title)
+                            if let detail = action.detail {
+                                Text(detail).font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+                Text("Applies to screenshots. Recordings always land on a card.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Toggle("Sounds", isOn: $sounds)
             Toggle("Launch at login", isOn: $launchAtLogin)
                 .onChange(of: launchAtLogin) { _, v in
@@ -132,23 +188,6 @@ struct SettingsView: View {
                     Button("Choose…") { chooseExportLocation() }
                 }
             }
-            Toggle("Hover shortcuts on overlay cards", isOn: $hoverShortcuts)
-                .onChange(of: hoverShortcuts) { _, v in
-                    // @AppStorage persists the value; this hook only manages the event tap
-                    if v {
-                        if EventTapCenter.hasAccessibility {
-                            EventTapCenter.shared.startIfPossible()
-                        } else {
-                            EventTapCenter.requestAccessibility()
-                            SettingsWindowController.shared.pollForAccessibility()
-                        }
-                    } else {
-                        EventTapCenter.shared.stop()
-                    }
-                }
-            Text("⌘W · ⌘C · ⌘S · ⌘⌫ · space act on the card under the cursor without clicking. Needs Accessibility access.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
             Section {
                 Button("Uninstall Kapture…", role: .destructive) { uninstall() }
             }
@@ -177,6 +216,7 @@ struct SettingsView: View {
                 .onChange(of: aiNaming) { _, v in Settings.shared.aiNamingEnabled = v }
             SecureField("Anthropic API key", text: $anthropicKey,
                         prompt: Text(hasStoredKey ? "stored — type to replace" : "sk-ant-… (optional)"))
+                .textFieldStyle(.roundedBorder)
                 // commit as typed: onSubmit alone lost the key whenever the user clicked away
                 // or closed the window instead of pressing Return
                 .onChange(of: anthropicKey) { _, v in
@@ -218,10 +258,81 @@ struct SettingsView: View {
         Keychain.anthropicKey = anthropicKey.isEmpty ? nil : anthropicKey
     }
 
+    var shortcuts: some View {
+        Form {
+            ForEach(HotkeyCenter.Action.allCases, id: \.rawValue) { action in
+                // a plain row rather than LabeledContent: the recorder plus its reset button is
+                // wide enough that LabeledContent stacked the label above the control
+                HStack(spacing: 8) {
+                    Text(action.title)
+                    Spacer(minLength: 8)
+                    HotkeyRecorder(
+                        binding: bindings[action.rawValue] ?? action.defaultBinding,
+                        onRecord: { record($0, for: action) },
+                        onReset: {
+                            HotkeyCenter.shared.resetToDefault(action)
+                            reloadBindings()
+                        })
+                    .frame(width: 100, height: 24)
+                    Button {
+                        HotkeyCenter.shared.resetToDefault(action)
+                        reloadBindings()
+                    } label: {
+                        Image(systemName: "arrow.uturn.backward")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Reset to \(action.defaultBinding.display)")
+                    .opacity(HotkeyCenter.shared.isDefault(action) ? 0 : 1)
+                    .disabled(HotkeyCenter.shared.isDefault(action))
+                }
+            }
+            if !shortcutError.isEmpty {
+                Text(shortcutError).font(.caption).foregroundStyle(.red)
+            }
+            Text("Click a shortcut and type a new one. Esc cancels, Delete restores the default. "
+                 + "⇧⌘3 / ⇧⌘4 / ⇧⌘5 take over the system screenshot shortcuts while Kapture is "
+                 + "running; another app that claimed them first still wins, and Kapture says so "
+                 + "when it notices one.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Button("Restore all defaults") {
+                HotkeyCenter.shared.resetAllToDefaults()
+                shortcutError = ""
+                reloadBindings()
+            }
+        }
+        .formStyle(.grouped)
+        .padding(.top, 4)
+        .onAppear { reloadBindings() }
+    }
+
+    private func record(_ binding: HotkeyBinding, for action: HotkeyCenter.Action) {
+        do {
+            try HotkeyCenter.shared.setBinding(binding, for: action)
+            shortcutError = ""
+        } catch HotkeyCenter.BindingError.takenBy(let other) {
+            shortcutError = "\(binding.display) is already used by “\(other.title)”."
+        } catch HotkeyCenter.BindingError.registrationFailed(let status) {
+            shortcutError = "macOS refused \(binding.display) (error \(status)). It kept the previous shortcut."
+        } catch {
+            shortcutError = "\(error)"
+        }
+        reloadBindings()
+    }
+
+    /// The recorders read from this snapshot: HotkeyCenter is the source of truth, but SwiftUI
+    /// needs a value that changes to redraw.
+    private func reloadBindings() {
+        bindings = Dictionary(uniqueKeysWithValues: HotkeyCenter.Action.allCases.map {
+            ($0.rawValue, HotkeyCenter.shared.binding(for: $0))
+        })
+    }
+
     var sharing: some View {
         Form {
             SecureField("Share token", text: $shareToken,
                         prompt: Text(hasShareToken ? "stored — type to replace" : "paste your kapture.sh token"))
+                .textFieldStyle(.roundedBorder)
                 // same debounce as the API key: a Keychain write is two blocking XPC calls
                 .onChange(of: shareToken) { _, v in
                     hasShareToken = !v.isEmpty
@@ -317,6 +428,24 @@ struct SettingsView: View {
             Picker("Size", selection: $overlaySize) {
                 Text("Small").tag(0); Text("Medium").tag(1); Text("Large").tag(2)
             }
+            Toggle("Hover shortcuts on cards", isOn: $hoverShortcuts)
+                .onChange(of: hoverShortcuts) { _, v in
+                    // @AppStorage persists the value; this hook only manages the event tap
+                    if v {
+                        if EventTapCenter.hasAccessibility {
+                            EventTapCenter.shared.startIfPossible()
+                        } else {
+                            EventTapCenter.requestAccessibility()
+                            SettingsWindowController.shared.pollForAccessibility()
+                        }
+                    } else {
+                        EventTapCenter.shared.stop()
+                    }
+                }
+            Text("⌘W · ⌘C · ⌘S · ⌘⌫ · space act on the card under the cursor without clicking. "
+                 + "Needs Accessibility access.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
             Toggle("Auto-close", isOn: $autoClose)
             if autoClose {
                 Picker("After", selection: $autoCloseInterval) {

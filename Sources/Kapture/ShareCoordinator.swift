@@ -21,7 +21,7 @@ final class ShareCoordinator {
         guard let library else { return }
         guard ShareService.isConfigured else {
             Toast.show("Add a share token in Settings › Sharing")
-            SettingsWindowController.shared.show()
+            SettingsWindowController.shared.show(tab: .sharing)
             onFinish?(nil)
             return
         }
@@ -53,7 +53,7 @@ final class ShareCoordinator {
                 onFinish?(link.url)
             } catch let failure as ShareFailure {
                 Toast.show(failure.description)
-                if failure.isAuthFailure { SettingsWindowController.shared.show() }
+                if failure.isAuthFailure { SettingsWindowController.shared.show(tab: .sharing) }
                 Log.shell.error("share failed: \(failure.description, privacy: .public)")
                 onFinish?(nil)
             } catch {

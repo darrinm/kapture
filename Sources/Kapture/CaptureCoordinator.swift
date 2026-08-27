@@ -130,10 +130,11 @@ final class CaptureCoordinator {
                     data, width: width, height: height,
                     sourceApp: app, windowTitle: windowTitle, screenID: screenID)
                 await MainActor.run {
-                    if Settings.shared.copyToClipboardAfterCapture {
-                        Clipboard.write(url: url, image: NSImage(cgImage: image, size: .zero))
+                    let showCard = AfterCapture.run(record: record, url: url, image: image)
+                    if showCard {
+                        OverlayController.shared.show(record: record, fileURL: url, image: image,
+                                                      from: sourceRect)
                     }
-                    OverlayController.shared.show(record: record, fileURL: url, image: image, from: sourceRect)
                     Sounds.play("Tink")
                     // OCR after the debounce — a burst-triage discard costs no work
                     Task { await IngestQueue.shared.enqueue(record.id) }

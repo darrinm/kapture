@@ -43,7 +43,7 @@ public enum ShareService {
     /// Workers cap a request body at 100MB; the Worker itself rejects above 95.
     public static let maxUploadBytes = 95 * 1024 * 1024
 
-    public static var isConfigured: Bool { Keychain.shareToken?.isEmpty == false }
+    public static var isConfigured: Bool { Keychain.hasShareToken }
 
     public static func contentType(for url: URL) -> String? {
         contentTypes[url.pathExtension.lowercased()]

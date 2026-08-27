@@ -103,7 +103,7 @@ public struct Settings {
     public var aiNamingEnabled: Bool {
         // Default follows the engine that's available: with an Anthropic key the names are good
         // enough to be worth having (verified), without one the heuristic isn't.
-        get { d.object(forKey: "aiNamingEnabled") as? Bool ?? (Keychain.anthropicKey?.isEmpty == false) }
+        get { d.object(forKey: "aiNamingEnabled") as? Bool ?? Keychain.hasAnthropicKey }
         set { d.set(newValue, forKey: "aiNamingEnabled") }
     }
 

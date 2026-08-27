@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 import KaptureCore
 import KaptureCapture
 import KaptureDesign
@@ -54,6 +55,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         RecordingCoordinator.shared.onStatusChanged = { [weak self] status in
             self?.renderStatusItem(status)
         }
+        HotkeyCenter.shared.onBindingsChanged = { [weak self] in self?.refreshMenuShortcuts() }
         HotkeyCenter.shared.install()
         EventTapCenter.shared.startIfPossible()   // silent no-op without the Accessibility grant
         installStatusItem()
@@ -108,11 +110,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         // variableLength: the item widens for the recording timer (squareLength clips it away)
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.image = NSImage(systemSymbolName: "camera.viewfinder", accessibilityDescription: "Kapture")
-        // key equivalents derive from the hotkey table, so the menu can never disagree with it
+        // key equivalents derive from the hotkey table, so the menu can never disagree with it.
+        // The action is kept on the item so a rebind can refresh the equivalent in place.
         func item(_ title: String, _ action: Selector,
                   hotkey: HotkeyCenter.Action? = nil) -> NSMenuItem {
-            let i = NSMenuItem(title: title, action: action, keyEquivalent: hotkey?.keyEquivalent ?? "")
-            i.keyEquivalentModifierMask = hotkey?.cocoaModifiers ?? []
+            let binding = hotkey.map { HotkeyCenter.shared.binding(for: $0) }
+            let i = NSMenuItem(title: title, action: action, keyEquivalent: binding?.keyEquivalent ?? "")
+            i.keyEquivalentModifierMask = binding?.cocoaModifiers ?? []
+            i.representedObject = hotkey
             i.target = self
             return i
         }
@@ -152,6 +157,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         menu.addItem(withTitle: "Quit Kapture", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         statusMenu = menu
         statusItem.menu = menu
+    }
+
+    /// Re-reads the hotkey table into the menu after a rebind, so the menu never advertises a
+    /// shortcut that no longer works.
+    private func refreshMenuShortcuts() {
+        guard let statusMenu else { return }
+        for item in statusMenu.items {
+            guard let action = item.representedObject as? HotkeyCenter.Action else { continue }
+            let binding = HotkeyCenter.shared.binding(for: action)
+            item.keyEquivalent = binding.keyEquivalent
+            item.keyEquivalentModifierMask = binding.cocoaModifiers
+        }
     }
 
     @objc private func menuRecord() { RecordingCoordinator.shared.toggle() }
@@ -240,6 +257,53 @@ if let i = CommandLine.arguments.firstIndex(of: "--gif-test"), CommandLine.argum
     }
     sem.wait()
     exit(0)
+}
+
+// Settings screenshot mode: renders each Settings pane to a PNG so the window can be reviewed
+// as it actually lays out. Renders offscreen through NSHostingView rather than capturing the
+// screen: no Screen Recording round trip, nothing appears on the user's display, and it still
+// works while the screen is locked (ScreenCaptureKit blocks there).
+//   Kapture.app/Contents/MacOS/Kapture --settings-shot /tmp/settings
+if let i = CommandLine.arguments.firstIndex(of: "--settings-shot"), CommandLine.arguments.count > i + 1 {
+    let directory = URL(fileURLWithPath: CommandLine.arguments[i + 1])
+    try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+    let panes: [(String, SettingsView.Tab)] = [
+        ("1-general", .general), ("2-overlay", .overlay), ("3-recording", .recording),
+        ("4-library", .library), ("5-shortcuts", .shortcuts), ("6-sharing", .sharing),
+    ]
+    Task { @MainActor in
+        let selection = SettingsSelection()
+        let host = NSHostingView(rootView: SettingsView(selection: selection))
+        host.frame = NSRect(x: 0, y: 0, width: 520, height: 560)
+        // a window parked off the side of every display: SwiftUI needs one to lay out properly,
+        // and nobody ever sees this one
+        let window = NSWindow(contentRect: host.frame, styleMask: [.titled],
+                              backing: .buffered, defer: false)
+        window.title = "Kapture Settings"
+        window.contentView = host
+        window.setFrameOrigin(NSPoint(x: -10_000, y: -10_000))
+        window.orderFront(nil)
+
+        for (name, tab) in panes {
+            selection.tab = tab
+            try? await Task.sleep(for: .milliseconds(500))   // let SwiftUI lay the pane out
+            host.layoutSubtreeIfNeeded()
+            guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else {
+                print("no bitmap: \(name)"); continue
+            }
+            host.cacheDisplay(in: host.bounds, to: rep)
+            guard let data = rep.representation(using: .png, properties: [:]) else {
+                print("no png: \(name)"); continue
+            }
+            let url = directory.appendingPathComponent("\(name).png")
+            try? data.write(to: url)
+            print("wrote \(url.lastPathComponent) \(rep.pixelsWide)x\(rep.pixelsHigh)")
+        }
+        exit(0)
+    }
+    app.run()
 }
 
 // Stores the share token, read from stdin so it never lands in argv or a shell history. The app

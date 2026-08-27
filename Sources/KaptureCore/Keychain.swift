@@ -36,6 +36,27 @@ public enum Keychain {
         return value
     }
 
+    /// Whether a secret is stored, without reading it.
+    ///
+    /// This matters: returning the *data* is what makes macOS check the item's ACL and put up
+    /// "Kapture wants to access key sh.kapture.app" — and the ACL trusts the exact binary that
+    /// created the item, so every rebuild during development asks again. Asking only for
+    /// attributes answers "is one set?" with no dialog, which is all the UI ever needed.
+    public static func has(_ account: String) -> Bool {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecReturnAttributes as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        var item: CFTypeRef?
+        return SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess
+    }
+
+    public static var hasAnthropicKey: Bool { has("anthropic-api-key") }
+    public static var hasShareToken: Bool { has("share-token") }
+
     public static var anthropicKey: String? {
         get { get("anthropic-api-key") }
         set { set(newValue, for: "anthropic-api-key") }
