@@ -203,6 +203,16 @@ public final class Library: @unchecked Sendable {
         }
     }
 
+    /// Record (or clear) the kapture.sh link for a capture. Setting a link also clears the stale
+    /// flag: a fresh upload is by definition the current pixels, whatever edits preceded it.
+    public func setShareLink(_ id: String, url: String?) throws {
+        try db.queue.write { d in
+            try d.execute(sql: "UPDATE captures SET shareURL = ?, shareStale = 0 WHERE id = ?",
+                          arguments: [url, id])
+        }
+        Log.store.info("share link \(url == nil ? "cleared" : "set", privacy: .public) for \(id, privacy: .public)")
+    }
+
     /// Copy the pristine pixels aside into .originals/ if that hasn't happened yet, and return
     /// the copy's library-relative path. Idempotent: only the first destructive edit copies,
     /// every later one finds the original already there and leaves it untouched.

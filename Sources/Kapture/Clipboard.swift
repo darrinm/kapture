@@ -17,4 +17,11 @@ enum Clipboard {
     static func write(url: URL) {
         write(url: url, image: NSImage(contentsOf: url))
     }
+
+    /// A share link goes on the pasteboard as text, not as a file URL: the point is to paste it
+    /// into a message, and a `public.url` item pastes as an attachment in some apps.
+    static func write(string: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(string, forType: .string)
+    }
 }

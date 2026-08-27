@@ -107,6 +107,25 @@ public struct Settings {
         set { d.set(newValue, forKey: "aiNamingEnabled") }
     }
 
+    /// Where shares are uploaded. Overridable so a fork can point at its own Worker, but the
+    /// default is the one kapture.sh runs.
+    public var shareEndpoint: URL {
+        get {
+            guard let raw = d.string(forKey: "shareEndpoint"), let url = URL(string: raw),
+                  url.scheme == "https"
+            else { return URL(string: "https://kapture.sh")! }
+            return url
+        }
+        set { d.set(newValue.absoluteString, forKey: "shareEndpoint") }
+    }
+
+    /// Put the link on the clipboard as soon as a share finishes — the reason to share is almost
+    /// always to paste it somewhere.
+    public var copyShareLinkAutomatically: Bool {
+        get { d.object(forKey: "copyShareLink") as? Bool ?? true }
+        set { d.set(newValue, forKey: "copyShareLink") }
+    }
+
     /// Route ⌘W/⌘C/⌘S/⌘⌫/space to the hovered overlay without clicking (needs Accessibility).
     public var hoverShortcutsEnabled: Bool {
         get { d.object(forKey: "hoverShortcutsEnabled") as? Bool ?? true }

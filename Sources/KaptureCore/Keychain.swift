@@ -40,4 +40,11 @@ public enum Keychain {
         get { get("anthropic-api-key") }
         set { set(newValue, for: "anthropic-api-key") }
     }
+
+    /// Bearer token for kapture.sh. The server stores only its sha256, so this string is the
+    /// single copy that can authorize a share — hence Keychain, not UserDefaults.
+    public static var shareToken: String? {
+        get { get("share-token") }
+        set { set(newValue, for: "share-token") }
+    }
 }

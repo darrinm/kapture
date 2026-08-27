@@ -366,8 +366,18 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
         fadeOut()
     }
 
+    /// Upload to kapture.sh and put the link on the clipboard. The card stays up while the
+    /// upload runs and closes only on success, so a failed share leaves something to retry.
+    func shareLink() {
+        markKept()
+        ShareCoordinator.shared.share(record) { [weak self] url in
+            guard url != nil else { return }
+            self?.fadeOut()
+        }
+    }
+
     /// The one overlay shortcut table (used by both the click-to-key tier and the AX event
-    /// tap): space → Quick Look; ⌘⌫ discard; ⌘W keep; ⌘C copy; ⌘S save; ⌘E edit.
+    /// tap): space → Quick Look; ⌘⌫ discard; ⌘W keep; ⌘C copy; ⌘S save; ⌘E edit; ⌘U share.
     /// Strict modifiers: space with none, letters/delete with command only.
     @discardableResult
     func performShortcut(command: Bool, keyCode: UInt16, characters: String?, plainSpace: Bool) -> Bool {
@@ -379,6 +389,7 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
         case "c": copyToClipboard(); return true
         case "s": saveToExportLocation(); return true
         case "e": edit(); return true
+        case "u": shareLink(); return true
         default: return false
         }
     }
@@ -458,6 +469,7 @@ final class OverlayView: NSView, NSDraggingSource {
         chrome.addArrangedSubview(button("doc.on.doc", "Copy (⌘C)", #selector(copyTapped)))
         chrome.addArrangedSubview(button("square.and.arrow.down", "Save (⌘S)", #selector(saveTapped)))
         chrome.addArrangedSubview(button("pencil", "Edit (⌘E)", #selector(editTapped)))
+        chrome.addArrangedSubview(button("link", "Share link (⌘U)", #selector(shareTapped)))
         chrome.addArrangedSubview(button("pin", "Pin to screen", #selector(pinTapped)))
         chrome.isHidden = true
         addSubview(chrome)
@@ -486,6 +498,7 @@ final class OverlayView: NSView, NSDraggingSource {
     @objc func saveTapped() { panel.saveToExportLocation() }
     @objc func pinTapped() { panel.pin() }
     @objc func editTapped() { panel.edit() }
+    @objc func shareTapped() { panel.shareLink() }
     @objc func discardTapped() { panel.discard() }
 
     // MARK: keyboard (click-to-key tier)
@@ -519,6 +532,7 @@ final class OverlayView: NSView, NSDraggingSource {
         }
         menu.addItem(withTitle: "Pin to Screen", action: #selector(pinTapped), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Copy", action: #selector(copyTapped), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Share Link", action: #selector(shareTapped), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Save As…", action: #selector(saveAsTapped), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Reveal in Finder", action: #selector(revealTapped), keyEquivalent: "").target = self
         menu.addItem(.separator())

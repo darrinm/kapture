@@ -86,6 +86,14 @@ struct SettingsView: View {
     // out so a key typed and immediately dismissed still lands.
     @State private var keyCommit: Task<Void, Never>?
     @State private var keyEdited = false
+    @AppStorage("copyShareLink") private var copyShareLink = true
+    @State private var shareToken = ""
+    @State private var hasShareToken = Keychain.shareToken?.isEmpty == false
+    @State private var shareCommit: Task<Void, Never>?
+    @State private var shareTokenEdited = false
+    @State private var shareStatus = ""
+    @State private var shareStatusIsError = false
+    @State private var checkingShare = false
 
     var body: some View {
         TabView {
@@ -93,6 +101,7 @@ struct SettingsView: View {
             overlay.tabItem { Label("Overlay", systemImage: "rectangle.bottomright.filled.and.rectangle") }
             recording.tabItem { Label("Recording", systemImage: "record.circle") }
             intelligence.tabItem { Label("Library", systemImage: "sparkles") }
+            sharing.tabItem { Label("Sharing", systemImage: "link") }
         }
         .frame(width: 420)
         .padding(.bottom, 12)
@@ -207,6 +216,82 @@ struct SettingsView: View {
     private func commitKey() {
         guard keyEdited else { return }
         Keychain.anthropicKey = anthropicKey.isEmpty ? nil : anthropicKey
+    }
+
+    var sharing: some View {
+        Form {
+            SecureField("Share token", text: $shareToken,
+                        prompt: Text(hasShareToken ? "stored — type to replace" : "paste your kapture.sh token"))
+                // same debounce as the API key: a Keychain write is two blocking XPC calls
+                .onChange(of: shareToken) { _, v in
+                    hasShareToken = !v.isEmpty
+                    shareTokenEdited = true
+                    shareStatus = ""
+                    shareCommit?.cancel()
+                    shareCommit = Task { @MainActor in
+                        try? await Task.sleep(for: .milliseconds(600))
+                        guard !Task.isCancelled else { return }
+                        commitShareToken()
+                    }
+                }
+            LabeledContent("Server") {
+                HStack {
+                    Text(Settings.shared.shareEndpoint.host ?? "kapture.sh")
+                        .foregroundStyle(.secondary)
+                    Button("Check") {
+                        commitShareToken()
+                        checkShareToken()
+                    }
+                    .disabled(!hasShareToken || checkingShare)
+                }
+            }
+            if !shareStatus.isEmpty {
+                Text(shareStatus)
+                    .font(.caption)
+                    .foregroundStyle(shareStatusIsError ? .red : .secondary)
+            }
+            Toggle("Copy the link after sharing", isOn: $copyShareLink)
+            Text(hasShareToken
+                 ? "⌘U on a capture uploads it and copies a permanent link. Links stay up until "
+                   + "you delete them from the library's right-click menu. Editing a shared "
+                   + "capture marks its link out of date — sharing again replaces it."
+                 : "Sharing is off until a token is set. Kapture uploads only when you ask it to, "
+                   + "and the link is the only way to reach the file — there is no listing page.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .formStyle(.grouped)
+        .padding(.top, 4)
+        .onDisappear {
+            shareCommit?.cancel()
+            commitShareToken()
+        }
+    }
+
+    private func commitShareToken() {
+        guard shareTokenEdited else { return }
+        Keychain.shareToken = shareToken.isEmpty ? nil : shareToken
+    }
+
+    /// One real request, so "connected" means the token actually authorizes rather than merely
+    /// being non-empty. A typo'd token otherwise only surfaces at the moment of a share.
+    private func checkShareToken() {
+        checkingShare = true
+        shareStatus = "Checking…"
+        shareStatusIsError = false
+        Task { @MainActor in
+            defer { checkingShare = false }
+            do {
+                try await ShareService.verifyToken()
+                shareStatus = "Connected to \(Settings.shared.shareEndpoint.host ?? "kapture.sh")"
+            } catch let failure as ShareFailure {
+                shareStatus = failure.description
+                shareStatusIsError = true
+            } catch {
+                shareStatus = error.localizedDescription
+                shareStatusIsError = true
+            }
+        }
     }
 
     var recording: some View {

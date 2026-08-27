@@ -512,6 +512,14 @@ final class LibraryGridView: NSView {
             add("Copy", #selector(copySelected))
             add("Reveal in Finder", #selector(revealSelected))
             menu.addItem(.separator())
+            // an edited capture's link points at the pixels as they were, so offer to refresh it
+            if record.shareURL != nil {
+                add(record.shareStale ? "Update Share Link" : "Copy Share Link", #selector(shareSelected))
+                add("Delete Share Link", #selector(unshareSelected))
+            } else {
+                add("Share Link", #selector(shareSelected))
+            }
+            menu.addItem(.separator())
             add("Discard", #selector(discardSelected))
         }
         return menu
@@ -529,6 +537,14 @@ final class LibraryGridView: NSView {
         NSWorkspace.shared.activateFileViewerSelecting([library.url(for: r)])
     }
     @objc private func discardSelected() { if let r = selectedRecord { discard(r) } }
+    @objc private func shareSelected() {
+        guard let r = selectedRecord else { return }
+        ShareCoordinator.shared.share(r)
+    }
+    @objc private func unshareSelected() {
+        guard let r = selectedRecord else { return }
+        ShareCoordinator.shared.unshare(r)
+    }
     /// Restore *this* capture. Restoring "the last discarded" from a right-click on a specific
     /// trashed item put a different file back.
     @objc private func restoreSelected() {
@@ -560,8 +576,33 @@ final class LibraryGridView: NSView {
                 ctx.setLineWidth(3)
                 ctx.stroke(r.insetBy(dx: 1.5, dy: 1.5))
             }
+            if item.record.shareURL != nil { drawShareBadge(item, in: r, ctx: ctx) }
             if hovered == i { drawHoverMetadata(item, in: r, ctx: ctx) }
         }
+    }
+
+    /// The one piece of always-on per-item chrome, because "is this one public?" is state the
+    /// grid must answer without a hover: a small glyph in the top-right, amber when the link
+    /// points at pixels the capture no longer has.
+    private func drawShareBadge(_ item: Item, in r: CGRect, ctx: CGContext) {
+        let box = CGRect(x: r.maxX - 24, y: r.minY + 6, width: 18, height: 18)
+        ctx.setFillColor(NSColor.black.withAlphaComponent(0.45).cgColor)
+        ctx.fillEllipse(in: box)
+        // NSImage.draw, not CGContext.draw: this view is flipped, and only the AppKit path
+        // orients the glyph for it
+        let glyph = item.record.shareStale ? Self.staleGlyph : Self.sharedGlyph
+        glyph?.draw(in: box.insetBy(dx: 4, dy: 4))
+    }
+
+    /// Tinted once each: building a symbol image costs a render, and the grid redraws on scroll.
+    private static let sharedGlyph = shareGlyph(NSColor.white)
+    private static let staleGlyph = shareGlyph(NSColor.systemOrange)
+
+    private static func shareGlyph(_ tint: NSColor) -> NSImage? {
+        let config = NSImage.SymbolConfiguration(pointSize: 10, weight: .semibold)
+            .applying(NSImage.SymbolConfiguration(paletteColors: [tint]))
+        return NSImage(systemSymbolName: "link", accessibilityDescription: "Shared")?
+            .withSymbolConfiguration(config)
     }
 
     /// Name + duration on a bottom gradient — the only per-item chrome, and only on hover.

@@ -20,6 +20,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             EditorController.shared.library = library
             TrimmerController.shared.library = library
             LibraryWindowController.shared.library = library
+            ShareCoordinator.shared.library = library
             Task {
                 await IngestQueue.shared.configure(library: library)
                 await IngestQueue.shared.resume()   // pick up jobs left by a previous run
