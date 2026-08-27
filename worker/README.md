@@ -70,12 +70,23 @@ This is already done for kapture.sh. Adding a friend afterwards is the dashboard
 
 ## The dashboard
 
-`https://kapture.sh/admin` — sign in with the admin's own share token.
+`https://kapture.sh/admin` — behind Cloudflare Access, so signing in is an identity rather than
+a pasted string. The Access application allows one email address and sends a one-time PIN.
 
 It lists everyone who has a token, what they have stored, and what they have used today; mints
 a token for a new person (shown once, never stored); revokes one; and deletes individual
-shares. It runs without any JavaScript — plain forms under the same `script-src 'none'` policy
-as the viewer — and the session cookie is HttpOnly, Secure and SameSite=Strict.
+shares. It runs without any JavaScript — plain forms under the same `script-src 'none'` policy as the
+viewer.
+
+Access stops anonymous requests at the edge, but the Worker verifies the JWT itself rather than
+trusting the header, because anything reaching the Worker by another route could set that header
+freely: RS256 signature against the team's published keys, issuer must be the team, and the
+audience must be *this* application — Access mints tokens for every app in an account.
+
+Configured by three vars in `wrangler.jsonc`: `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD` (the
+application's AUD tag, under Additional settings → AUD tag) and `ADMIN_EMAIL`. Remove the first
+two and the dashboard falls back to signing in with the admin's share token, which is how it
+worked before and how a fork with no Zero Trust plan can still use it.
 
 **Where the owner table lives.** A Worker cannot write its own secrets, so the live table is a
 KV entry, not the `TOKENS` secret. On a deployment that has never written one, the secret is

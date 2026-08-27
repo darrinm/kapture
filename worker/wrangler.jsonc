@@ -16,7 +16,14 @@
     // the owner allowed to delete anyone's share
     "ADMIN_OWNER": "darrin",
     // where /download and /appcast.xml redirect; point this at your own releases
-    "RELEASES_BASE": "https://github.com/darrinm/kapture/releases"
+    "RELEASES_BASE": "https://github.com/darrinm/kapture/releases",
+    // Cloudflare Access guards /admin. The Worker verifies the JWT itself rather than trusting
+    // the header: Access stops anonymous requests at the edge, and this stops anything that
+    // reaches the Worker another way. Neither value is a secret.
+    "ACCESS_TEAM_DOMAIN": "darrinm.cloudflareaccess.com",
+    "ACCESS_AUD": "27a57c8c07cc023544c97caa0eba8480d159befb9ea9c9638eddacd9777372b7",
+    // the Access policy already allows only this address; this is the second lock
+    "ADMIN_EMAIL": "darrin@massena.com"
   }
   // TOKENS is a secret: wrangler secret put TOKENS
   // (JSON map of owner → sha256 hex of that owner's bearer token)
