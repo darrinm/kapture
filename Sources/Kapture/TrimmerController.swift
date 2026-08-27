@@ -93,13 +93,34 @@ final class TrimmerController {
         let out = Library.tempURL(prefix: "kapture-trim", ext: "mp4")
         do {
             export.timeRange = range
-            try await export.export(to: out, as: .mp4)
+            if #available(macOS 15, *) {
+                try await export.export(to: out, as: .mp4)
+            } else {
+                try await legacyExport(export, to: out)
+            }
             try library.applyTrim(recordID, trimmedURL: out, duration: range.duration.seconds)
             Sounds.play("Glass")
             window.close()
             OverlayController.shared.showCard(recordID: recordID)
         } catch {
             Log.capture.error("trimmer: export failed: \(error)")
+        }
+    }
+
+    /// The macOS 14 export path. `export(to:as:)` is macOS 15 only, and Kapture ships back to 14.
+    ///
+    /// Deliberately marked deprecated: a deprecated declaration is allowed to call other
+    /// declarations deprecated at the same version, which is what keeps the pre-15 calls inside
+    /// it from failing a `-warnings-as-errors` build against a 15+ SDK.
+    @available(macOS, deprecated: 15.0, message: "AVAssetExportSession.export(to:as:) covers 15+")
+    private func legacyExport(_ export: AVAssetExportSession, to out: URL) async throws {
+        export.outputURL = out
+        export.outputFileType = .mp4
+        await withCheckedContinuation { continuation in
+            export.exportAsynchronously { continuation.resume() }
+        }
+        guard export.status == .completed else {
+            throw export.error ?? CocoaError(.fileWriteUnknown)
         }
     }
 }

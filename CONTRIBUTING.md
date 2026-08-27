@@ -27,7 +27,15 @@ scripts/test.sh            # swift test
 cd worker && npm test      # the share backend
 ```
 
-Warnings are errors here, in both the local build and CI. Tests that need Screen Recording or
+Warnings are errors here, in both the local build and CI.
+
+**A green local build does not mean a green CI build.** SwiftPM on a recent toolchain builds
+against the host OS rather than the package's `macOS(.v14)` deployment target, so a call that is
+macOS 15-only compiles fine on your machine and fails on CI with "only available in macOS 15 or
+newer". Passing `-Xswiftc -target` doesn't help — SwiftPM appends its own afterwards — and
+`--triple` selects a mismatched SDK. So when you reach for a recent API, guard it with
+`if #available(macOS 15, *)` and a macOS 14 path, and let CI have the last word. This is not
+hypothetical: it once sat on main for twenty commits. Tests that need Screen Recording or
 Accessibility can't run on a headless CI runner, so that code is exercised through the headless
 harness flags (`--tcc-check`, `--ingest-now`, `--gif-test`, `--share-test`) rather than by
 synthesizing input.
