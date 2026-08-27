@@ -12,7 +12,9 @@ final class RecordingHUD {
     private var keysWindow: KeystrokeWindow?
     private var monitor: Any?
 
-    var isAvailable: Bool { AXIsProcessTrusted() }
+    // the Accessibility grant is the same predicate the event-tap tier gates on, and that's
+    // the one place that owns it
+    var isAvailable: Bool { EventTapCenter.hasAccessibility }
 
     func start(showClicks: Bool, showKeys: Bool) {
         guard isAvailable, showClicks || showKeys else { return }
@@ -26,9 +28,36 @@ final class RecordingHUD {
             w.orderFrontRegardless()
             keysWindow = w
         }
+        addMonitor()
+    }
+
+    /// Pause/resume: stop and resume *listening*, keeping the windows. Tearing the HUD down
+    /// would rebuild a panel spanning the union of every screen on each pause — the windows
+    /// draw nothing while no events arrive, so suspending the monitor is the whole job.
+    func setSuspended(_ suspended: Bool) {
+        if suspended {
+            removeMonitor()
+            clickWindow?.clearRipples()
+            keysWindow?.clearKeys()
+        } else {
+            addMonitor()
+        }
+    }
+
+    func stop() {
+        removeMonitor()
+        // tear down first: the ripple timer and the fade task outlive the windows otherwise
+        clickWindow?.teardown(); clickWindow?.orderOut(nil); clickWindow = nil
+        keysWindow?.teardown(); keysWindow?.orderOut(nil); keysWindow = nil
+    }
+
+    /// Mask follows the windows that exist, so it can never disagree with what's on screen.
+    private func addMonitor() {
+        guard monitor == nil else { return }
         var mask: NSEvent.EventTypeMask = []
-        if showClicks { mask.insert([.leftMouseDown, .rightMouseDown]) }
-        if showKeys { mask.insert([.keyDown, .flagsChanged]) }
+        if clickWindow != nil { mask.insert([.leftMouseDown, .rightMouseDown]) }
+        if keysWindow != nil { mask.insert([.keyDown, .flagsChanged]) }
+        guard !mask.isEmpty else { return }
         monitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] event in
             Task { @MainActor in
                 switch event.type {
@@ -42,12 +71,9 @@ final class RecordingHUD {
         }
     }
 
-    func stop() {
+    private func removeMonitor() {
         if let monitor { NSEvent.removeMonitor(monitor) }
         monitor = nil
-        // tear down first: the ripple timer and the fade task outlive the windows otherwise
-        clickWindow?.teardown(); clickWindow?.orderOut(nil); clickWindow = nil
-        keysWindow?.teardown(); keysWindow?.orderOut(nil); keysWindow = nil
     }
 
     private static func describe(_ event: NSEvent) -> String {
@@ -82,23 +108,43 @@ final class ClickWindow: NSPanel {
     func ripple(at screenPoint: NSPoint) {
         view.addRipple(at: NSPoint(x: screenPoint.x - frame.minX, y: screenPoint.y - frame.minY))
     }
-    func teardown() { view.stopAnimating() }
+    /// Drop in-flight ripples and stop the 60Hz timer (pause).
+    func clearRipples() { view.stopAnimating() }
+    func teardown() { clearRipples() }
 }
 
 final class ClickView: NSView {
     private struct Ripple { let point: NSPoint; let born: Date }
+    private static let life: TimeInterval = 0.55
+    /// Largest radius (8 + 26) plus the widest stroke — a ripple never paints outside this.
+    private static let extent: CGFloat = 40
     private var ripples: [Ripple] = []
     private var timer: Timer?
 
+    private func rect(around p: NSPoint) -> NSRect {
+        NSRect(x: p.x - Self.extent, y: p.y - Self.extent,
+               width: Self.extent * 2, height: Self.extent * 2)
+    }
+
+    /// Union of every live ripple's rect — what a tick has to repaint (expiring ripples
+    /// included, so the last frame of one gets erased).
+    private var liveRect: NSRect {
+        ripples.reduce(.zero) { $0.union(rect(around: $1.point)) }
+    }
+
     func addRipple(at p: NSPoint) {
         ripples.append(Ripple(point: p, born: Date()))
-        needsDisplay = true
+        // This window spans the union of ALL screens. `needsDisplay = true` would recomposite
+        // every display at 60Hz for the length of a recording; ripples are ~80pt squares.
+        setNeedsDisplay(rect(around: p))
         if timer == nil {
             timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60, repeats: true) { [weak self] _ in
-                Task { @MainActor in
+                MainActor.assumeIsolated {   // scheduled on the main run loop
                     guard let self else { return }
-                    self.ripples.removeAll { Date().timeIntervalSince($0.born) > 0.55 }
-                    self.needsDisplay = true
+                    let now = Date()
+                    let dirty = self.liveRect
+                    self.ripples.removeAll { now.timeIntervalSince($0.born) > Self.life }
+                    if !dirty.isEmpty { self.setNeedsDisplay(dirty) }
                     if self.ripples.isEmpty { self.timer?.invalidate(); self.timer = nil }
                 }
             }
@@ -109,13 +155,16 @@ final class ClickView: NSView {
     /// mid-ripple the weak-self block would keep firing at 60Hz for the app's lifetime.
     func stopAnimating() {
         timer?.invalidate(); timer = nil
+        let dirty = liveRect
         ripples.removeAll()
+        if !dirty.isEmpty { setNeedsDisplay(dirty) }
     }
 
     override func draw(_ dirty: NSRect) {
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
-        for r in ripples {
-            let t = min(1, Date().timeIntervalSince(r.born) / 0.55)
+        let now = Date()
+        for r in ripples where rect(around: r.point).intersects(dirty) {
+            let t = min(1, now.timeIntervalSince(r.born) / Self.life)
             let radius = 8 + 26 * t
             let alpha = 0.55 * (1 - t)
             ctx.setStrokeColor(Tokens.accent.withAlphaComponent(alpha).cgColor)
@@ -159,6 +208,13 @@ final class KeystrokeWindow: NSPanel {
     }
 
     func teardown() { clearTask?.cancel(); clearTask = nil }
+
+    /// Drop whatever is on screen without tearing the window down (pause).
+    func clearKeys() {
+        teardown()
+        recent.removeAll()
+        alphaValue = 0
+    }
 
     func show(_ key: String) {
         guard !key.isEmpty else { return }

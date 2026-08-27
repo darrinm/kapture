@@ -6,6 +6,15 @@ public enum Tokens {
     public static let accent = NSColor(srgbRed: 0.78, green: 0.26, blue: 0.23, alpha: 1)  // record red #C7423A
     public static let overlayScrim = NSColor.black.withAlphaComponent(0.38)
 
+    // MARK: Duration
+    /// m:ss for every duration Kapture shows (live recording timer, overlay card pill).
+    /// Truncating, not rounding: the live timer must never read 1:00 while it is still
+    /// recording second 59, and the card has to agree with the timer that produced it.
+    public static func duration(_ seconds: Double) -> String {
+        let s = Int(max(0, seconds))
+        return String(format: "%d:%02d", s / 60, s % 60)
+    }
+
     // MARK: Spacing & radius
     public static let cornerMargin: CGFloat = 16
     public static let stackGap: CGFloat = 8

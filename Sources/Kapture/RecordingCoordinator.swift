@@ -7,18 +7,29 @@ import AVFoundation
 import ScreenCaptureKit
 import KaptureCore
 import KaptureCapture
+import KaptureDesign
 import KaptureRecording
+
+/// Everything the menu-bar item needs to draw itself, in one signal.
+enum RecordingStatus {
+    case idle
+    case active(elapsed: String, paused: Bool)
+}
 
 @MainActor
 final class RecordingCoordinator {
     static let shared = RecordingCoordinator()
     var library: Library?
-    var onStateChanged: ((_ recording: Bool) -> Void)?
+    var onStatusChanged: ((RecordingStatus) -> Void)?
 
     private var session: RecordingSession?
     private var border: BorderWindow?
     private var timer: Timer?
     private var frontApp: String?
+    // Two clocks, deliberately: the movie's length comes from the session (frames appended),
+    // while the menu-bar timer runs on wall time minus pause spans. SCK only delivers frames
+    // when the screen CHANGES, so a session-derived timer would sit frozen on a still screen
+    // even though the recording is very much running.
     private var pauseStart: Date?
     private var pausedTotal: TimeInterval = 0
     /// true between "selection made" and "session assigned" — a second ⌘⇧5 in that window
@@ -27,6 +38,20 @@ final class RecordingCoordinator {
 
     var isRecording: Bool { session != nil }
     var isPaused: Bool { session?.isPaused ?? false }
+
+    /// Wall-clock recorded time, pause spans removed.
+    private var elapsedText: String {
+        guard let started = session?.startedAt else { return Tokens.duration(0) }
+        let now = Date()
+        var elapsed = now.timeIntervalSince(started) - pausedTotal
+        if let began = pauseStart { elapsed -= now.timeIntervalSince(began) }
+        return Tokens.duration(elapsed)
+    }
+
+    private func publishStatus() {
+        guard let session else { onStatusChanged?(.idle); return }
+        onStatusChanged?(.active(elapsed: elapsedText, paused: session.isPaused))
+    }
 
     func togglePause() {
         guard let session else { return }
@@ -39,15 +64,10 @@ final class RecordingCoordinator {
             pausedTotal += Date().timeIntervalSince(began)
             pauseStart = nil
         }
-        RecordingHUD.shared.stop()
-        if !next {
-            RecordingHUD.shared.start(showClicks: Settings.shared.showClicksWhileRecording,
-                                      showKeys: Settings.shared.showKeysWhileRecording)
-        }
-        onPauseChanged?(next)
+        RecordingHUD.shared.setSuspended(next)
+        publishStatus()
         Sounds.play(next ? "Tink" : "Morse")
     }
-    var onPauseChanged: ((Bool) -> Void)?
 
     func toggle() {
         if isRecording { stop() } else { start() }
@@ -77,7 +97,7 @@ final class RecordingCoordinator {
                 switch result {
                 case .area(let sel):
                     scope = .area(sel.frame.display, rectInPoints: sel.rectInPoints, scale: sel.frame.scale)
-                    borderRect = nsRect(displayLocal: sel.rectInPoints, on: sel.frame.screen)
+                    borderRect = ScreenshotService.nsRect(displayLocal: sel.rectInPoints, on: sel.frame.screen)
                 case .window(let win):
                     let scale = ScreenshotService.displayScale(forCGGlobal: win.frame)
                     scope = .window(win, scale: scale)
@@ -96,7 +116,7 @@ final class RecordingCoordinator {
                                           showKeys: Settings.shared.showKeysWhileRecording)
                 startTimer()
                 Sounds.play("Morse")
-                onStateChanged?(true)
+                publishStatus()
             } catch {
                 Log.capture.error("recording start failed: \(error)")
                 self.session = nil
@@ -111,48 +131,26 @@ final class RecordingCoordinator {
         timer?.invalidate(); timer = nil
         border?.orderOut(nil); border = nil
         RecordingHUD.shared.stop()
-        onStateChanged?(false)
+        publishStatus()
         let app = frontApp
         Task {
             do {
                 let result = try await session.stop()
                 guard let library else { return }
-                let (record, url) = try library.storeMovie(
-                    from: result.url, width: result.width, height: result.height,
-                    duration: result.duration, sourceApp: app)
+                let (record, _) = try library.storeMovie(result, sourceApp: app)
                 Sounds.play("Glass")
-                await self.showRecordingCard(record: record, url: url)
+                OverlayController.shared.showCard(recordID: record.id)
             } catch { Log.capture.error("recording stop failed: \(error)") }
         }
-    }
-
-    private func showRecordingCard(record: CaptureRecord, url: URL) async {
-        // poster = first frame
-        let poster = await Task.detached(priority: .userInitiated) {
-            OverlayController.poster(for: url)
-        }.value
-        guard let poster else { return }
-        OverlayController.shared.show(record: record, fileURL: url, image: poster)
     }
 
     private func startTimer() {
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
-            Task { @MainActor in
-                let c = RecordingCoordinator.shared
-                guard let started = c.session?.startedAt else { return }
-                var elapsed = Date().timeIntervalSince(started) - c.pausedTotal
-                if let began = c.pauseStart { elapsed -= Date().timeIntervalSince(began) }
-                let s = Int(max(0, elapsed))
-                c.onTick?(String(format: "%d:%02d", s / 60, s % 60))
+            MainActor.assumeIsolated {   // scheduled on the main run loop
+                RecordingCoordinator.shared.publishStatus()
             }
         }
-    }
-    var onTick: ((String) -> Void)?
-
-    private func nsRect(displayLocal r: CGRect, on screen: NSScreen) -> NSRect {
-        NSRect(x: screen.frame.minX + r.origin.x, y: screen.frame.maxY - r.maxY,
-               width: r.width, height: r.height)
     }
 
     private func showBorder(around rect: NSRect) {
@@ -175,7 +173,7 @@ final class BorderWindow: NSWindow {
         let view = NSView(frame: .zero)
         view.wantsLayer = true
         view.layer?.borderWidth = 2
-        view.layer?.borderColor = NSColor(srgbRed: 0.78, green: 0.26, blue: 0.23, alpha: 0.9).cgColor
+        view.layer?.borderColor = Tokens.accent.withAlphaComponent(0.9).cgColor
         view.layer?.cornerRadius = 4
         contentView = view
     }

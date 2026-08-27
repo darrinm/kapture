@@ -34,7 +34,7 @@ final class PinController {
         } else if let img = (pb.readObjects(forClasses: [NSImage.self]) as? [NSImage])?.first,
                   let cg = img.cgImage(forProposedRect: nil, context: nil, hints: nil),
                   let png = ScreenshotService.pngData(cg) {
-            let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("pin-\(ULID.generate()).png")
+            let tmp = Library.tempURL(prefix: "pin", ext: "png")
             try? png.write(to: tmp)
             pin(fileURL: tmp)
         }

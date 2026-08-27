@@ -1,6 +1,7 @@
 import AppKit
 import KaptureCore
 import KaptureCapture
+import KaptureDesign
 import KaptureEditor
 import KaptureRecording
 
@@ -41,46 +42,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             }
         }
         RecordingCoordinator.shared.library = CaptureCoordinator.shared.library
-        RecordingCoordinator.shared.onStateChanged = { [weak self] recording in
-            guard let button = self?.statusItem.button else { return }
-            if recording {
-                // non-template so the red survives; timer text appears on the first tick
-                let symbol = NSImage(systemSymbolName: "stop.circle.fill", accessibilityDescription: "Stop recording")?
-                    .withSymbolConfiguration(.init(paletteColors: [
-                        NSColor(srgbRed: 0.85, green: 0.22, blue: 0.19, alpha: 1)]))
-                symbol?.isTemplate = false
-                button.image = symbol
-                button.imagePosition = .imageLeft
-                button.title = " 0:00"
-                button.toolTip = "Click to stop recording (⌘⇧5) · right-click for more"
-                // while recording the item is a stop BUTTON, not a menu opener
-                self?.statusItem.menu = nil
-                button.target = self
-                button.action = #selector(AppDelegate.statusButtonClicked)
-                button.sendAction(on: [.leftMouseUp, .rightMouseUp])
-            } else {
-                button.image = NSImage(systemSymbolName: "camera.viewfinder", accessibilityDescription: "Kapture")
-                button.contentTintColor = nil
-                button.title = ""
-                button.toolTip = nil
-                button.target = nil
-                button.action = nil
-                self?.statusItem.menu = self?.statusMenu
-            }
-        }
-        RecordingCoordinator.shared.onTick = { [weak self] elapsed in
-            guard let button = self?.statusItem.button else { return }
-            button.title = RecordingCoordinator.shared.isPaused ? " ⏸ " + elapsed : " " + elapsed
-            button.imagePosition = .imageLeft
-        }
-        RecordingCoordinator.shared.onPauseChanged = { [weak self] paused in
-            guard let button = self?.statusItem.button else { return }
-            let symbol = NSImage(systemSymbolName: paused ? "pause.circle.fill" : "stop.circle.fill",
-                                 accessibilityDescription: paused ? "Paused" : "Stop recording")?
-                .withSymbolConfiguration(.init(paletteColors: [
-                    NSColor(srgbRed: 0.85, green: 0.22, blue: 0.19, alpha: 1)]))
-            symbol?.isTemplate = false
-            button.image = symbol
+        RecordingCoordinator.shared.onStatusChanged = { [weak self] status in
+            self?.renderStatusItem(status)
         }
         HotkeyCenter.shared.install()
         EventTapCenter.shared.startIfPossible()   // silent no-op without the Accessibility grant
@@ -94,6 +57,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         Timer.scheduledTimer(withTimeInterval: 6 * 3600, repeats: true) { _ in
             Task.detached(priority: .utility) { library?.sweepTrash() }
         }
+    }
+
+    /// The one place the menu-bar item is drawn: every recording-state change arrives here as a
+    /// RecordingStatus and is rendered top to bottom, so the glyph, the timer text and the
+    /// click behavior can never be updated by three callbacks that disagree.
+    private func renderStatusItem(_ status: RecordingStatus) {
+        guard let button = statusItem.button else { return }
+        switch status {
+        case .idle:
+            button.image = NSImage(systemSymbolName: "camera.viewfinder", accessibilityDescription: "Kapture")
+            button.contentTintColor = nil
+            button.title = ""
+            button.toolTip = nil
+            button.target = nil
+            button.action = nil
+            statusItem.menu = statusMenu
+        case .active(let elapsed, let paused):
+            button.image = recordingSymbol(paused ? "pause.circle.fill" : "stop.circle.fill",
+                                           label: paused ? "Paused" : "Stop recording")
+            button.imagePosition = .imageLeft
+            button.title = paused ? " ⏸ " + elapsed : " " + elapsed
+            button.toolTip = "Click to stop recording (⌘⇧5) · right-click for more"
+            // while recording the item is a stop BUTTON, not a menu opener
+            statusItem.menu = nil
+            button.target = self
+            button.action = #selector(AppDelegate.statusButtonClicked)
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        }
+    }
+
+    /// Accent-tinted, non-template so the red survives the menu bar's template tinting.
+    private func recordingSymbol(_ name: String, label: String) -> NSImage? {
+        let symbol = NSImage(systemSymbolName: name, accessibilityDescription: label)?
+            .withSymbolConfiguration(.init(paletteColors: [Tokens.accent]))
+        symbol?.isTemplate = false
+        return symbol
     }
 
     private func installStatusItem() {
@@ -115,8 +114,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         menu.addItem(item("Capture All Displays", #selector(menuAllDisplays)))
         menu.addItem(item("Capture Previous Area", #selector(menuPreviousArea), hotkey: .previousArea))
         menu.addItem(.separator())
+        // one item, title swapped by validateMenuItem — same idiom as Pause/Resume below
         menu.addItem(item("Record Area or Window", #selector(menuRecord), hotkey: .record))
-        menu.addItem(item("Stop Recording", #selector(menuStopRecording), hotkey: .record))
         menu.addItem(item("Pause Recording", #selector(menuPauseRecording)))
         let timerMenu = NSMenu()
         for s in [3, 5, 10] {
@@ -143,8 +142,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         statusItem.menu = menu
     }
 
-    @objc private func menuRecord() { if !RecordingCoordinator.shared.isRecording { RecordingCoordinator.shared.start() } }
-    @objc private func menuStopRecording() { RecordingCoordinator.shared.stop() }
+    @objc private func menuRecord() { RecordingCoordinator.shared.toggle() }
     @objc private func menuPauseRecording() { RecordingCoordinator.shared.togglePause() }
 
     /// While recording, a left click on the status item stops; a right click opens the menu.
@@ -161,8 +159,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
     }
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
-        if item.action == #selector(menuRecord) { return !RecordingCoordinator.shared.isRecording }
-        if item.action == #selector(menuStopRecording) { return RecordingCoordinator.shared.isRecording }
+        if item.action == #selector(menuRecord) {
+            item.title = RecordingCoordinator.shared.isRecording ? "Stop Recording" : "Record Area or Window"
+            return true
+        }
         if item.action == #selector(menuPauseRecording) {
             item.title = RecordingCoordinator.shared.isPaused ? "Resume Recording" : "Pause Recording"
             return RecordingCoordinator.shared.isRecording
@@ -197,15 +197,15 @@ if CommandLine.arguments.contains("--tcc-check") {
     exit(CGPreflightScreenCaptureAccess() ? 0 : 1)
 }
 
-// GIF-exporter smoke mode: converts the given movie and prints the result (test harness).
+// GIF-exporter smoke mode: converts the given movie and prints the result.
+// Driven by scripts/gif-test.command — that script is the entry point, this is the harness.
 if let i = CommandLine.arguments.firstIndex(of: "--gif-test"), CommandLine.arguments.count > i + 1 {
     let path = CommandLine.arguments[i + 1]
     let sem = DispatchSemaphore(value: 0)
     Task {
         do {
             let r = try await GIFExporter.export(movie: URL(fileURLWithPath: path))
-            let bytes = ((try? FileManager.default.attributesOfItem(atPath: r.url.path)[.size]) as? Int) ?? 0
-            print("gif-ok \(r.url.path) \(r.width)x\(r.height) \(r.duration)s \(bytes) bytes")
+            print("gif-ok \(r.url.path) \(r.width)x\(r.height) \(r.duration)s \(Library.byteSize(of: r.url)) bytes")
         } catch {
             print("gif-failed: \(error)")
         }

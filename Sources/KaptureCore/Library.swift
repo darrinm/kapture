@@ -1,6 +1,19 @@
 import Foundation
 import GRDB
 
+/// A finished piece of timed media sitting in a temp file, ready to be stored: what the
+/// recorder hands back from `stop()` and what the GIF exporter hands back from `export()`.
+public struct MediaResult: Sendable {
+    public let url: URL
+    public let width: Int
+    public let height: Int
+    public let duration: Double
+
+    public init(url: URL, width: Int, height: Int, duration: Double) {
+        self.url = url; self.width = width; self.height = height; self.duration = duration
+    }
+}
+
 /// The library: visible files under the root (truth), DB index in App Support (derived).
 /// @unchecked Sendable: all mutable state lives in the thread-safe DatabaseQueue; `db` and
 /// `root` are immutable, and file operations are serialized through the op journal.
@@ -61,6 +74,27 @@ public final class Library: @unchecked Sendable {
         return "\(size):\(Int(mtime * 1000)):\(inode)"
     }
 
+    /// On-disk size in bytes; 0 when the file is unreachable.
+    public static func byteSize(of url: URL) -> Int {
+        ((try? FileManager.default.attributesOfItem(atPath: url.path)[.size]) as? Int) ?? 0
+    }
+
+    /// Scratch URL for work-in-progress media: `<tmp>/prefix-<ULID>.ext`. Every producer of a
+    /// temp artifact (recorder, GIF exporter, trimmer, clipboard pin) names files the same way,
+    /// so a stray temp file is always traceable back to the stage that wrote it.
+    public static func tempURL(prefix: String, ext: String) -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(prefix)-\(ULID.generate())")
+            .appendingPathExtension(ext)
+    }
+
+    /// Store a finished movie/GIF described by a `MediaResult`.
+    public func storeMovie(_ result: MediaResult, sourceApp: String?, ext: String = "mp4",
+                           kind: CaptureKind = .recording) throws -> (CaptureRecord, URL) {
+        try storeMovie(from: result.url, width: result.width, height: result.height,
+                       duration: result.duration, sourceApp: sourceApp, ext: ext, kind: kind)
+    }
+
     /// Store a finished recording: journaled move from its temp location into the shard,
     /// minimal sidecar, DB row (staged). Same durability contract as storePNG.
     public func storeMovie(from tempURL: URL, width: Int, height: Int, duration: Double,
@@ -72,7 +106,7 @@ public final class Library: @unchecked Sendable {
                                     ext: ext)
         let id = ULID.generate(now: now)
         let relPath = rel(url)
-        let bytes = ((try? FileManager.default.attributesOfItem(atPath: tempURL.path)[.size]) as? Int) ?? 0
+        let bytes = Library.byteSize(of: tempURL)
 
         let record: CaptureRecord = try OpJournal.run(
             db, op: "write", captureId: id, src: nil, dst: relPath,
@@ -121,24 +155,40 @@ public final class Library: @unchecked Sendable {
         }
     }
 
+    /// Copy the pristine pixels aside into .originals/ if that hasn't happened yet, and return
+    /// the copy's library-relative path. Idempotent: only the first destructive edit copies,
+    /// every later one finds the original already there and leaves it untouched.
+    private func preserveOriginal(_ relPath: String) throws -> String {
+        let fm = FileManager.default
+        let originalRel = ".originals/" + relPath
+        let originalURL = root.appendingPathComponent(originalRel)
+        if !fm.fileExists(atPath: originalURL.path) {
+            try fm.createDirectory(at: originalURL.deletingLastPathComponent(),
+                                   withIntermediateDirectories: true)
+            try fm.copyItem(at: root.appendingPathComponent(relPath), to: originalURL)
+        }
+        return originalRel
+    }
+
     /// Apply a trim to a recording: first trim preserves the pristine movie in .originals/,
     /// the trimmed file replaces rel_path, identity/duration refresh, shares go stale.
     public func applyTrim(_ id: String, trimmedURL: URL, duration: Double) throws {
         guard let record = try db.queue.read({ try CaptureRecord.fetchOne($0, key: id) }) else { return }
         let fm = FileManager.default
         let fileURL = root.appendingPathComponent(record.relPath)
-        let originalRel = ".originals/" + record.relPath
-        let originalURL = root.appendingPathComponent(originalRel)
-        let bytes = ((try? fm.attributesOfItem(atPath: trimmedURL.path)[.size]) as? Int) ?? record.bytes
+        let trimmedBytes = Library.byteSize(of: trimmedURL)
+        let bytes = trimmedBytes > 0 ? trimmedBytes : record.bytes
 
         _ = try OpJournal.run(db, op: "trim", captureId: id, src: record.relPath, dst: record.relPath,
             fileOp: {
-                if !fm.fileExists(atPath: originalURL.path) {
-                    try fm.createDirectory(at: originalURL.deletingLastPathComponent(),
-                                           withIntermediateDirectories: true)
-                    try fm.copyItem(at: fileURL, to: originalURL)
-                }
+                let originalRel = try self.preserveOriginal(record.relPath)
                 _ = try fm.replaceItemAt(fileURL, withItemAt: trimmedURL)
+                // the sidecar points at the pristine movie the same way an edited image's does,
+                // so editBase() can reach a trimmed recording's original too
+                var sidecar = Sidecar.read(for: fileURL)
+                    ?? Sidecar(id: id, created: record.createdAt, app: record.sourceApp, window: record.windowTitle)
+                sidecar.annotations = .init(original: originalRel, layersJSON: "[]")
+                try sidecar.write(next: fileURL)
             },
             stateUpdate: { d, _ in
                 try d.execute(sql: """
@@ -156,18 +206,11 @@ public final class Library: @unchecked Sendable {
     public func applyEdit(_ id: String, flattenedPNG: Data, layersJSON: String,
                           width: Int, height: Int) throws {
         guard let record = try db.queue.read({ try CaptureRecord.fetchOne($0, key: id) }) else { return }
-        let fm = FileManager.default
         let fileURL = root.appendingPathComponent(record.relPath)
-        let originalRel = ".originals/" + record.relPath
-        let originalURL = root.appendingPathComponent(originalRel)
 
         _ = try OpJournal.run(db, op: "flatten", captureId: id, src: record.relPath, dst: record.relPath,
             fileOp: {
-                if !fm.fileExists(atPath: originalURL.path) {
-                    try fm.createDirectory(at: originalURL.deletingLastPathComponent(),
-                                           withIntermediateDirectories: true)
-                    try fm.copyItem(at: fileURL, to: originalURL)
-                }
+                let originalRel = try self.preserveOriginal(record.relPath)
                 try flattenedPNG.write(to: fileURL, options: .atomic)
                 var sidecar = Sidecar.read(for: fileURL)
                     ?? Sidecar(id: id, created: record.createdAt, app: record.sourceApp, window: record.windowTitle)

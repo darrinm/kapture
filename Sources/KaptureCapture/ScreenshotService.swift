@@ -61,6 +61,12 @@ public enum ScreenshotService {
         return NSRect(x: r.origin.x, y: primaryMaxY - r.maxY, width: r.width, height: r.height)
     }
 
+    /// Display-local rect (top-left origin of `screen`) → NS-global rect (bottom-left origin).
+    public static func nsRect(displayLocal r: CGRect, on screen: NSScreen) -> NSRect {
+        NSRect(x: screen.frame.minX + r.origin.x, y: screen.frame.maxY - r.maxY,
+               width: r.width, height: r.height)
+    }
+
     /// Scale of the display the CG-global (top-left origin) rect mostly sits on —
     /// mixed-DPI correctness for window captures, where NSScreen.main may be a different display.
     public static func displayScale(forCGGlobal r: CGRect) -> CGFloat {

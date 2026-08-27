@@ -43,6 +43,18 @@ public struct CaptureRecord: Codable, Sendable, FetchableRecord, PersistableReco
         self.aiState = "none"; self.summary = nil; self.shareURL = nil; self.shareStale = false
         self.durationS = nil
     }
+
+    // MARK: What this capture can do
+    // One place answers "does this editor/action apply?", so a kind that is neither a still nor
+    // a movie (a .gif — playable, but not PNG-editable and not trimmable) can't fall into the
+    // wrong tool: the still editor's save writes PNG bytes over whatever file it opened.
+
+    /// Recordings open the native trim UI.
+    public var canTrim: Bool { kind == .recording }
+    /// Only stills go to the annotation editor (it flattens to PNG on save).
+    public var canAnnotate: Bool { kind == .screenshot }
+    /// GIF export reads a movie; a GIF is already one.
+    public var canExportGIF: Bool { kind == .recording }
 }
 
 /// Crockford-base32 ULID: sortable, unique, no deps.

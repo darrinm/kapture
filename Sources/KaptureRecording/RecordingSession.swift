@@ -5,13 +5,6 @@ import ScreenCaptureKit
 import AVFoundation
 import KaptureCore
 
-public struct RecordingResult: Sendable {
-    public let url: URL
-    public let width: Int
-    public let height: Int
-    public let duration: Double
-}
-
 public enum RecordingScope {
     case display(SCDisplay, scale: CGFloat)
     case area(SCDisplay, rectInPoints: CGRect, scale: CGFloat)
@@ -29,12 +22,11 @@ public final class RecordingSession: NSObject, SCStreamOutput, @unchecked Sendab
     private let queue = DispatchQueue(label: "sh.kapture.recording")
     private var started = false
     private var sessionStart = CMTime.invalid
-    private var lastVideoPTS = CMTime.invalid
     // pause/resume: samples are dropped while paused and every later sample is retimed by the
     // accumulated pause span, so the movie has no hole (spike C math).
     private let lock = NSLock()
     private var paused = false
-    private var pauseBegan = CMTime.invalid
+    private var resuming = false
     private var pausedOffset = CMTime.zero
     private var lastAppendedEnd = CMTime.zero
     public var isPaused: Bool { lock.lock(); defer { lock.unlock() }; return paused }
@@ -45,14 +37,10 @@ public final class RecordingSession: NSObject, SCStreamOutput, @unchecked Sendab
         lock.lock(); defer { lock.unlock() }
         guard value != paused else { return }
         paused = value
-        if value {
-            pauseBegan = lastVideoPTS
-        } else if pauseBegan.isValid {
-            pauseBegan = .invalid   // the span is folded in on the first resumed sample
-            resuming = true
-        }
+        // resuming is what makes the next video frame recompute the offset. Pausing before the
+        // session even started has no span to fold in, so don't arm it.
+        if !value, sessionStart.isValid { resuming = true }
     }
-    private var resuming = false
     public let outputURL: URL
     public let pixelWidth: Int
     public let pixelHeight: Int
@@ -93,8 +81,7 @@ public final class RecordingSession: NSObject, SCStreamOutput, @unchecked Sendab
             micEnabled = false
         }
 
-        outputURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("kapture-recording-\(ULID.generate()).mp4")
+        outputURL = Library.tempURL(prefix: "kapture-recording", ext: "mp4")
         writer = try AVAssetWriter(outputURL: outputURL, fileType: .mp4)
         video = AVAssetWriterInput(mediaType: .video, outputSettings: [
             AVVideoCodecKey: AVVideoCodecType.h264,
@@ -128,7 +115,7 @@ public final class RecordingSession: NSObject, SCStreamOutput, @unchecked Sendab
         startedAt = Date()
     }
 
-    public func stop() async throws -> RecordingResult {
+    public func stop() async throws -> MediaResult {
         try? await stream.stopCapture()
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
             queue.async {
@@ -146,14 +133,23 @@ public final class RecordingSession: NSObject, SCStreamOutput, @unchecked Sendab
         // so a paused recording doesn't report the pause span as movie duration
         let recorded = recordedEnd()
         let duration = started && recorded.isValid ? max(0, recorded.seconds) : 0
-        return RecordingResult(url: outputURL, width: pixelWidth, height: pixelHeight, duration: duration)
+        return MediaResult(url: outputURL, width: pixelWidth, height: pixelHeight, duration: duration)
     }
 
-    private var sampleCounts: [Int: Int] = [:]
+    // Only the opening samples are interesting in the log, and this runs per delivered sample on
+    // every stream — plain counters that stop climbing at 3 keep the hot path allocation-free.
+    private var screenSamples = 0
+    private var otherSamples = 0
 
     public func stream(_ stream: SCStream, didOutputSampleBuffer sb: CMSampleBuffer, of type: SCStreamOutputType) {
-        let n = (sampleCounts[Int(type.rawValue)] ?? 0) + 1
-        sampleCounts[Int(type.rawValue)] = n
+        let n: Int
+        if type == .screen {
+            if screenSamples < 3 { screenSamples += 1 }
+            n = screenSamples
+        } else {
+            if otherSamples < 3 { otherSamples += 1 }
+            n = otherSamples
+        }
         if n == 1 {
             Log.capture.info("record: first sample type=\(type.rawValue) valid=\(sb.isValid) ready=\(CMSampleBufferDataIsReady(sb))")
         }
@@ -172,7 +168,10 @@ public final class RecordingSession: NSObject, SCStreamOutput, @unchecked Sendab
         if !started {
             guard type == .screen else { return }
             let ok = writer.startWriting()
+            // under the lock: setPaused reads sessionStart from whatever thread pauses
+            lock.lock()
             sessionStart = sb.presentationTimeStamp
+            lock.unlock()
             writer.startSession(atSourceTime: sessionStart)
             started = true
             Log.capture.info("record: writer started ok=\(ok) status=\(self.writer.status.rawValue)")
@@ -180,11 +179,7 @@ public final class RecordingSession: NSObject, SCStreamOutput, @unchecked Sendab
         guard sb.presentationTimeStamp >= sessionStart else { return }   // pre-session audio corrupts
 
         lock.lock()
-        if paused {
-            if type == .screen { lastVideoPTS = sb.presentationTimeStamp }
-            lock.unlock()
-            return
-        }
+        if paused { lock.unlock(); return }
         if resuming {
             // the new offset can only be computed from a video frame; audio arriving before it
             // would be retimed with the stale offset and land ahead of everything that follows,
@@ -205,7 +200,6 @@ public final class RecordingSession: NSObject, SCStreamOutput, @unchecked Sendab
         case .screen:
             input = video
             lock.lock()
-            lastVideoPTS = sb.presentationTimeStamp
             lastAppendedEnd = retimed.presentationTimeStamp - sessionStart
             lock.unlock()
         case .audio: input = sysAudio
@@ -218,6 +212,19 @@ public final class RecordingSession: NSObject, SCStreamOutput, @unchecked Sendab
 
     /// Audio buffers can't be retimed in place — every buffer is copied with shifted timing.
     private static func retime(_ sb: CMSampleBuffer, by offset: CMTime) -> CMSampleBuffer? {
+        // Video frames — and most audio buffers — carry one timing entry for the whole buffer.
+        // That case needs no heap array at all, which matters on a 60fps sample path.
+        if CMSampleBufferGetNumSamples(sb) <= 1 {
+            var info = CMSampleTimingInfo()
+            guard CMSampleBufferGetSampleTimingInfo(sb, at: 0, timingInfoOut: &info) == noErr else { return nil }
+            info.presentationTimeStamp = info.presentationTimeStamp - offset
+            if info.decodeTimeStamp.isValid { info.decodeTimeStamp = info.decodeTimeStamp - offset }
+            var single: CMSampleBuffer?
+            CMSampleBufferCreateCopyWithNewTiming(allocator: nil, sampleBuffer: sb,
+                                                  sampleTimingEntryCount: 1, sampleTimingArray: &info,
+                                                  sampleBufferOut: &single)
+            return single
+        }
         var count = 0
         CMSampleBufferGetSampleTimingInfoArray(sb, entryCount: 0, arrayToFill: nil, entriesNeededOut: &count)
         var infos = [CMSampleTimingInfo](repeating: CMSampleTimingInfo(), count: count)

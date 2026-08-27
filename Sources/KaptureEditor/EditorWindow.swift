@@ -17,8 +17,11 @@ public final class EditorController {
     public var onWindowClosed: (() -> Void)?
 
     public func open(recordID: String) {
+        // canAnnotate, not "isn't a recording": Done flattens PNG bytes over the opened file, so
+        // a .gif must never reach here even though NSImage decodes one perfectly well.
         guard let library,
-              let record = try? library.db.queue.read({ try CaptureRecord.fetchOne($0, key: recordID) })
+              let record = try? library.db.queue.read({ try CaptureRecord.fetchOne($0, key: recordID) }),
+              record.canAnnotate
         else { return }
         if let existing = windows[recordID] { existing.makeKeyAndOrderFront(nil); return }
         let (baseURL, layersJSON) = library.editBase(for: record)

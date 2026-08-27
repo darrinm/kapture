@@ -23,7 +23,7 @@ final class CaptureCoordinator {
                     rememberArea(sel)
                     guard let cropped = ScreenshotService.crop(sel.frame, rectInPoints: sel.rectInPoints) else { return }
                     store(cropped, screenID: Int(sel.frame.display.displayID), windowTitle: nil,
-                          sourceRect: nsRect(displayLocal: sel.rectInPoints, on: sel.frame.screen))
+                          sourceRect: ScreenshotService.nsRect(displayLocal: sel.rectInPoints, on: sel.frame.screen))
                 case .window(let win):
                     let image = try await ScreenshotService.captureWindow(win)
                     store(image, screenID: nil, windowTitle: win.title,
@@ -66,7 +66,7 @@ final class CaptureCoordinator {
                 guard let frame = frames.first(where: { $0.display.displayID == displayID }) ?? frames.first,
                       let cropped = ScreenshotService.crop(frame, rectInPoints: rect) else { return }
                 store(cropped, screenID: Int(frame.display.displayID), windowTitle: nil,
-                      sourceRect: nsRect(displayLocal: rect, on: frame.screen))
+                      sourceRect: ScreenshotService.nsRect(displayLocal: rect, on: frame.screen))
             } catch { Log.capture.error("previous-area capture failed: \(error)") }
         }
     }
@@ -90,13 +90,6 @@ final class CaptureCoordinator {
         return (CGDirectDisplayID(p[0]), CGRect(x: p[1], y: p[2], width: p[3], height: p[4]))
     }
 
-    // MARK: coordinate conversions for the flight animation
-    /// display-local top-left rect → global NS (bottom-left) rect
-    private func nsRect(displayLocal r: CGRect, on screen: NSScreen) -> NSRect {
-        NSRect(x: screen.frame.minX + r.origin.x,
-               y: screen.frame.maxY - r.maxY,
-               width: r.width, height: r.height)
-    }
     private func store(_ image: CGImage, screenID: Int?, windowTitle: String?, sourceApp: String? = nil,
                        sourceRect: NSRect? = nil) {
         guard let library else { return }

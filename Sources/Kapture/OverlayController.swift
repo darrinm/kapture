@@ -326,7 +326,7 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
 
     /// Recording → optimized GIF as a NEW library capture (the movie stays untouched).
     func convertToGIF() {
-        guard record.kind == .recording else { return }
+        guard record.canExportGIF else { return }
         markKept()
         let source = fileURL
         let app = record.sourceApp
@@ -335,9 +335,7 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
             do {
                 let gif = try await GIFExporter.export(movie: source)
                 guard let library = await OverlayController.shared.library else { return }
-                let (record, _) = try library.storeMovie(
-                    from: gif.url, width: gif.width, height: gif.height,
-                    duration: gif.duration, sourceApp: app, ext: "gif", kind: .gif)
+                let (record, _) = try library.storeMovie(gif, sourceApp: app, ext: "gif", kind: .gif)
                 await MainActor.run {
                     Sounds.play("Glass")
                     OverlayController.shared.showCard(recordID: record.id)
@@ -346,12 +344,17 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
         }
     }
 
+    /// ⌘E / double-click / "Edit…" — routed by what the capture can actually do. A GIF is
+    /// neither trimmable nor PNG-editable, so it opens nothing rather than landing in the
+    /// still editor, whose save would write PNG bytes over the .gif file.
     func edit() {
         markKept()
-        if record.kind == .recording {
+        if record.canTrim {
             TrimmerController.shared.open(recordID: record.id)
-        } else {
+        } else if record.canAnnotate {
             EditorController.shared.open(recordID: record.id)
+        } else {
+            return   // nothing to open; the card stays put
         }
         fadeOut()
     }
@@ -499,9 +502,12 @@ final class OverlayView: NSView, NSDraggingSource {
     // MARK: right-click
     override func menu(for event: NSEvent) -> NSMenu? {
         let menu = NSMenu()
-        menu.addItem(withTitle: panel.record.kind == .recording ? "Trim…" : "Edit…",
-                     action: #selector(editTapped), keyEquivalent: "").target = self
-        if panel.record.kind == .recording {
+        let record = panel.record
+        if record.canTrim || record.canAnnotate {
+            menu.addItem(withTitle: record.canTrim ? "Trim…" : "Edit…",
+                         action: #selector(editTapped), keyEquivalent: "").target = self
+        }
+        if record.canExportGIF {
             menu.addItem(withTitle: "Convert to GIF", action: #selector(gifTapped), keyEquivalent: "").target = self
         }
         menu.addItem(withTitle: "Pin to Screen", action: #selector(pinTapped), keyEquivalent: "").target = self
@@ -566,8 +572,8 @@ final class OverlayView: NSView, NSDraggingSource {
             ctx.fill(CGRect(x: 0, y: 0, width: bounds.width, height: 32))
         }
         if let seconds = panel.record.durationS, !hovering {
-            let s = Int(seconds.rounded())
-            let label = String(format: "▸ %d:%02d", s / 60, s % 60) as NSString
+            // same formatter as the menu-bar timer, so a 59.6s clip can't read 0:59 there and 1:00 here
+            let label = "▸ " + Tokens.duration(seconds) as NSString
             let attrs: [NSAttributedString.Key: Any] = [
                 .font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .semibold),
                 .foregroundColor: NSColor.white,

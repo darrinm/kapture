@@ -11,14 +11,19 @@ import KaptureDesign
 final class TrimmerController {
     static let shared = TrimmerController()
     var library: Library?
-    private var windows: [String: NSWindow] = [:]
-    private var closeObservers: [String: NSObjectProtocol] = [:]
+    /// Window and its close observer travel together — two parallel dictionaries could drift
+    /// and leave an observer registered for a window that is already gone.
+    private struct Open {
+        let window: NSWindow
+        let closeObserver: NSObjectProtocol
+    }
+    private var open: [String: Open] = [:]
 
     func open(recordID: String) {
         guard let library,
               let record = try? library.db.queue.read({ try CaptureRecord.fetchOne($0, key: recordID) }),
-              record.kind == .recording else { return }
-        if let existing = windows[recordID] { existing.makeKeyAndOrderFront(nil); return }
+              record.canTrim else { return }
+        if let existing = open[recordID] { existing.window.makeKeyAndOrderFront(nil); return }
         let url = library.root.appendingPathComponent(record.relPath)
 
         let playerView = AVPlayerView()
@@ -36,25 +41,28 @@ final class TrimmerController {
         window.contentView = playerView
         window.center()
         window.isReleasedWhenClosed = false
-        windows[recordID] = window
-        closeObservers[recordID] = NotificationCenter.default.addObserver(
+        let observer = NotificationCenter.default.addObserver(
             forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
-                self.windows[recordID] = nil
-                if let token = self.closeObservers.removeValue(forKey: recordID) {
-                    NotificationCenter.default.removeObserver(token)
+                if let entry = self.open.removeValue(forKey: recordID) {
+                    NotificationCenter.default.removeObserver(entry.closeObserver)
                 }
                 ActivationPolicy.release()
             }
         }
+        open[recordID] = Open(window: window, closeObserver: observer)
         ActivationPolicy.acquire()
         window.makeKeyAndOrderFront(nil)
 
         // start the native trim UI once the item is ready
         Task {
-            for _ in 0..<40 where !playerView.canBeginTrimming {
+            // `for _ in 0..<40 where !canBeginTrimming` filters iterations rather than stopping,
+            // so it slept the full 4s even once the item was ready
+            var tries = 0
+            while !playerView.canBeginTrimming && tries < 40 {
                 try? await Task.sleep(for: .milliseconds(100))
+                tries += 1
             }
             guard playerView.canBeginTrimming else {
                 Log.capture.error("trimmer: item never became trimmable")
@@ -82,8 +90,7 @@ final class TrimmerController {
             Log.capture.error("trimmer: export session creation failed")
             return
         }
-        let out = FileManager.default.temporaryDirectory
-            .appendingPathComponent("kapture-trim-\(ULID.generate()).mp4")
+        let out = Library.tempURL(prefix: "kapture-trim", ext: "mp4")
         do {
             export.timeRange = range
             try await export.export(to: out, as: .mp4)
