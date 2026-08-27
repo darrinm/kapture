@@ -596,6 +596,7 @@ final class CanvasView: NSView, NSTextFieldDelegate {
     enum PressTarget: Equatable {
         case resizeLive(Int)
         case moveLive
+        case selectOther(UUID)
         case newElement
     }
 
@@ -604,7 +605,16 @@ final class CanvasView: NSView, NSTextFieldDelegate {
               let live = layers.first(where: { $0.id == sel })
         else { return .newElement }
         if let h = handleIndex(of: live, at: p) { return .resizeLive(h) }
-        return live.hitTest(p) ? .moveLive : .newElement
+        if live.hitTest(p) { return .moveLive }
+        // Outside the live element, but on another of the same kind: take that one up instead of
+        // starting a new element on top of it. Only the same kind, because the arrow you draw
+        // across a screenshot lands on top of half the boxes already there, and having it grab a
+        // box would make the tool in your hand impossible to use. Topmost first — that is the one
+        // drawn last, so it is the one under the pointer.
+        if let other = layers.last(where: { $0.id != sel && $0.tool == live.tool && $0.hitTest(p) }) {
+            return .selectOther(other.id)
+        }
+        return .newElement
     }
 
     /// What the tool controls apply to: the live element if there is one, otherwise the tool in
@@ -755,6 +765,16 @@ final class CanvasView: NSView, NSTextFieldDelegate {
             needsDisplay = true
             return
         case .moveLive:
+            preGesture = layers
+            dragMode = .move
+            dragOrigin = p
+            needsDisplay = true
+            return
+        case .selectOther(let id):
+            // it becomes live and is draggable in the same gesture, exactly as if it had just
+            // been drawn — otherwise selecting it would cost a click before it could be moved
+            selected = id
+            onSelectionChanged?()
             preGesture = layers
             dragMode = .move
             dragOrigin = p
