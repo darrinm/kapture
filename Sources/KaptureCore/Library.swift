@@ -120,7 +120,10 @@ public final class Library: @unchecked Sendable {
                 r.durationS = duration
                 return r
             },
-            stateUpdate: { d, record in try record.insert(d) })
+            stateUpdate: { d, record in
+                try record.insert(d)
+                try Library.indexText(d, id: record.id, name: (record.relPath as NSString).lastPathComponent)
+            })
         Log.store.info("stored \(relPath, privacy: .public) (\(Int(duration))s recording)")
         return (record, url)
     }
@@ -144,7 +147,10 @@ public final class Library: @unchecked Sendable {
                                      sourceApp: sourceApp, windowTitle: windowTitle, screenID: screenID,
                                      fastID: Library.fastID(of: url))
             },
-            stateUpdate: { d, record in try record.insert(d) })
+            stateUpdate: { d, record in
+                try record.insert(d)
+                try Library.indexText(d, id: record.id, name: (record.relPath as NSString).lastPathComponent)
+            })
         Log.store.info("stored \(relPath, privacy: .public) (\(data.count) bytes)")
         return (record, url)
     }

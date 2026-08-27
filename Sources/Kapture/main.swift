@@ -18,6 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             OverlayController.shared.library = library
             EditorController.shared.library = library
             TrimmerController.shared.library = library
+            LibraryWindowController.shared.library = library
             EditorController.shared.onFlattened = { id in
                 OverlayController.shared.showCard(recordID: id)
             }
@@ -39,6 +40,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             case .previousArea: CaptureCoordinator.shared.capturePreviousArea()
             case .pinClipboard: PinController.shared.pinFromClipboard()
             case .record: RecordingCoordinator.shared.toggle()
+            case .library: LibraryWindowController.shared.show()
             }
         }
         RecordingCoordinator.shared.library = CaptureCoordinator.shared.library
@@ -134,6 +136,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         menu.addItem(withTitle: "Close All Overlays (keep)", action: #selector(menuCloseOverlays), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Close All Pins", action: #selector(menuClosePins), keyEquivalent: "").target = self
         menu.addItem(.separator())
+        menu.addItem(item("Library…", #selector(menuLibraryWindow), hotkey: .library))
         menu.addItem(withTitle: "Open Library Folder", action: #selector(menuLibrary), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Settings…", action: #selector(menuSettings), keyEquivalent: ",").target = self
         menu.addItem(.separator())
@@ -187,6 +190,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     @objc private func menuAllDisplays() { CaptureCoordinator.shared.captureFullscreen(allDisplays: true) }
     @objc private func menuPreviousArea() { CaptureCoordinator.shared.capturePreviousArea() }
     @objc private func menuTimer(_ sender: NSMenuItem) { CaptureCoordinator.shared.captureAreaAfter(seconds: sender.tag) }
+    @objc private func menuLibraryWindow() { LibraryWindowController.shared.show() }
     @objc private func menuLibrary() { NSWorkspace.shared.open(Settings.shared.libraryRoot) }
     @objc private func menuSettings() { SettingsWindowController.shared.show() }
 }

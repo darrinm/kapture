@@ -75,6 +75,30 @@ final class LibraryTests: XCTestCase {
         XCTAssertEqual(remaining.map(\.id), [b.id])
     }
 
+    func testSearchFindsByNameAndScope() throws {
+        let (lib, dir) = try makeTempLibrary()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let (shot, url) = try lib.storePNG(Data([1, 2, 3]), width: 4, height: 3,
+                                           sourceApp: nil, windowTitle: nil, screenID: nil)
+        // the stored name is a timestamp; give it searchable text the way ingest will
+        try lib.updateSearchText(shot.id, name: "stripe-payout-error.png", ocr: "account restricted")
+
+        XCTAssertEqual(lib.search("stripe").map(\.id), [shot.id])       // name match
+        XCTAssertEqual(lib.search("restrict").map(\.id), [shot.id])     // prefix match into OCR
+        XCTAssertTrue(lib.search("nonexistentterm").isEmpty)
+        XCTAssertEqual(lib.search("", scope: .screenshots).map(\.id), [shot.id])
+        XCTAssertTrue(lib.search("", scope: .recordings).isEmpty)
+
+        // trashed captures leave the default scope and appear under .trash
+        var fresh = try lib.db.queue.read { try CaptureRecord.fetchOne($0, key: shot.id) }!
+        try lib.discard(fresh)
+        XCTAssertTrue(lib.search("stripe").isEmpty)
+        XCTAssertEqual(lib.search("stripe", scope: .trash).map(\.id), [shot.id])
+        fresh = try lib.db.queue.read { try CaptureRecord.fetchOne($0, key: shot.id) }!
+        XCTAssertEqual(fresh.status, .trashed)
+        _ = url
+    }
+
     func testULIDSortsByTime() {
         let a = ULID.generate(now: Date(timeIntervalSince1970: 1000))
         let b = ULID.generate(now: Date(timeIntervalSince1970: 2000))

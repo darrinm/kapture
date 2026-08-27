@@ -57,6 +57,35 @@ public final class Database: Sendable {
                 t.add(column: "durationS", .double)
             }
         }
+        // Search: external-content FTS5 over a plain source table. Contentless FTS5 can't be
+        // UPDATEd (spec §2.2 F2), so fts_source holds the text and triggers keep the index in
+        // step. OCR/AI columns fill in during M4's ingest work; name/app search works today.
+        migrator.registerMigration("v3-search") { db in
+            try db.create(table: "fts_source") { t in
+                t.column("captureId", .text).primaryKey().references("captures", onDelete: .cascade)
+                t.column("name", .text).notNull().defaults(to: "")
+                t.column("summary", .text).notNull().defaults(to: "")
+                t.column("tags", .text).notNull().defaults(to: "")
+                t.column("ocr", .text).notNull().defaults(to: "")
+            }
+            try db.create(virtualTable: "captures_fts", using: FTS5()) { t in
+                t.synchronize(withTable: "fts_source")
+                t.column("name")
+                t.column("summary")
+                t.column("tags")
+                t.column("ocr")
+                t.tokenizer = .unicode61()
+            }
+            // backfill existing rows from their filenames
+            let rows = try Row.fetchAll(db, sql: "SELECT id, relPath FROM captures")
+            for row in rows {
+                let id: String = row["id"]
+                let rel: String = row["relPath"]
+                let name = (rel as NSString).lastPathComponent
+                try db.execute(sql: "INSERT OR REPLACE INTO fts_source (captureId, name) VALUES (?, ?)",
+                               arguments: [id, name])
+            }
+        }
         try migrator.migrate(queue)
     }
 }
