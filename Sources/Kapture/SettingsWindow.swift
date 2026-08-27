@@ -71,6 +71,7 @@ struct SettingsView: View {
     @AppStorage("recordMicrophone") private var recordMicrophone = false
     @AppStorage("showClicksWhileRecording") private var showClicks = true
     @AppStorage("showKeysWhileRecording") private var showKeys = false
+    @AppStorage("aiNamingEnabled") private var aiNaming = false
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @State private var exportPath = Settings.shared.exportLocation.path
 
@@ -79,6 +80,7 @@ struct SettingsView: View {
             general.tabItem { Label("General", systemImage: "gearshape") }
             overlay.tabItem { Label("Overlay", systemImage: "rectangle.bottomright.filled.and.rectangle") }
             recording.tabItem { Label("Recording", systemImage: "record.circle") }
+            intelligence.tabItem { Label("Library", systemImage: "sparkles") }
         }
         .frame(width: 420)
         .padding(.bottom, 12)
@@ -138,6 +140,20 @@ struct SettingsView: View {
         NSWorkspace.shared.recycle([Bundle.main.bundleURL]) { _, _ in
             DispatchQueue.main.async { NSApp.terminate(nil) }
         }
+    }
+
+    var intelligence: some View {
+        Form {
+            Toggle("Name captures automatically (experimental)", isOn: $aiNaming)
+            Text("Every capture is read on your Mac and its text indexed for search — that always "
+                 + "happens and nothing leaves the machine. This option additionally renames files "
+                 + "from what was read. The on-device namer is rough (it often latches onto menu-bar "
+                 + "text), so it is off by default; captures keep their timestamp names.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .formStyle(.grouped)
+        .padding(.top, 4)
     }
 
     var recording: some View {

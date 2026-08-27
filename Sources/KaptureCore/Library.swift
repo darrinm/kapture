@@ -62,7 +62,7 @@ public final class Library: @unchecked Sendable {
     }
 
     /// Path of `url` relative to the library root — the one place that owns this string surgery.
-    private func rel(_ url: URL) -> String {
+    func rel(_ url: URL) -> String {
         url.path.replacingOccurrences(of: root.path + "/", with: "")
     }
 
@@ -256,7 +256,7 @@ public final class Library: @unchecked Sendable {
     }
 
     /// Move a capture file together with its sidecar (when one exists).
-    private func moveWithSidecar(from src: URL, to dst: URL) throws {
+    func moveWithSidecar(from src: URL, to dst: URL) throws {
         let fm = FileManager.default
         try fm.moveItem(at: src, to: dst)
         let sidecar = Sidecar.url(for: src)

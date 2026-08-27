@@ -218,6 +218,17 @@ if CommandLine.arguments.contains("--ingest-now") {
         do {
             let library = try Library(db: KaptureCore.Database())
             await IngestQueue.shared.configure(library: library)
+            let dryRun = CommandLine.arguments.contains("--dry-run")
+            if dryRun {
+                // show what naming WOULD produce without touching any file
+                for r in library.search("", scope: .all) {
+                    let ocr = library.ocrText(r.id) ?? ""
+                    let naming = NamingService.local(ocr: ocr, app: r.sourceApp,
+                                                     windowTitle: r.windowTitle, kind: r.kind)
+                    print("\((r.relPath as NSString).lastPathComponent) → \(naming?.filename ?? "(no name)")  tags=\(naming?.tags.joined(separator: ",") ?? "")")
+                }
+                sem.signal(); return
+            }
             let ids = library.search("", scope: .all).map(\.id)
             for id in ids { await IngestQueue.shared.enqueue(id, after: 0) }
             print("enqueued \(ids.count) captures; indexing…")

@@ -123,8 +123,17 @@ public actor IngestQueue {
         try? await library.db.queue.write { d in
             try d.execute(sql: "UPDATE captures SET aiState = 'ocr' WHERE id = ?", arguments: [job.captureId])
         }
-        clearJob(job.captureId)
         Log.store.info("ingest: indexed \(record.relPath, privacy: .public) (\(text.count) chars)")
+
+        // Stage 2 — name it from what we just read. Optional: with naming off, captures keep
+        // their timestamp names and everything else still works (spec §8).
+        if Settings.shared.aiNamingEnabled,
+           let naming = NamingService.local(ocr: text, app: record.sourceApp,
+                                            windowTitle: record.windowTitle, kind: record.kind) {
+            _ = library.applyName(job.captureId, baseName: naming.filename, tags: naming.tags,
+                                  summary: naming.summary, engine: "local")
+        }
+        clearJob(job.captureId)
     }
 }
 

@@ -74,12 +74,63 @@ extension Library {
         }) ?? []
     }
 
+    /// Rename a capture's file to an AI-suggested base name (extension preserved), journaled and
+    /// compare-and-swapped: the rename is skipped if the row changed underneath (a manual rename
+    /// pins aiState) or the target already exists. Sidecar, search index and identity follow.
+    @discardableResult
+    public func applyName(_ id: String, baseName: String, tags: [String], summary: String,
+                          engine: String) -> Bool {
+        guard let record = try? db.queue.read({ try CaptureRecord.fetchOne($0, key: id) }),
+              record.aiState == "ocr" || record.aiState == "none",   // never overwrite a named/manual row
+              record.status != .trashed, record.status != .sweeping else { return false }
+
+        let fm = FileManager.default
+        let current = url(for: record)
+        let ext = current.pathExtension
+        let dir = current.deletingLastPathComponent()
+        let target = Library.uniqueURL(in: dir, base: baseName, ext: ext)
+        guard target.lastPathComponent != current.lastPathComponent else { return false }
+        let newRel = rel(target)
+
+        do {
+            _ = try OpJournal.run(db, op: "rename", captureId: id, src: record.relPath, dst: newRel,
+                fileOp: {
+                    guard fm.fileExists(atPath: current.path), !fm.fileExists(atPath: target.path) else {
+                        throw CocoaError(.fileNoSuchFile)
+                    }
+                    try moveWithSidecar(from: current, to: target)
+                },
+                stateUpdate: { d, _ in
+                    // CAS: only rewrite the row if nothing moved it while we worked
+                    try d.execute(sql: """
+                        UPDATE captures SET relPath = ?, fastID = ?, aiState = ?, summary = ?
+                        WHERE id = ? AND relPath = ?
+                        """, arguments: [newRel, Library.fastID(of: target), "named:" + engine,
+                                         summary, id, record.relPath])
+                    try Library.indexText(d, id: id, name: target.lastPathComponent,
+                                          summary: summary, tags: tags.joined(separator: " "))
+                })
+            Log.store.info("named \(record.relPath, privacy: .public) → \(newRel, privacy: .public)")
+            return true
+        } catch {
+            Log.store.error("rename failed for \(id): \(error)")
+            return false
+        }
+    }
+
     /// Query text → an FTS5 prefix pattern. Splits on anything the unicode61 tokenizer treats
     /// as a separator so punctuation in the query can't become MATCH syntax.
     static func ftsPattern(_ query: String) -> String {
         query.split(whereSeparator: { !$0.isLetter && !$0.isNumber })
             .map { $0.lowercased() + "*" }
             .joined(separator: " ")
+    }
+
+    /// Recognized text for a capture, if ingest has read it.
+    public func ocrText(_ id: String) -> String? {
+        try? db.queue.read {
+            try String.fetchOne($0, sql: "SELECT ocr FROM fts_source WHERE captureId = ?", arguments: [id])
+        } ?? nil
     }
 
     /// How many captures carry recognized text (ingest progress).

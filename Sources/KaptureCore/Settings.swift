@@ -91,6 +91,14 @@ public struct Settings {
         set { d.set(newValue, forKey: "showKeysWhileRecording") }
     }
 
+    /// Name captures from their recognized text (on-device). Default OFF: the heuristic namer
+    /// produces mediocre names from menu-bar chrome (verified against the real library), and a
+    /// wrong filename is worse than a timestamp. The API engine is the quality tier.
+    public var aiNamingEnabled: Bool {
+        get { d.object(forKey: "aiNamingEnabled") as? Bool ?? false }
+        set { d.set(newValue, forKey: "aiNamingEnabled") }
+    }
+
     /// Route ⌘W/⌘C/⌘S/⌘⌫/space to the hovered overlay without clicking (needs Accessibility).
     public var hoverShortcutsEnabled: Bool {
         get { d.object(forKey: "hoverShortcutsEnabled") as? Bool ?? true }
