@@ -354,6 +354,15 @@ if CommandLine.arguments.contains("--set-share-token") {
     exit(Keychain.shareToken == token ? 0 : 1)
 }
 
+// Where this build keeps its secrets. "iCloud Keychain" means they reach the user's other Macs
+// on their own; "this Mac only" means this copy is unentitled — a local build, or a release whose
+// provisioning profile went missing.
+if CommandLine.arguments.contains("--secrets-status") {
+    print("share token:   \(Keychain.shareTokenStorage.rawValue)")
+    print("anthropic key: \(Keychain.anthropicKeyStorage.rawValue)")
+    exit(0)
+}
+
 // Share smoke mode: uploads a file through the real path — Keychain token, ShareService, the
 // live endpoint — and prints the link, so sharing can be verified without driving the UI.
 // `--share-test <file> [--delete]` deletes the link again afterwards.

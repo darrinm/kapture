@@ -78,9 +78,25 @@ SIGN_ID="${SIGN_ID:--}"
 
 # Notarization requires the hardened runtime and a secure timestamp; a local Apple Development
 # build skips both, since --timestamp needs the network and the runtime blocks the debugger.
+#
+# The entitlements go on only in the same case, and only with the profile beside them. The
+# profile is what authorises keychain-access-groups, and it vouches for a Developer ID signature
+# specifically — an Apple Development build carrying that entitlement is killed at launch rather
+# than merely denied the keychain, so a local build must stay unentitled. The app handles the
+# consequence at runtime: no entitlement means a device-local token instead of a synced one.
 EXTRA=()
+ENTITLE=()
+PROFILE=signing/Kapture_Developer_ID.provisionprofile
 case "$SIGN_ID" in
-  "Developer ID Application"*) EXTRA=(--options runtime --timestamp) ;;
+  "Developer ID Application"*)
+    EXTRA=(--options runtime --timestamp)
+    if [ -f "$PROFILE" ]; then
+      cp "$PROFILE" "$APP/Contents/embedded.provisionprofile"
+      ENTITLE=(--entitlements signing/Kapture.entitlements)
+    else
+      echo "note: $PROFILE missing — this build's secrets stay on one Mac"
+    fi
+    ;;
 esac
 
 # inside out: nested code first, then the app, so the outer signature seals what is already sealed
@@ -91,7 +107,8 @@ if [ -d "$APP/Contents/Frameworks/Sparkle.framework" ]; then
     \( -name "*.xpc" -o -name "*.app" -o -name "Autoupdate" \) -maxdepth 4)
   codesign --force "${EXTRA[@]}" -s "$SIGN_ID" "$APP/Contents/Frameworks/Sparkle.framework"
 fi
-codesign --force "${EXTRA[@]}" -s "$SIGN_ID" "$APP"
+# only the app itself is entitled: Sparkle's helpers have no business in Kapture's keychain group
+codesign --force "${EXTRA[@]}" "${ENTITLE[@]}" -s "$SIGN_ID" "$APP"
 # recorded so the DMG step signs the image with the same certificate as the app
 printf '%s' "$SIGN_ID" > dist/.sign-identity
 echo "signed as: $SIGN_ID"

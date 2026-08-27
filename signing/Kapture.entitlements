@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Applied only to Developer ID builds, and only alongside embedded.provisionprofile.
+
+  keychain-access-groups is a restricted entitlement: it puts the app in the data protection
+  keychain, which is the only keychain whose items sync through iCloud, and it is what lets the
+  share token and the Anthropic key follow the user to their other Macs instead of being pasted
+  in again. The profile is what authorises it. Entitle a binary without one and the kernel does
+  not merely refuse the keychain — it kills the process at launch, so these two ship together or
+  not at all.
+
+  HTBMTPEP6H.sh.kapture.app matches the profile's HTBMTPEP6H.* group. It must stay in step with
+  CFBundleIdentifier in scripts/bundle.sh.
+-->
+<plist version="1.0"><dict>
+  <key>keychain-access-groups</key>
+  <array><string>HTBMTPEP6H.sh.kapture.app</string></array>
+</dict></plist>
