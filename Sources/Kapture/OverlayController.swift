@@ -145,6 +145,7 @@ final class OverlayController {
 
         for panel in visible.reversed() {   // newest nearest the corner
             let frame = NSRect(origin: CGPoint(x: x, y: y), size: size)
+            panel.restingFrame = frame
             if !panel.placed {
                 // first placement is instant — a fresh panel must never slide in from its
                 // initial (0,0) frame; it appears in place (flight or fade handles entrance)
@@ -221,7 +222,17 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
     let fileURL: URL
     let image: CGImage   // decoded pixels — reused for clipboard/drag instead of re-reading disk
     let onClose: (OverlayPanel) -> Void
-    var placed = false   // set on first layout; first placement never animates
+    var placed = false
+    /// Where the stack says this card belongs. A swipe springs back to *this*, never to wherever
+    /// the card happened to be when the gesture started — otherwise an interrupted swipe leaves
+    /// the card displaced and the next one starts from the new spot, walking it across the screen.
+    var restingFrame: NSRect = .zero   // set on first layout; first placement never animates
+    /// The card view. Not the content view — see the container note in init.
+    private(set) var card: OverlayView!
+    /// How far the window is grown on each side while a swipe is in flight, so the card has room
+    /// to travel without the window having to move.
+    private var swipePad: CGFloat = 0
+    private var swiping = false
     private var autoCloseTimer: Timer?
 
     init(record: CaptureRecord, fileURL: URL, image: CGImage, onClose: @escaping (OverlayPanel) -> Void) {
@@ -234,7 +245,18 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
         level = .statusBar
         hasShadow = true
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        contentView = OverlayView(panel: self, image: image)
+        // The card lives inside a container rather than being the content view itself. A swipe
+        // moves the card within the window instead of moving the window: a window that slides
+        // out from under the pointer stops receiving the gesture's scroll events, which left the
+        // card stranded halfway through a swipe.
+        let container = OverlayContainerView(frame: NSRect(origin: .zero, size: size))
+        let card = OverlayView(panel: self, image: image)
+        card.frame = container.bounds
+        card.autoresizingMask = []
+        container.card = card
+        container.addSubview(card)
+        self.card = card
+        contentView = container
     }
     override var canBecomeKey: Bool { true }
 
@@ -308,6 +330,66 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
     func finishClose() {
         orderOut(nil)
         onClose(self)
+    }
+
+    /// Grow the window around the card so the card can be moved without the window moving.
+    func beginSwipe() {
+        guard !swiping else { return }
+        swiping = true
+        let rest = restingFrame == .zero ? frame : restingFrame
+        restingFrame = rest
+        swipePad = rest.width + 60
+        setFrame(NSRect(x: rest.minX - swipePad, y: rest.minY,
+                        width: rest.width + swipePad * 2, height: rest.height),
+                 display: false)
+        card.frame = NSRect(x: swipePad, y: 0, width: rest.width, height: rest.height)
+        invalidateShadow()
+    }
+
+    /// Move the card within the window. `offset` is in screen terms, from the resting position.
+    func swipe(to offset: CGFloat) {
+        guard swiping else { return }
+        card.frame.origin.x = swipePad + offset
+        invalidateShadow()
+    }
+
+    /// Animate the card back to where it rests and shrink the window around it again.
+    func endSwipe(springBackOver duration: TimeInterval) {
+        guard swiping else { return }
+        // a whole frame, not frame.origin.x: through the animator proxy a sub-property is a
+        // read-modify-write against an in-flight presentation value
+        let target = NSRect(x: swipePad, y: 0, width: card.frame.width, height: card.frame.height)
+        Tokens.animate(duration, timing: Tokens.springBack, {
+            self.card.animator().frame = target
+        }) { [weak self] in
+            self?.settleAfterSwipe()
+        }
+    }
+
+    /// Animate the card off the edge, then close. The window stays where it is throughout.
+    func flyOffAndClose(direction: CGFloat, over duration: TimeInterval) {
+        guard swiping else { return }
+        let target = NSRect(x: swipePad + direction * (card.frame.width + 60), y: 0,
+                            width: card.frame.width, height: card.frame.height)
+        Tokens.animate(duration, {
+            self.card.animator().frame = target
+            self.card.animator().alphaValue = 0
+        }) { [weak self] in
+            // out of sight before anything is put back, or the card reappears at rest for a frame
+            self?.finishClose()
+            self?.settleAfterSwipe()
+        }
+    }
+
+    /// Put the window back around the card once a gesture is over.
+    private func settleAfterSwipe() {
+        guard swiping else { return }
+        swiping = false
+        setFrame(restingFrame, display: true)
+        card.frame = NSRect(origin: .zero, size: restingFrame.size)
+        card.alphaValue = 1
+        swipePad = 0
+        invalidateShadow()
     }
 
     func copyToClipboard() {
@@ -438,6 +520,17 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
     }
 }
 
+/// Transparent host for the card. While a swipe is in flight the window is wider than the card,
+/// and the empty margins must not swallow clicks meant for whatever is behind them.
+final class OverlayContainerView: NSView {
+    weak var card: OverlayView?
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard let card, card.frame.contains(convert(point, from: superview)) else { return nil }
+        return super.hitTest(point)
+    }
+}
+
 final class OverlayView: NSView, NSDraggingSource {
     unowned let panel: OverlayPanel
     let image: CGImage
@@ -463,6 +556,9 @@ final class OverlayView: NSView, NSDraggingSource {
     /// Toward-edge points per second, smoothed so one jittery frame can't fling the card.
     private var swipeVelocity: CGFloat = 0
     private var swipeTime: TimeInterval = 0
+    /// A swipe that carries the card out from under the pointer stops receiving scroll events,
+    /// so `.ended` never arrives. Without this the card would sit stranded mid-gesture.
+    private var swipeWatchdog: DispatchWorkItem?
 
     /// Sign of accumulated deltaX that means "toward the edge the cards live on".
     private var towardEdgeSign: CGFloat { Settings.shared.overlayOnLeftEdge ? 1 : -1 }
@@ -584,7 +680,10 @@ final class OverlayView: NSView, NSDraggingSource {
             swipeY = 0
             swipeVelocity = 0
             swipeTime = event.timestamp
-            swipeStart = panel.frame
+            // the slot, not the current frame: a previous gesture may have left the card adrift
+            swipeStart = panel.restingFrame == .zero ? panel.frame : panel.restingFrame
+            panel.beginSwipe()
+            armSwipeWatchdog()
         case .changed:
             guard let start = swipeStart else { return }
             swipeX += event.scrollingDeltaX
@@ -595,33 +694,55 @@ final class OverlayView: NSView, NSDraggingSource {
                 swipeAxis = abs(swipeX) > abs(swipeY) ? .horizontal : .vertical
             }
             guard swipeAxis == .horizontal else { return }
+            armSwipeWatchdog()
             let elapsed = max(event.timestamp - swipeTime, 1.0 / 240)
             swipeTime = event.timestamp
             swipeVelocity = swipeVelocity * 0.6 + (event.scrollingDeltaX * towardEdgeSign / elapsed) * 0.4
-            panel.setFrameOrigin(NSPoint(x: start.minX + swipeOffset(), y: start.minY))
+            _ = start
+            panel.swipe(to: swipeOffset())
         case .ended, .cancelled:
-            let start = swipeStart
-            let axis = swipeAxis
-            swipeStart = nil
-            swipeAxis = .undecided
-            guard let start else { return }
-            switch axis {
-            case .vertical:
-                if swipeY < -40 { OverlayController.shared.hideAll() }
-            case .horizontal:
-                let dismiss = SwipePhysics.shouldDismiss(progress: swipeX * towardEdgeSign,
-                                                         velocity: swipeVelocity,
-                                                         width: bounds.width)
-                if event.phase != .cancelled, dismiss {
-                    flyOff(from: start)
-                } else {
-                    springBack(to: start)
-                }
-            case .undecided:
-                break
-            }
+            finishSwipe(cancelled: event.phase == .cancelled)
         default: break
         }
+    }
+
+    /// Settle the gesture: dismiss if it earned it, otherwise put the card back in its slot.
+    private func finishSwipe(cancelled: Bool) {
+        swipeWatchdog?.cancel()
+        swipeWatchdog = nil
+        let start = swipeStart
+        let axis = swipeAxis
+        swipeStart = nil
+        swipeAxis = .undecided
+        guard let start else { return }
+        switch axis {
+        case .vertical:
+            if swipeY < -40 { OverlayController.shared.hideAll() }
+        case .horizontal:
+            let dismiss = SwipePhysics.shouldDismiss(progress: swipeX * towardEdgeSign,
+                                                     velocity: swipeVelocity,
+                                                     width: bounds.width)
+            if !cancelled, dismiss {
+                flyOff(from: start)
+            } else {
+                springBack(to: start)
+            }
+        case .undecided:
+            springBack(to: start)
+        }
+    }
+
+    /// Scroll events stop the moment the card slides out from under the pointer, and `.ended`
+    /// never arrives. Treat a gap in the stream as the end of the gesture so the card always
+    /// resolves — dismissed if it was already far enough, back in its slot if it wasn't.
+    private func armSwipeWatchdog() {
+        swipeWatchdog?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.swipeStart != nil else { return }
+            self.finishSwipe(cancelled: false)
+        }
+        swipeWatchdog = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
     }
 
     /// How far the card has moved with the finger, in screen terms.
@@ -633,21 +754,14 @@ final class OverlayView: NSView, NSDraggingSource {
         // commit first: if the record is already gone there is nothing to fly away, and the card
         // should settle back rather than pretend it discarded something
         guard panel.commitDiscard() else { springBack(to: start); return }
-        let target = start.minX + edgeScreenSign * (bounds.width + 60)
-        let remaining = max(abs(target - panel.frame.minX), 40)
+        let remaining = max(bounds.width + 60 - abs(swipeOffset()), 40)
         let duration = SwipePhysics.flyOffDuration(remaining: remaining, velocity: swipeVelocity)
-        Tokens.animate(duration, {
-            self.panel.animator().setFrameOrigin(NSPoint(x: target, y: start.minY))
-            self.panel.animator().alphaValue = 0
-        }) { [weak self] in
-            self?.panel.finishClose()
-        }
+        panel.flyOffAndClose(direction: edgeScreenSign, over: duration)
     }
 
     private func springBack(to start: NSRect) {
-        Tokens.animate(0.32, timing: Tokens.springBack) {
-            self.panel.animator().setFrameOrigin(start.origin)
-        }
+        _ = start
+        panel.endSwipe(springBackOver: 0.32)
     }
 
     override func mouseEntered(with event: NSEvent) { hovering = true }
