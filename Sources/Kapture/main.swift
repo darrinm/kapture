@@ -273,6 +273,28 @@ if let i = CommandLine.arguments.firstIndex(of: "--settings-shot"), CommandLine.
         ("1-general", .general), ("2-overlay", .overlay), ("3-recording", .recording),
         ("4-library", .library), ("5-shortcuts", .shortcuts), ("6-sharing", .sharing),
     ]
+    // --real opens the window the menu item opens and checks it came up at its intended size.
+    // This is the regression it exists for: the hosting controller takes the SwiftUI view's
+    // ideal size, and when that view had no definite height the window opened as an 84-point
+    // sliver with every pane clipped out of sight.
+    if CommandLine.arguments.contains("--real") {
+        Task { @MainActor in
+            SettingsWindowController.shared.show()
+            try? await Task.sleep(for: .milliseconds(1200))
+            guard let window = NSApp.windows.first(where: { $0.title == "Kapture Settings" }),
+                  let content = window.contentView else {
+                print("settings-probe: no window"); exit(1)
+            }
+            let expected = SettingsView.windowSize
+            print("settings-probe: content \(content.frame.size), expected \(expected)")
+            let ok = content.frame.height >= expected.height - 60
+                && content.frame.width >= expected.width - 60
+            print(ok ? "settings-probe: ok" : "settings-probe: COLLAPSED")
+            exit(ok ? 0 : 1)
+        }
+        app.run()
+    }
+
     Task { @MainActor in
         let selection = SettingsSelection()
         let host = NSHostingView(rootView: SettingsView(selection: selection))

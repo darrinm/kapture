@@ -50,10 +50,16 @@ final class SettingsWindowController {
             window.makeKeyAndOrderFront(nil)
             return
         }
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 560),
+        let w = NSWindow(contentRect: NSRect(origin: .zero, size: SettingsView.windowSize),
                          styleMask: [.titled, .closable], backing: .buffered, defer: false)
         w.title = "Kapture Settings"
-        w.contentViewController = NSHostingController(rootView: SettingsView(selection: selection))
+        let host = NSHostingController(rootView: SettingsView(selection: selection))
+        // A hosting controller hands the window its view's *ideal* size, and a TabView full of
+        // scrollable Forms has no definite height to offer — it reported 84 points and the
+        // window opened as an empty sliver. SettingsView now pins its own frame, which makes
+        // that ideal size definite. Setting preferredContentSize here as well puts two
+        // authorities on the same number and AppKit loops updating constraints forever.
+        w.contentViewController = host
         w.center()
         w.isReleasedWhenClosed = false
         window = w
@@ -68,6 +74,9 @@ final class SettingsWindowController {
 
 struct SettingsView: View {
     enum Tab: Hashable { case general, overlay, recording, library, shortcuts, sharing }
+
+    /// Fixed, and tall enough for the longest pane (Shortcuts) without scrolling.
+    static let windowSize = NSSize(width: 520, height: 600)
 
     @ObservedObject var selection: SettingsSelection
 
@@ -126,7 +135,8 @@ struct SettingsView: View {
             shortcuts.tabItem { Label("Shortcuts", systemImage: "command") }.tag(Tab.shortcuts)
             sharing.tabItem { Label("Sharing", systemImage: "link") }.tag(Tab.sharing)
         }
-        .frame(width: 500)
+        .frame(width: SettingsView.windowSize.width - 20,
+               height: SettingsView.windowSize.height - 24)
         .padding(.bottom, 12)
         .task { await refreshKeychainState() }
     }
