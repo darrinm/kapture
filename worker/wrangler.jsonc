@@ -1,4 +1,8 @@
 {
+  // Deploying your own? Change "routes" to your domain, "kv_namespaces[0].id" to the id
+  // `wrangler kv namespace create QUOTAS` prints for your account, and ADMIN_OWNER to your own
+  // owner name. The values below are the author's deployment; none of them is a secret, but
+  // none of them will work in your account either.
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "kapture-share",
   "main": "src/index.ts",
@@ -9,7 +13,9 @@
   "r2_buckets": [{ "binding": "BUCKET", "bucket_name": "kapture-shares" }],
   "kv_namespaces": [{ "binding": "QUOTAS", "id": "7b8c352113924566884294c22a72a659" }],
   "vars": {
+    // the owner allowed to delete anyone's share
     "ADMIN_OWNER": "darrin",
+    // where /download and /appcast.xml redirect; point this at your own releases
     "RELEASES_BASE": "https://github.com/darrinm/kapture/releases"
   }
   // TOKENS is a secret: wrangler secret put TOKENS

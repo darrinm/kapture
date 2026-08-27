@@ -1,13 +1,16 @@
-// Verify-by-fire (spike D lesson): RegisterEventHotKey reports success even when another
-// capture app owns ⌘⇧3/4/5 — the press just goes to them. So: detect known capture apps,
-// warn with a one-click quit, and re-check whenever one launches while Kapture runs.
+// Verify-by-fire (spike D lesson): RegisterEventHotKey reports success even when another app
+// already owns ⌘⇧3/4/5 — the press just goes to them, and Kapture looks broken for a reason
+// the user cannot see. So: notice the apps that take those shortcuts, explain the conflict,
+// offer to quit the other app, and re-check whenever one launches while Kapture runs.
 import AppKit
 import KaptureCore
 
 @MainActor
-final class CompetitorWatch {
-    static let shared = CompetitorWatch()
+final class ShortcutConflictWatch {
+    static let shared = ShortcutConflictWatch()
 
+    /// Apps known to register the system capture shortcuts. This is not a rivals list — it is
+    /// the set of apps whose presence explains a shortcut that silently does nothing.
     private nonisolated static let known: [String: String] = [
         "pl.maketheweb.cleanshotx": "CleanShot X",
         "cc.ffitch.shottr": "Shottr",
@@ -24,14 +27,14 @@ final class CompetitorWatch {
             forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main
         ) { note in
             guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
-                  let id = app.bundleIdentifier, CompetitorWatch.known[id] != nil else { return }
-            Task { @MainActor in CompetitorWatch.shared.check() }
+                  let id = app.bundleIdentifier, ShortcutConflictWatch.known[id] != nil else { return }
+            Task { @MainActor in ShortcutConflictWatch.shared.check() }
         }
     }
 
     func running() -> [(app: NSRunningApplication, name: String)] {
         NSWorkspace.shared.runningApplications.compactMap { app in
-            guard let id = app.bundleIdentifier, let name = CompetitorWatch.known[id] else { return nil }
+            guard let id = app.bundleIdentifier, let name = ShortcutConflictWatch.known[id] else { return nil }
             return (app, name)
         }
     }
@@ -44,12 +47,13 @@ final class CompetitorWatch {
 
     private func warn(about app: NSRunningApplication, name: String) {
         let alert = NSAlert()
-        alert.messageText = "\(name) may intercept your capture shortcuts"
-        alert.informativeText = "\(name) is running and also listens for ⌘⇧3 / ⌘⇧4 / ⌘⇧5, so presses may go to it instead of Kapture. Quit it to make Kapture's shortcuts reliable."
+        alert.messageText = "\(name) is using the capture shortcuts"
+        alert.informativeText = "macOS gives ⌘⇧3 / ⌘⇧4 / ⌘⇧5 to whichever app claimed them first, and \(name) is running, so those presses may not reach Kapture. Both apps can be installed — only one can hold the shortcuts at a time."
+        // "Keep both" is the default: quitting someone else's app should take a deliberate click
+        alert.addButton(withTitle: "Keep \(name) running")
         alert.addButton(withTitle: "Quit \(name)")
-        alert.addButton(withTitle: "Ignore")
         NSApp.activate(ignoringOtherApps: true)
-        if alert.runModal() == .alertFirstButtonReturn {
+        if alert.runModal() == .alertSecondButtonReturn {
             app.terminate()
             Log.shell.info("asked \(name, privacy: .public) to quit (hotkey contention)")
         } else {

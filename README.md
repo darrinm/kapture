@@ -1,89 +1,143 @@
 # Kapture
 
-A personal macOS capture workspace — screenshots, recordings, and a library that remembers
-everything, all on your Mac. Free, local-first, no accounts.
+A screen capture app for macOS: take the shot, triage it in the corner, annotate it, record
+your screen, and find any of it again months later by the words that were on screen. Everything
+lives on your Mac.
 
-- **Product spec / implementation spec / design mockups:** published as Claude artifacts (links in project notes).
-- **Spike validation:** see `../kapture-spikes/README.md` — every load-bearing API claim verified empirically.
-- Platform: macOS 14+, Apple silicon. Swift 6, SwiftPM. Not sandboxed; hardened runtime for release.
+Free, no account, no subscription. It replaced CleanShot X for the person who wrote it.
 
-## Dev
+> **Status: personal project, early.** It is used daily on the author's machines, but there is
+> no signed release yet — you build it yourself (see below). Interfaces and file layout can
+> still change under you.
+
+## What it does
+
+**Capture** — ⌘⇧4 for an area, ⌘⇧3 for a display, ⌥⇧4 to repeat the last region. The screen
+freezes while you drag, with a magnifier that shows pixels and the hex value under the
+crosshair. Press space to switch to window mode and click the window you want; it captures with
+its shadow and a transparent background. Also: all displays at once, a self-timer, and ⌘⇧2 to
+pull the *text* off the screen straight to the clipboard.
+
+**Triage** — each capture lands as a card in the corner instead of littering your desktop.
+Keep it (⌘W), copy it (⌘C), save it (⌘S), edit it (⌘E), share it (⌘U), or throw it away (⌘⌫ or
+a flick toward the screen edge). Discarding is one gesture, not a dialog, because the common
+case is three shots of the same thing and only the best one is worth keeping. Anything
+discarded sits in a trash for seven days.
+
+**Annotate** — arrows, boxes, ellipses, lines, freehand, text, step counters, highlighter, and
+blur or pixelate for the parts you shouldn't have captured. Crop with the usual aspect ratios.
+Every layer stays editable and every edit is undoable; the untouched original is always kept
+aside, so a crop is never permanent.
+
+**Record** — an area, a window, or a whole display to MP4, with system audio and your
+microphone. Pause and resume mid-take. Clicks and keystrokes can be drawn into the movie. Trim
+the ends afterwards, or export the whole thing as a GIF.
+
+**Remember** — every capture is read on-device and its text indexed, so you can search your
+library for the error message you screenshotted in March. Filter by app, kind or date. With
+your own Anthropic API key, captures also get named by what's actually in them instead of
+`Screenshot 2026-03-14 at 11.42.13`.
+
+**Pin** — float any capture on top of everything while you work from it.
+
+**Share** — ⌘U uploads a capture and copies a link. See [Sharing](#sharing) — it's optional,
+off until you configure it, and you can run the server yourself.
+
+## Install
+
+No notarized release exists yet, so: build it.
 
 ```sh
-export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer   # if xcode-select points elsewhere
-swift build && swift test
-scripts/bundle.sh && open dist/Kapture.app
+git clone https://github.com/darrinm/kapture.git
+cd kapture
+scripts/bundle.sh
+cp -R dist/Kapture.app /Applications/
+open /Applications/Kapture.app
 ```
 
-First run: grant Screen Recording when asked (the app relaunches itself), then ⌘⇧4.
+Requires macOS 14 or later on Apple silicon, and Xcode installed (the command line tools alone
+aren't enough — Kapture uses ScreenCaptureKit and the macOS SDK). `bundle.sh` signs the app
+with whatever signing identity you have; if you have none it falls back to ad-hoc signing,
+which works but makes macOS re-ask for Screen Recording permission after every rebuild.
 
-## M0 status
+## Permissions
 
-Done: menu bar shell · Carbon hotkeys (⌘⇧3/4 shadowing, ⌥⇧4 previous-area) · frozen-frame
-selection (crosshair, magnifier loupe w/ pixel grid + hex, dimensions, ⇧ axis-lock,
-⌥ center-out, esc; **space toggles window mode** — hover-highlight, live window capture with
-transparent background) · fullscreen (display under cursor) + all-displays composite ·
-self-timer (3/5/10s) · library store (file + sidecar + intent journal + SQLite index in App
-Support) · clipboard destination · quick-access overlay (hover chrome keep/copy/save, drag-out
-w/ close-after-drag, click-to-key ⌘W/⌘C/⌘S) · two-screen onboarding with relaunch-after-grant ·
-app icon (gpt-image-2 + squircle mask, `scripts/build-icns.sh`) · MIT license · CI.
+Kapture asks for as little as it can, as late as it can.
 
-M0: complete (verify-by-fire ships as CompetitorWatch — detects capture apps holding the shortcuts, one-click quit).
+| Permission | When | Why |
+| --- | --- | --- |
+| Screen Recording | at first launch | required to capture anything at all |
+| Microphone | first recording with the mic on | recording your voice |
+| Accessibility | optional, offered when relevant | keyboard shortcuts on the hovered card, and drawing keystrokes into a recording |
 
-## M1 status (It triages)
+It is not sandboxed and does not run a background service beyond its own menu bar item. It
+makes no network requests unless you turn on AI naming or share something.
 
-Done: journaled trash (.trash/ + tombstones, 7-day sweep every 6h, sweep-safe restore) ·
-discard gestures (hover trash, ⌘⌫, swipe-toward-edge; swipe-down hides all) · Restore Last
-Discarded · +n stack collapse past 5 · Quick Look (space) · right-click menu · pins (drag,
-opacity scroll, nudge, lock/click-through, hover ×, ⌘⇧1 from clipboard) · capture→corner
-flight animation · Settings window (General/Overlay: clipboard, sounds, launch-at-login,
-export location, overlay position/size, auto-close w/ save-and-close) · hover-shortcut
-event-tap tier (Accessibility JIT, tap re-enable, click-to-key floor) · uninstall flow ·
-design pass v1 (scripted photo shoot in scripts/shoot.command).
+## Sharing
 
-M1 remaining: After-Capture action list UI (destinations model exists) · rotate/flip &
-scale-Retina on right-click (needs editor plumbing, lands with M2).
+Sharing is off until you give Kapture a token. There are no accounts: a link is a long random
+id, it never expires, and deleting it is an explicit action.
 
-## M2 status (It annotates)
+The server is a single Cloudflare Worker plus an R2 bucket — about 300 lines, in
+[`worker/`](worker/). The author runs one at `kapture.sh`; you can deploy your own in a few
+minutes and point Kapture at it (Settings › Sharing reads the endpoint from the
+`shareEndpoint` default). See [`worker/README.md`](worker/README.md) for the deploy steps and
+the security posture: tokens are stored only as hashes, uploads are limited to an allowlist of
+image and video types with a daily per-owner quota, and the viewer page runs no JavaScript
+under a deny-everything CSP.
 
-Done: annotation editor (arrow, rectangle, ellipse, line, freehand, text, counter, highlighter,
-blur/pixelate) with layer selection, control-point editing, per-layer recolor and width, undo
-per gesture · crop (draggable from inside, resizable from any edge or corner, clamped to the
-image, aspect-ratio presets, in-editor apply that stays undoable) · per-tool options bar ·
-originals preserved in `.originals/` so every destructive edit is reversible.
+## Privacy
 
-## M3 status (It records)
+Captures are files in a folder you choose (`~/Pictures/Kapture` by default), with a SQLite
+index in Application Support. Nothing is uploaded, phoned home, or analyzed remotely by
+default.
 
-Done: screen recording of an area, window or display (ScreenCaptureKit + AVAssetWriter) with
-system audio and microphone · pause/resume, with the menu-bar timer holding while paused ·
-click and keystroke visualization drawn into the movie · trimmer · GIF export as a new capture ·
-menu-bar red dot that stops on click rather than opening a menu.
+Exactly two things can send data off the Mac, both opt-in and both visible:
 
-## M4 status (It remembers)
+- **AI naming**, if you add an Anthropic API key: the capture image and its recognized text go
+  to the Anthropic API to produce a filename. Without a key, naming happens on-device.
+- **Sharing**, when you press ⌘U: that capture is uploaded to the endpoint you configured.
 
-Done: library window with a Photos-style borderless grid · FTS5 search over recognized text,
-with app, kind and date-range filters · on-device OCR ingest (Vision) and Capture Text (⌘⇧2) ·
-automatic naming, defaulting on only when an Anthropic key is present — the on-device heuristic
-ships off because its names were verifiably worse than a timestamp · filename templates ·
-rename in-use guard so a rename can never move a file out from under a drag, save panel or
-upload.
+Text recognition, search indexing, and everything else happens locally. Both API keys live in
+the Keychain, never in preferences.
 
-## M5 status (It shares)
+## Development
 
-Done: share to kapture.sh — ⌘U on an overlay card or Share Link in the library uploads the
-capture and copies a permanent, unguessable link. Re-sharing an unedited capture copies the
-existing link; editing marks it out of date; deleting revokes it. The token lives in the
-Keychain (Settings › Sharing). In-app updates via Sparkle, with the appcast and DMG served from
-GitHub releases.
+```sh
+scripts/bundle.sh          # build + assemble + sign Kapture.app
+scripts/test.sh            # swift test
+cd worker && npm test      # the share backend, against a real Workers runtime
+```
 
-- Backend: [`worker/README.md`](worker/README.md) — a single Cloudflare Worker + R2, no accounts,
-  hashed tokens, a no-JavaScript viewer under a deny-everything CSP.
-- Releases: [`docs/RELEASING.md`](docs/RELEASING.md) — tag, and CI signs, notarizes, staples and
-  publishes.
+Warnings are errors in this project — `bundle.sh` builds with `-warnings-as-errors`, and CI
+does too. Both scripts unset an inherited `SDKROOT` first; if your shell exports one pointing
+at a different SDK than your Xcode, the Swift build fails with "this SDK is not supported by
+the compiler."
 
-M5 remaining: deploy the Worker (needs Cloudflare credentials that can write Workers/KV/R2) and
-mint the first share token.
+Layout: `KaptureCore` (library, database, sharing) · `KaptureCapture` (ScreenCaptureKit) ·
+`KaptureEditor` (annotation) · `KaptureRecording` · `KaptureIntelligence` (OCR, naming) ·
+`KaptureDesign` (tokens) · `Kapture` (the app) · `worker` (the share backend).
 
-Architecture and staging follow the implementation spec (v2.1); deviations: SwiftPM-only for
-now (no .xcodeproj — `scripts/bundle.sh` assembles the app), KeyboardShortcuts dep deferred
-until the Settings UI lands (Carbon direct in the meantime).
+Releases are cut by tagging — see [`docs/RELEASING.md`](docs/RELEASING.md). Milestone-by-
+milestone history is in [`docs/STATUS.md`](docs/STATUS.md).
+
+## Contributing
+
+This is a personal project shared in the hope it's useful, not a product with a roadmap owed to
+anyone. Issues describing a bug you hit are welcome. Please open an issue before a pull
+request — an unsolicited large PR will probably sit unmerged, and that's a waste of your
+evening. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+Security issues: please don't file them publicly — [SECURITY.md](SECURITY.md).
+
+## Built with
+
+- [GRDB.swift](https://github.com/groue/GRDB.swift) — SQLite, MIT
+- [Sparkle](https://github.com/sparkle-project/Sparkle) — in-app updates, MIT
+
+Full license texts: [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). They ship inside the app
+bundle too, in `Contents/Resources`.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

@@ -57,6 +57,8 @@ jobs:
           KAPTURE_VERSION: ${{ steps.version.outputs.version }}
           KAPTURE_BUILD: ${{ github.run_number }}
           KAPTURE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_KEY }}
+          # same default as the appcast step, so the shipped app and the feed agree
+          KAPTURE_FEED_URL: ${{ vars.SU_FEED_URL || 'https://kapture.sh/appcast.xml' }}
         run: bash scripts/bundle.sh
 
       - name: Verify the signature is Developer ID and hardened
@@ -109,6 +111,11 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
           BUILD: ${{ github.run_number }}
           ATTRS: ${{ steps.sign.outputs.attrs }}
+          # a fork's appcast has to point at the fork's own releases and its own feed URL,
+          # or its users would be updated from someone else's builds
+          REPO: ${{ github.repository }}
+          SERVER: ${{ github.server_url }}
+          FEED_URL: ${{ vars.SU_FEED_URL || 'https://kapture.sh/appcast.xml' }}
         run: |
           # one entry, always pointing at this release's asset: Sparkle only needs the newest
           cat > dist/appcast.xml <<XML
@@ -116,7 +123,7 @@ jobs:
           <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
             <channel>
               <title>Kapture</title>
-              <link>https://kapture.sh/appcast.xml</link>
+              <link>$FEED_URL</link>
               <description>Updates for Kapture</description>
               <language>en</language>
               <item>
@@ -125,8 +132,8 @@ jobs:
                 <sparkle:version>$BUILD</sparkle:version>
                 <sparkle:shortVersionString>$VERSION</sparkle:shortVersionString>
                 <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-                <link>https://github.com/darrinm/kapture/releases/tag/v$VERSION</link>
-                <enclosure url="https://github.com/darrinm/kapture/releases/download/v$VERSION/Kapture.dmg"
+                <link>$SERVER/$REPO/releases/tag/v$VERSION</link>
+                <enclosure url="$SERVER/$REPO/releases/download/v$VERSION/Kapture.dmg"
                            type="application/octet-stream" $ATTRS />
               </item>
             </channel>

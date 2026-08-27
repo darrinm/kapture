@@ -13,6 +13,8 @@ unset SDKROOT MACOSX_DEPLOYMENT_TARGET
 VERSION="${KAPTURE_VERSION:-0.1.0}"
 BUILD="${KAPTURE_BUILD:-1}"
 PUBLIC_ED_KEY="${KAPTURE_PUBLIC_ED_KEY:-}"
+# a fork points this at its own appcast; the app derives its download page from it too
+FEED_URL="${KAPTURE_FEED_URL:-https://kapture.sh/appcast.xml}"
 
 # -warnings-as-errors: project warnings fail the build (dependencies are unaffected)
 # the rpath lets the executable find Sparkle.framework once it is inside the bundle
@@ -33,6 +35,9 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
 cp "$BIN" "$APP/Contents/MacOS/Kapture"
 [ -f Resources/AppIcon.icns ] && cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+# MIT obliges us to ship the license text with the binary, not just name the project
+[ -f LICENSE ] && cp LICENSE "$APP/Contents/Resources/LICENSE.txt"
+[ -f THIRD-PARTY-NOTICES.md ] && cp THIRD-PARTY-NOTICES.md "$APP/Contents/Resources/"
 
 # Sparkle ships as an XCFramework; the .app carries just the macOS slice, with its XPC services
 # and Updater.app nested inside the framework where Sparkle expects to find them.
@@ -58,7 +63,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
-  <key>SUFeedURL</key><string>https://kapture.sh/appcast.xml</string>
+  <key>SUFeedURL</key><string>${FEED_URL}</string>
   <key>SUPublicEDKey</key><string>${PUBLIC_ED_KEY}</string>
   <key>SUEnableAutomaticChecks</key><true/>
   <key>SUScheduledCheckInterval</key><integer>86400</integer>

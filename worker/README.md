@@ -16,6 +16,22 @@ GET  /download        → 302 to the latest GitHub release asset
 GET  /appcast.xml     → Sparkle feed
 ```
 
+## Running your own
+
+Nothing here is specific to kapture.sh except three values. Fork, then:
+
+1. In `wrangler.jsonc`, set `routes` to your own domain (or delete it and use the
+   `*.workers.dev` URL wrangler gives you), `ADMIN_OWNER` to your own owner name, and
+   `RELEASES_BASE` to your fork's releases.
+2. Follow **Deploy** below — the `kv namespace create` step prints the id that replaces the one
+   in `wrangler.jsonc`.
+3. Point Kapture at it:
+   `defaults write sh.kapture.app shareEndpoint https://your-domain.example`, then paste your
+   token into Settings › Sharing. The endpoint must be https — Kapture ignores anything else
+   rather than send a bearer token in the clear.
+
+Your deployment is entirely separate: your own bucket, your own tokens, your own quotas.
+
 ## Develop
 
 ```sh

@@ -58,7 +58,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         EventTapCenter.shared.startIfPossible()   // silent no-op without the Accessibility grant
         installStatusItem()
         Onboarding.shared.showIfNeeded()
-        CompetitorWatch.shared.start()
+        ShortcutConflictWatch.shared.start()
 
         // trash sweep at launch + every 6h (7-day retention)
         let library = CaptureCoordinator.shared.library

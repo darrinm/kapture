@@ -30,7 +30,14 @@ final class UpdaterController {
 
     func checkForUpdates() {
         guard let controller else {
-            NSWorkspace.shared.open(URL(string: "https://kapture.sh/download")!)
+            // no updater in this build, so send them to the download page of whichever service
+            // this build's feed points at — a fork's users must not land on kapture.sh
+            let feed = Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") as? String
+            let origin = feed.flatMap(URL.init(string:)).flatMap { url -> URL? in
+                guard let scheme = url.scheme, let host = url.host else { return nil }
+                return URL(string: "\(scheme)://\(host)/download")
+            }
+            NSWorkspace.shared.open(origin ?? URL(string: "https://kapture.sh/download")!)
             return
         }
         controller.checkForUpdates(nil)
