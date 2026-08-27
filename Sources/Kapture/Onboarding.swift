@@ -77,7 +77,7 @@ final class Onboarding {
 
     private func renderPermission() {
         let root = screenScaffold(heading: "Allow screen capture",
-            body: "macOS asks once. Kapture never uploads anything unless you choose to share it.")
+            body: "Kapture needs it to see your screen. Captures stay on your Mac unless you share one.")
         let button = accentButton("Open System Settings", action: #selector(grantTapped))
         let sub = NSTextField(labelWithString: "Kapture will relaunch automatically.")
         sub.font = .systemFont(ofSize: 11)
@@ -124,8 +124,9 @@ final class Onboarding {
 
     private func welcomeDone() {
         Settings.shared.onboardingComplete = true
+        let area = HotkeyCenter.shared.binding(for: .area).display
         let root = screenScaffold(heading: "You're ready.",
-                                  body: "Press ⌘⇧4 to take your first capture.")
+                                  body: "Press \(area) to take your first capture.")
         root.addArrangedSubview(accentButton("Done", action: #selector(dismiss)))
         present(root)
     }
