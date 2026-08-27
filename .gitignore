@@ -3,3 +3,6 @@
 dist/
 *.xcuserdata
 .DS_Store
+
+# signing material — private keys, never committed
+.kapture-signing/
