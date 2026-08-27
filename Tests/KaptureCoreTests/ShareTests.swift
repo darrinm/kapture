@@ -29,14 +29,16 @@ final class ShareTests: XCTestCase {
         XCTAssertNil(ShareService.contentType(for: URL(fileURLWithPath: "/tmp/noextension")))
     }
 
-    func testUploadRefusesAnUnsupportedTypeWithoutAToken() async {
-        // no token configured in the test environment: the auth guard must fire first, and it
-        // must be flagged as an auth failure so the UI opens Settings instead of retrying
+    /// An unshareable file is refused from what the file itself says, before any Keychain read.
+    /// That ordering is load-bearing: the test binary is not the app, so a Keychain read here
+    /// blocks on a permission dialog and the suite hangs instead of failing.
+    func testUploadRefusesAnUnsupportedTypeBeforeTouchingTheKeychain() async {
         do {
             _ = try await ShareService.upload(fileURL: URL(fileURLWithPath: "/tmp/nothing.pdf"))
             XCTFail("expected a failure")
         } catch let failure as ShareFailure {
-            XCTAssertTrue(failure.isAuthFailure || failure.description.contains("pdf"))
+            XCTAssertTrue(failure.description.contains("pdf"), "got: \(failure.description)")
+            XCTAssertFalse(failure.isAuthFailure, "this is a file problem, not a token problem")
         } catch {
             XCTFail("unexpected error: \(error)")
         }

@@ -49,6 +49,29 @@ npx wrangler secret put TOKENS               # {"darrin":"<hash>","friend":"<has
 npx wrangler deploy
 ```
 
+This is already done for kapture.sh: the Worker is deployed on the custom domain, with the
+`kapture-shares` bucket and the `QUOTAS` namespace whose id is in `wrangler.jsonc`. Adding a
+friend means minting one more token and re-putting `TOKENS` with both entries — the secret is
+the whole map, so a put that lists only the new owner would revoke everyone else.
+
+## Giving the token to Kapture
+
+Paste it into Settings › Sharing, or hand it to the app on stdin:
+
+```sh
+printf %s "$TOKEN" | /Applications/Kapture.app/Contents/MacOS/Kapture --set-share-token
+```
+
+Either way *the app* writes the Keychain item. An item created by another tool (`security
+add-generic-password`, say) carries an ACL that doesn't include Kapture, and every read then
+blocks on a permission dialog.
+
+To check the whole path without touching the UI:
+
+```sh
+Kapture.app/Contents/MacOS/Kapture --share-test some.png --delete
+```
+
 `TOKENS` is a JSON map of owner → sha256 hex of that owner's bearer token. Only
 the hash is ever stored server-side, so a leaked deployment reveals no token.
 Adding a friend means minting another token and re-putting the secret; removing

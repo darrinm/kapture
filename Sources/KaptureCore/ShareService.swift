@@ -52,9 +52,9 @@ public enum ShareService {
     /// Uploads from disk rather than from memory: a screen recording can be tens of megabytes,
     /// and `upload(for:fromFile:)` streams it instead of holding a second copy in the app.
     public static func upload(fileURL: URL, filename: String? = nil) async throws -> ShareLink {
-        guard let token = Keychain.shareToken, !token.isEmpty else {
-            throw ShareFailure("no share token — add one in Settings › Sharing", isAuthFailure: true)
-        }
+        // everything knowable from the file itself is checked before the token is read: reaching
+        // into the Keychain is a blocking call that can put a permission dialog on screen, and
+        // there is no reason to pay it to learn a PDF was never shareable
         guard let type = contentType(for: fileURL) else {
             throw ShareFailure("kapture.sh does not accept .\(fileURL.pathExtension) files")
         }
@@ -62,6 +62,9 @@ public enum ShareService {
         let size = (attributes?[.size] as? NSNumber)?.intValue ?? 0
         if size > maxUploadBytes {
             throw ShareFailure("too large to share (\(size / 1_048_576) MB; the limit is 95 MB)")
+        }
+        guard let token = Keychain.shareToken, !token.isEmpty else {
+            throw ShareFailure("no share token — add one in Settings › Sharing", isAuthFailure: true)
         }
 
         var request = URLRequest(url: Settings.shared.shareEndpoint.appendingPathComponent("api/upload"))

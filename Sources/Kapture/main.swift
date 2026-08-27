@@ -242,6 +242,45 @@ if let i = CommandLine.arguments.firstIndex(of: "--gif-test"), CommandLine.argum
     exit(0)
 }
 
+// Stores the share token, read from stdin so it never lands in argv or a shell history. The app
+// must write this item itself: a Keychain entry created by another tool (say /usr/bin/security)
+// has an ACL that doesn't include Kapture, and every read then waits on a permission dialog.
+//   printf %s "$TOKEN" | Kapture.app/Contents/MacOS/Kapture --set-share-token
+if CommandLine.arguments.contains("--set-share-token") {
+    let token = (readLine(strippingNewline: true) ?? "").trimmingCharacters(in: .whitespaces)
+    guard !token.isEmpty else {
+        print("no token on stdin")
+        exit(1)
+    }
+    Keychain.shareToken = token
+    print(Keychain.shareToken == token ? "share token stored" : "keychain write failed")
+    exit(Keychain.shareToken == token ? 0 : 1)
+}
+
+// Share smoke mode: uploads a file through the real path — Keychain token, ShareService, the
+// live endpoint — and prints the link, so sharing can be verified without driving the UI.
+// `--share-test <file> [--delete]` deletes the link again afterwards.
+if let i = CommandLine.arguments.firstIndex(of: "--share-test"), CommandLine.arguments.count > i + 1 {
+    let path = CommandLine.arguments[i + 1]
+    let cleanUp = CommandLine.arguments.contains("--delete")
+    let sem = DispatchSemaphore(value: 0)
+    Task {
+        do {
+            let link = try await ShareService.upload(fileURL: URL(fileURLWithPath: path))
+            print("share-ok \(link.url.absoluteString) (\(link.bytes) bytes)")
+            if cleanUp {
+                try await ShareService.delete(id: link.id)
+                print("share-deleted \(link.id)")
+            }
+        } catch {
+            print("share-failed: \(error)")
+        }
+        sem.signal()
+    }
+    sem.wait()
+    exit(0)
+}
+
 MainActor.assumeIsolated {
     let app = NSApplication.shared
     let delegate = AppDelegate()
