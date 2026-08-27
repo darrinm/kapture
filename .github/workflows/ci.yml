@@ -12,3 +12,16 @@ jobs:
       - name: Test
         # Capture/TCC-dependent code is excluded from test targets (headless runners have no grants)
         run: swift test -Xswiftc -warnings-as-errors
+
+  worker:
+    runs-on: ubuntu-latest
+    defaults:
+      run: { working-directory: worker }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "22" }
+      - run: npm ci
+      - run: npm run typecheck
+      # runs against a real workers runtime under miniflare — no network, no Cloudflare account
+      - run: npm test

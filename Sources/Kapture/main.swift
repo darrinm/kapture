@@ -147,6 +147,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         menu.addItem(item("Library…", #selector(menuLibraryWindow), hotkey: .library))
         menu.addItem(withTitle: "Open Library Folder", action: #selector(menuLibrary), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Settings…", action: #selector(menuSettings), keyEquivalent: ",").target = self
+        menu.addItem(withTitle: "Check for Updates…", action: #selector(menuCheckForUpdates), keyEquivalent: "").target = self
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit Kapture", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         statusMenu = menu
@@ -178,9 +179,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             item.title = RecordingCoordinator.shared.isPaused ? "Resume Recording" : "Pause Recording"
             return RecordingCoordinator.shared.isRecording
         }
+        if item.action == #selector(menuCheckForUpdates) {
+            return UpdaterController.shared.canCheckNow
+        }
         return true
     }
 
+    @objc private func menuCheckForUpdates() { UpdaterController.shared.checkForUpdates() }
     @objc private func menuPinClipboard() { PinController.shared.pinFromClipboard() }
     @objc private func menuRestore() {
         guard let library = CaptureCoordinator.shared.library,

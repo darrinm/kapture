@@ -6,6 +6,8 @@ let package = Package(
     platforms: [.macOS(.v14)],
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "6.29.0"),
+        // in-app updates: the appcast lives at kapture.sh/appcast.xml and points at GitHub releases
+        .package(url: "https://github.com/sparkle-project/Sparkle.git", from: "2.6.0"),
     ],
     targets: [
         .target(name: "KaptureDesign", path: "Sources/KaptureDesign"),
@@ -32,7 +34,8 @@ let package = Package(
         .executableTarget(
             name: "Kapture",
             dependencies: ["KaptureCore", "KaptureCapture", "KaptureDesign", "KaptureEditor",
-                           "KaptureRecording", "KaptureIntelligence"],
+                           "KaptureRecording", "KaptureIntelligence",
+                           .product(name: "Sparkle", package: "Sparkle")],
             path: "Sources/Kapture"),
         .testTarget(name: "KaptureCoreTests", dependencies: ["KaptureCore"], path: "Tests/KaptureCoreTests"),
     ]
