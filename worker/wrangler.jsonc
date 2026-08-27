@@ -1,0 +1,17 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "kapture-share",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  "routes": [{ "pattern": "kapture.sh", "custom_domain": true }],
+  "r2_buckets": [{ "binding": "BUCKET", "bucket_name": "kapture-shares" }],
+  "kv_namespaces": [{ "binding": "QUOTAS", "id": "REPLACE_WITH_KV_ID" }],
+  "vars": {
+    "ADMIN_OWNER": "darrin",
+    "RELEASES_BASE": "https://github.com/darrinm/kapture/releases"
+  }
+  // TOKENS is a secret: wrangler secret put TOKENS
+  // (JSON map of owner → sha256 hex of that owner's bearer token)
+}
