@@ -71,11 +71,16 @@ struct SettingsView: View {
     @AppStorage("recordMicrophone") private var recordMicrophone = false
     @AppStorage("showClicksWhileRecording") private var showClicks = true
     @AppStorage("showKeysWhileRecording") private var showKeys = false
-    @AppStorage("aiNamingEnabled") private var aiNaming = false
     @AppStorage("filenameTemplate") private var filenameTemplate = "%n %Y-%m-%d at %H.%M.%S"
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @State private var exportPath = Settings.shared.exportLocation.path
+    // Not @AppStorage: this key's default depends on whether an API key is set, so a plain
+    // `= false` default would show the toggle off while ingest was busy renaming captures.
+    @State private var aiNaming = Settings.shared.aiNamingEnabled
+    // The stored key is never shown; the field starts empty and only what the user types is
+    // committed, so an untouched field can't wipe a key that's already there.
     @State private var anthropicKey = ""
+    @State private var hasStoredKey = Keychain.anthropicKey?.isEmpty == false
 
     var body: some View {
         TabView {
@@ -155,9 +160,16 @@ struct SettingsView: View {
     var intelligence: some View {
         Form {
             Toggle("Name captures automatically", isOn: $aiNaming)
-            SecureField("Anthropic API key", text: $anthropicKey, prompt: Text("sk-ant-… (optional)"))
-                .onSubmit { Keychain.anthropicKey = anthropicKey.isEmpty ? nil : anthropicKey }
-            Text(anthropicKey.isEmpty
+                .onChange(of: aiNaming) { _, v in Settings.shared.aiNamingEnabled = v }
+            SecureField("Anthropic API key", text: $anthropicKey,
+                        prompt: Text(hasStoredKey ? "stored — type to replace" : "sk-ant-… (optional)"))
+                // commit as typed: onSubmit alone lost the key whenever the user clicked away
+                // or closed the window instead of pressing Return
+                .onChange(of: anthropicKey) { _, v in
+                    Keychain.anthropicKey = v.isEmpty ? nil : v
+                    hasStoredKey = !v.isEmpty
+                }
+            Text(!hasStoredKey
                  ? "Without a key, names come from an on-device heuristic that is rough — it often "
                    + "latches onto menu-bar text. With your own Anthropic key, each capture (image "
                    + "plus its recognized text) is named by Claude; that is the only path where "

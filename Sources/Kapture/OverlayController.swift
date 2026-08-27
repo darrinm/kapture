@@ -316,10 +316,13 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
         let save = NSSavePanel()
         save.nameFieldStringValue = fileURL.lastPathComponent
         NSApp.activate(ignoringOtherApps: true)
+        let id = record.id
         save.begin { [weak self] response in
+            // clear on every exit — a cancelled panel used to leave the capture marked in use
+            // for the rest of the session, which blocks its AI rename permanently
+            defer { Library.clearInUse(id) }
             guard let self, response == .OK, let url = save.url else { return }
             try? FileManager.default.copyItem(at: self.fileURL, to: url)
-            Library.clearInUse(self.record.id)
             Task { @MainActor in self.fadeOut() }
         }
     }

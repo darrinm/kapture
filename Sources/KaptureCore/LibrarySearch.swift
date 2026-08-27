@@ -168,6 +168,10 @@ extension Library {
                         WHERE id = ? AND relPath = ?
                         """, arguments: [newRel, Library.fastID(of: target), "named:" + engine,
                                          summary, id, record.relPath])
+                    // CAS missed: something moved the row while the file op ran. Throw so the
+                    // journal entry survives for recovery rather than leaving the row pointing
+                    // at a path the file has already left.
+                    guard d.changesCount > 0 else { throw CocoaError(.fileWriteFileExists) }
                     try Library.indexText(d, id: id, name: target.lastPathComponent,
                                           summary: summary, tags: tags.joined(separator: " "))
                 })

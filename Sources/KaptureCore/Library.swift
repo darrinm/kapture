@@ -56,7 +56,47 @@ public final class Library: @unchecked Sendable {
     }
 
     public static func timestampName(_ date: Date = Date()) -> String {
-        "capture \(timestampFormatter.string(from: date))"
+        templatedName(kind: "capture", at: date)
+    }
+
+    /// Date parts a filename template can name; anything else after `%` stays literal.
+    private static let templateTokens: [Character: String] = [
+        "Y": "yyyy", "m": "MM", "d": "dd", "H": "HH", "M": "mm", "S": "ss",
+    ]
+
+    /// Expand `Settings.filenameTemplate` for one capture: `%Y %m %d %H %M %S` are the capture's
+    /// date parts, `%n` is the kind word ("capture"/"recording"), `%%` is a literal percent. The
+    /// result is the base name only — `uniqueURL` still de-duplicates and adds the extension.
+    public static func templatedName(kind: String, at date: Date = Date(),
+                                     template: String? = nil) -> String {
+        let chars = Array(template ?? Settings.shared.filenameTemplate)
+        // a local formatter: this runs on the capture's background task, and DateFormatter's
+        // dateFormat can't be swapped on a shared instance from more than one thread
+        let f = DateFormatter()
+        var out = ""
+        var i = 0
+        while i < chars.count {
+            if chars[i] == "%", i + 1 < chars.count {
+                let token = chars[i + 1]
+                if token == "n" { out += kind; i += 2; continue }
+                if token == "%" { out += "%"; i += 2; continue }
+                if let format = templateTokens[token] {
+                    f.dateFormat = format
+                    out += f.string(from: date)
+                    i += 2
+                    continue
+                }
+            }
+            out.append(chars[i])
+            i += 1
+        }
+        // the template is free-form user text: a "/" would fork a directory and ":" reads as a
+        // path separator in Finder, so neither can reach a file name
+        out = out.replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: ":", with: ".")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !out.isEmpty else { return "\(kind) \(timestampFormatter.string(from: date))" }
+        return out
     }
 
     /// First non-colliding "base.ext" in `dir`, then "base-2.ext", "base-3.ext", …
@@ -111,7 +151,7 @@ public final class Library: @unchecked Sendable {
                            kind: CaptureKind = .recording) throws -> (CaptureRecord, URL) {
         let now = Date()
         let dir = try shardDir(for: now)
-        let url = Library.uniqueURL(in: dir, base: "recording \(Library.timestampFormatter.string(from: now))",
+        let url = Library.uniqueURL(in: dir, base: Library.templatedName(kind: "recording", at: now),
                                     ext: ext)
         let id = ULID.generate(now: now)
         let relPath = rel(url)

@@ -78,8 +78,9 @@ public enum AnthropicNamer {
             .replacingOccurrences(of: "```json", with: "")
             .replacingOccurrences(of: "```", with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        // start < end matters: a reply whose only "}" precedes its "{" would trap on the slice
         guard let start = cleaned.firstIndex(of: "{"), let end = cleaned.lastIndex(of: "}"),
-              let data = String(cleaned[start...end]).data(using: .utf8),
+              start < end, let data = String(cleaned[start...end]).data(using: .utf8),
               let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let rawName = obj["filename"] as? String
         else { throw Failure(description: "no JSON object in reply") }

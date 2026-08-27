@@ -7,6 +7,9 @@ import KaptureDesign
 enum Toast {
     private static var panel: NSPanel?
     private static var dismiss: Task<Void, Never>?
+    /// Bumped per show. The panel is shared, so a fade started for an earlier message must not
+    /// order out the one that replaced it partway through the animation.
+    private static var generation = 0
 
     static func show(_ message: String) {
         let label = NSTextField(labelWithString: message)
@@ -41,16 +44,22 @@ enum Toast {
             label.centerYAnchor.constraint(equalTo: container.centerYAnchor),
             label.widthAnchor.constraint(lessThanOrEqualToConstant: width - 24),
         ])
+        generation += 1
+        let gen = generation
         p.contentView = container
         p.setFrame(frame, display: true)
-        p.alphaValue = 1
+        // through the animator with zero duration, so it also cancels a fade already in flight
+        Tokens.animate(0, { p.animator().alphaValue = 1 })
         p.orderFrontRegardless()
 
         dismiss?.cancel()
         dismiss = Task { @MainActor in
             try? await Task.sleep(for: .seconds(2))
-            guard !Task.isCancelled else { return }
-            Tokens.animate(0.25, { p.animator().alphaValue = 0 }) { p.orderOut(nil) }
+            guard !Task.isCancelled, gen == generation else { return }
+            Tokens.animate(0.25, { p.animator().alphaValue = 0 }) {
+                guard gen == generation else { return }   // a newer message took the panel over
+                p.orderOut(nil)
+            }
         }
     }
 }

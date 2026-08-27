@@ -114,6 +114,30 @@ final class LibraryTests: XCTestCase {
         XCTAssertEqual(lib.search("!!!").count, 1)
     }
 
+    func testFilenameTemplateExpands() {
+        let date = Date(timeIntervalSince1970: 0)
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = .current
+        let parts = cal.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
+        let expectedDay = String(format: "%04d-%02d-%02d", parts.year!, parts.month!, parts.day!)
+
+        // the default template reproduces the built-in name
+        XCTAssertEqual(Library.templatedName(kind: "capture", at: date,
+                                             template: "%n %Y-%m-%d at %H.%M.%S"),
+                       "capture \(expectedDay) at "
+                       + String(format: "%02d.%02d.%02d", parts.hour!, parts.minute!, parts.second!))
+        XCTAssertEqual(Library.templatedName(kind: "recording", at: date, template: "%n-%Y"),
+                       "recording-\(parts.year!)")
+        // unknown tokens and %% stay literal
+        XCTAssertEqual(Library.templatedName(kind: "capture", at: date, template: "100%% %q shot"),
+                       "100% %q shot")
+        // a path separator in the template can't fork a directory
+        XCTAssertEqual(Library.templatedName(kind: "capture", at: date, template: "a/b:c"), "a-b.c")
+        // an empty expansion falls back rather than producing a nameless file
+        XCTAssertTrue(Library.templatedName(kind: "capture", at: date, template: "   ")
+            .hasPrefix("capture "))
+    }
+
     func testDateAndAppFilters() throws {
         let (lib, dir) = try makeTempLibrary()
         defer { try? FileManager.default.removeItem(at: dir) }

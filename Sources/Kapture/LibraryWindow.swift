@@ -14,10 +14,11 @@ final class LibraryWindowController: NSObject, NSWindowDelegate {
     var library: Library?
     private var window: NSWindow?
     private var grid: LibraryGridView?
+    private var content: LibraryContentView?
 
     func show() {
         if let window {
-            reload()
+            content?.refresh()
             window.makeKeyAndOrderFront(nil)
             ActivationPolicy.acquire()
             return
@@ -36,6 +37,7 @@ final class LibraryWindowController: NSObject, NSWindowDelegate {
         w.minSize = NSSize(width: 620, height: 420)
         window = w
         grid = content.grid
+        self.content = content
         ActivationPolicy.acquire()
         w.makeKeyAndOrderFront(nil)
         content.focusSearch()
@@ -88,12 +90,14 @@ final class LibraryContentView: NSView, NSSearchFieldDelegate {
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = false
         scroll.documentView = grid
-        grid.onCountChanged = { [weak self] count, query in
+        grid.onCountChanged = { [weak self] count, query, filtered in
             self?.countLabel.stringValue = count == 1 ? "1 capture" : "\(count) captures"
             self?.emptyLabel.isHidden = count > 0
-            self?.emptyLabel.stringValue = query.isEmpty
-                ? "Nothing here yet — press ⌘⇧4 to take a capture."
-                : "No captures match “\(query)”."
+            // "nothing here yet" is only true with nothing narrowing the view — a full library
+            // hidden behind an app or date filter needs a different answer
+            self?.emptyLabel.stringValue = !query.isEmpty ? "No captures match “\(query)”."
+                : filtered ? "No captures match these filters."
+                : "Nothing here yet — press ⌘⇧4 to take a capture."
         }
 
         appFilter.target = self
@@ -138,8 +142,17 @@ final class LibraryContentView: NSView, NSSearchFieldDelegate {
 
     func focusSearch() { window?.makeFirstResponder(searchField) }
 
-    /// Source-app menu, built from what the library actually holds.
+    /// Re-read the library: the grid's contents and the source-app menu, which otherwise keeps
+    /// the app list from whenever the window was first opened.
+    func refresh() {
+        reloadAppFilter()
+        grid.reload()
+    }
+
+    /// Source-app menu, built from what the library actually holds. The current selection is
+    /// preserved across a rebuild so a refresh can't silently drop an active filter.
     private func reloadAppFilter() {
+        let selected = appFilter.selectedItem?.representedObject as? String
         let apps = library.sourceApps()
         appFilter.removeAllItems()
         appFilter.addItem(withTitle: "Any app")
@@ -148,6 +161,13 @@ final class LibraryContentView: NSView, NSSearchFieldDelegate {
             let item = NSMenuItem(title: short.capitalized, action: nil, keyEquivalent: "")
             item.representedObject = app
             appFilter.menu?.addItem(item)
+        }
+        if let selected, let item = appFilter.menu?.items.first(where: {
+            $0.representedObject as? String == selected
+        }) {
+            appFilter.select(item)
+        } else if selected != nil {
+            grid.app = nil   // the filtered app is gone from the library; fall back to "Any app"
         }
     }
 
@@ -184,7 +204,7 @@ final class LibraryGridView: NSView {
     var scope: Library.SearchScope = .all
     var app: String?
     var range: Library.DateRange = .any
-    var onCountChanged: ((Int, String) -> Void)?
+    var onCountChanged: ((Int, String, Bool) -> Void)?
 
     private var items: [Item] = []
     private var hovered: Int?
@@ -207,7 +227,7 @@ final class LibraryGridView: NSView {
         let records = library.search(query, scope: scope, app: app, range: range)
         items = records.map { Item(record: $0) }
         hovered = nil
-        onCountChanged?(items.count, query)
+        onCountChanged?(items.count, query, app != nil || range != .any)
         layoutItems()
         loadThumbnails()
     }

@@ -63,9 +63,26 @@ public actor IngestQueue {
         guard !running, library != nil else { return }
         running = true
         defer { running = false }
-        while let job = nextDueJob() {
-            await process(job)
+        while true {
+            while let job = nextDueJob() { await process(job) }
+            // Nothing due *yet*. Every enqueue is debounced and every retry is deferred, so
+            // exiting here would strand a lone capture until the next capture, keep gesture or
+            // app launch. Wait for the earliest pending job instead — capped so a job enqueued
+            // while we sleep still starts promptly — and stop only when the table is empty.
+            guard let wait = secondsUntilNextJob() else { return }
+            try? await Task.sleep(for: .seconds(min(max(wait, 0.5), 5)))
+            if Task.isCancelled { return }
         }
+    }
+
+    /// Seconds until the earliest pending job comes due; nil when no jobs remain.
+    private func secondsUntilNextJob() -> TimeInterval? {
+        guard let library else { return nil }
+        return (try? library.db.queue.read { d -> TimeInterval? in
+            guard let next = try Date.fetchOne(d, sql: "SELECT MIN(notBefore) FROM ingest_jobs")
+            else { return nil }
+            return max(0, next.timeIntervalSinceNow)
+        }) ?? nil
     }
 
     private struct Job { let captureId: String; let attempts: Int }
@@ -148,8 +165,22 @@ public actor IngestQueue {
                                              windowTitle: record.windowTitle, kind: record.kind)
             }
             if let naming {
-                _ = library.applyName(job.captureId, baseName: naming.filename, tags: naming.tags,
-                                      summary: naming.summary, engine: engine)
+                let applied = library.applyName(job.captureId, baseName: naming.filename,
+                                                tags: naming.tags, summary: naming.summary,
+                                                engine: engine)
+                // applyName refuses while a drag/save panel holds the path (it must not move a
+                // file out from under one). Leave the job in place so a later pass renames it —
+                // bounded, so a stuck in-use flag can't spin the queue forever.
+                if !applied, Library.isInUse(job.captureId), job.attempts < 5 {
+                    try? await library.db.queue.write { d in
+                        try d.execute(sql: """
+                            UPDATE ingest_jobs SET attempts = attempts + 1, notBefore = ?,
+                                                   lastError = 'in use'
+                            WHERE captureId = ?
+                            """, arguments: [Date().addingTimeInterval(30), job.captureId])
+                    }
+                    return
+                }
             }
         }
         clearJob(job.captureId)
