@@ -91,11 +91,19 @@ public struct Settings {
         set { d.set(newValue, forKey: "showKeysWhileRecording") }
     }
 
+    /// strftime-style tokens: %Y %m %d %H %M %S, plus %n for the capture kind.
+    public var filenameTemplate: String {
+        get { d.string(forKey: "filenameTemplate") ?? "%n %Y-%m-%d at %H.%M.%S" }
+        set { d.set(newValue, forKey: "filenameTemplate") }
+    }
+
     /// Name captures from their recognized text (on-device). Default OFF: the heuristic namer
     /// produces mediocre names from menu-bar chrome (verified against the real library), and a
     /// wrong filename is worse than a timestamp. The API engine is the quality tier.
     public var aiNamingEnabled: Bool {
-        get { d.object(forKey: "aiNamingEnabled") as? Bool ?? false }
+        // Default follows the engine that's available: with an Anthropic key the names are good
+        // enough to be worth having (verified), without one the heuristic isn't.
+        get { d.object(forKey: "aiNamingEnabled") as? Bool ?? (Keychain.anthropicKey?.isEmpty == false) }
         set { d.set(newValue, forKey: "aiNamingEnabled") }
     }
 

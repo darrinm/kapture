@@ -40,17 +40,29 @@ extension Library {
 
     /// Optional full-text match plus a scope filter, newest first. Ranking weights name over
     /// tags over summary over OCR.
-    public func search(_ query: String = "", scope: SearchScope = .all, limit: Int = 500) -> [CaptureRecord] {
+    public func sourceApps() -> [String] {
+        (try? db.queue.read { d in
+            try String.fetchAll(d, sql: """
+                SELECT DISTINCT sourceApp FROM captures
+                WHERE sourceApp IS NOT NULL AND status IN ('staged','kept') ORDER BY sourceApp
+                """)
+        }) ?? []
+    }
+
+    public func search(_ query: String = "", scope: SearchScope = .all, app: String? = nil,
+                       limit: Int = 500) -> [CaptureRecord] {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         let statusClause = scope == .trash ? "c.status = 'trashed'" : "c.status IN ('staged', 'kept')"
         var kindClause = ""
         if scope == .screenshots { kindClause = " AND c.kind IN ('screenshot', 'gif')" }
         if scope == .recordings { kindClause = " AND c.kind = 'recording'" }
+        var appClause = ""
+        if let app { appClause = " AND c.sourceApp = '\(app.replacingOccurrences(of: "'", with: "''"))'" }
 
         return (try? db.queue.read { d -> [CaptureRecord] in
             guard !trimmed.isEmpty else {
                 return try CaptureRecord.fetchAll(d, sql: """
-                    SELECT c.* FROM captures c WHERE \(statusClause)\(kindClause)
+                    SELECT c.* FROM captures c WHERE \(statusClause)\(kindClause)\(appClause)
                     ORDER BY c.createdAt DESC LIMIT ?
                     """, arguments: [limit])
             }
@@ -60,7 +72,7 @@ extension Library {
             let pattern = Library.ftsPattern(trimmed)
             guard !pattern.isEmpty else {
                 return try CaptureRecord.fetchAll(d, sql: """
-                    SELECT c.* FROM captures c WHERE \(statusClause)\(kindClause)
+                    SELECT c.* FROM captures c WHERE \(statusClause)\(kindClause)\(appClause)
                     ORDER BY c.createdAt DESC LIMIT ?
                     """, arguments: [limit])
             }
@@ -68,10 +80,29 @@ extension Library {
                 SELECT c.* FROM captures c
                 JOIN fts_source s ON s.captureId = c.id
                 JOIN captures_fts f ON f.rowid = s.rowid
-                WHERE captures_fts MATCH ? AND \(statusClause)\(kindClause)
+                WHERE captures_fts MATCH ? AND \(statusClause)\(kindClause)\(appClause)
                 ORDER BY bm25(captures_fts, 8.0, 2.0, 4.0, 1.0), c.createdAt DESC LIMIT ?
                 """, arguments: [pattern, limit])
         }) ?? []
+    }
+
+    /// Files the shell is actively using — a drag in flight, an open save panel, a running
+    /// upload. An AI rename must not move a file out from under one of those (the pasteboard
+    /// holds a concrete URL), so applyName refuses and the ingest job retries later.
+    private static let inUseLock = NSLock()
+    nonisolated(unsafe) private static var inUseIDs: Set<String> = []
+
+    public static func markInUse(_ id: String) {
+        inUseLock.lock(); defer { inUseLock.unlock() }
+        inUseIDs.insert(id)
+    }
+    public static func clearInUse(_ id: String) {
+        inUseLock.lock(); defer { inUseLock.unlock() }
+        inUseIDs.remove(id)
+    }
+    public static func isInUse(_ id: String) -> Bool {
+        inUseLock.lock(); defer { inUseLock.unlock() }
+        return inUseIDs.contains(id)
     }
 
     /// Rename a capture's file to an AI-suggested base name (extension preserved), journaled and
@@ -80,6 +111,7 @@ extension Library {
     @discardableResult
     public func applyName(_ id: String, baseName: String, tags: [String], summary: String,
                           engine: String) -> Bool {
+        guard !Library.isInUse(id) else { return false }   // drag/upload/save panel holds the path
         guard let record = try? db.queue.read({ try CaptureRecord.fetchOne($0, key: id) }),
               record.aiState == "ocr" || record.aiState == "none",   // never overwrite a named/manual row
               record.status != .trashed, record.status != .sweeping else { return false }

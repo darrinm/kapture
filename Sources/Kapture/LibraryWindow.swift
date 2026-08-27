@@ -54,6 +54,7 @@ final class LibraryContentView: NSView, NSSearchFieldDelegate {
     let grid: LibraryGridView
     private let searchField = NSSearchField()
     private let scopeControl: NSSegmentedControl
+    private let appFilter = NSPopUpButton(frame: .zero, pullsDown: false)
     private let emptyLabel = NSTextField(labelWithString: "")
 
     init(library: Library) {
@@ -92,7 +93,11 @@ final class LibraryContentView: NSView, NSSearchFieldDelegate {
                 : "No captures match “\(query)”."
         }
 
-        for v in [searchField, scopeControl, scroll, emptyLabel] {
+        appFilter.target = self
+        appFilter.action = #selector(appFilterChanged)
+        reloadAppFilter()
+
+        for v in [searchField, scopeControl, appFilter, scroll, emptyLabel] {
             addSubview(v)
             v.translatesAutoresizingMaskIntoConstraints = false
         }
@@ -102,7 +107,10 @@ final class LibraryContentView: NSView, NSSearchFieldDelegate {
             searchField.widthAnchor.constraint(greaterThanOrEqualToConstant: 240),
             scopeControl.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
             scopeControl.leadingAnchor.constraint(equalTo: searchField.trailingAnchor, constant: 12),
-            scopeControl.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -16),
+            appFilter.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
+            appFilter.leadingAnchor.constraint(equalTo: scopeControl.trailingAnchor, constant: 12),
+            appFilter.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -16),
+            appFilter.widthAnchor.constraint(lessThanOrEqualToConstant: 180),
             scroll.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 12),
             scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
@@ -115,6 +123,24 @@ final class LibraryContentView: NSView, NSSearchFieldDelegate {
     required init?(coder: NSCoder) { fatalError() }
 
     func focusSearch() { window?.makeFirstResponder(searchField) }
+
+    /// Source-app menu, built from what the library actually holds.
+    private func reloadAppFilter() {
+        let apps = library.sourceApps()
+        appFilter.removeAllItems()
+        appFilter.addItem(withTitle: "Any app")
+        for app in apps {
+            let short = app.split(separator: ".").last.map(String.init) ?? app
+            let item = NSMenuItem(title: short.capitalized, action: nil, keyEquivalent: "")
+            item.representedObject = app
+            appFilter.menu?.addItem(item)
+        }
+    }
+
+    @objc private func appFilterChanged() {
+        grid.app = appFilter.selectedItem?.representedObject as? String
+        grid.reload()
+    }
 
     @objc private func scopeChanged() {
         grid.scope = Library.SearchScope.allCases[max(0, scopeControl.selectedSegment)]
@@ -137,6 +163,7 @@ final class LibraryGridView: NSView {
     let library: Library
     var query = ""
     var scope: Library.SearchScope = .all
+    var app: String?
     var onCountChanged: ((Int, String) -> Void)?
 
     private var items: [Item] = []
@@ -157,7 +184,7 @@ final class LibraryGridView: NSView {
     override var acceptsFirstResponder: Bool { true }
 
     func reload() {
-        let records = library.search(query, scope: scope)
+        let records = library.search(query, scope: scope, app: app)
         items = records.map { Item(record: $0) }
         hovered = nil
         onCountChanged?(items.count, query)
@@ -369,7 +396,8 @@ final class LibraryGridView: NSView {
         ctx.clip(to: r)
         ctx.setFillColor(NSColor.black.withAlphaComponent(0.55).cgColor)
         ctx.fill(band)
-        let name = (item.record.relPath as NSString).lastPathComponent
+        var name = (item.record.relPath as NSString).lastPathComponent
+        if item.record.status == .staged { name += "  (on overlay)" }
         let attrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 11, weight: .medium),
             .foregroundColor: NSColor.white,

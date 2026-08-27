@@ -312,12 +312,14 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
 
     func saveAs() {
         markKept()
+        Library.markInUse(record.id)
         let save = NSSavePanel()
         save.nameFieldStringValue = fileURL.lastPathComponent
         NSApp.activate(ignoringOtherApps: true)
         save.begin { [weak self] response in
             guard let self, response == .OK, let url = save.url else { return }
             try? FileManager.default.copyItem(at: self.fileURL, to: url)
+            Library.clearInUse(self.record.id)
             Task { @MainActor in self.fadeOut() }
         }
     }
@@ -550,6 +552,8 @@ final class OverlayView: NSView, NSDraggingSource {
     override func mouseExited(with event: NSEvent) { hovering = false }
 
     override func mouseDragged(with event: NSEvent) {
+        // the pasteboard carries a concrete path — an AI rename mid-drag would break the drop
+        Library.markInUse(panel.record.id)
         let item = NSDraggingItem(pasteboardWriter: panel.fileURL as NSURL)
         item.setDraggingFrame(bounds, contents: NSImage(cgImage: image, size: bounds.size))
         beginDraggingSession(with: [item], event: event, source: self)
@@ -559,6 +563,7 @@ final class OverlayView: NSView, NSDraggingSource {
         .copy
     }
     func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
+        Library.clearInUse(panel.record.id)
         if operation != [] { panel.keepAndClose() }   // close-after-drag default
     }
 

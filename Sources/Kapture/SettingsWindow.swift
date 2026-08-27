@@ -72,6 +72,7 @@ struct SettingsView: View {
     @AppStorage("showClicksWhileRecording") private var showClicks = true
     @AppStorage("showKeysWhileRecording") private var showKeys = false
     @AppStorage("aiNamingEnabled") private var aiNaming = false
+    @AppStorage("filenameTemplate") private var filenameTemplate = "%n %Y-%m-%d at %H.%M.%S"
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @State private var exportPath = Settings.shared.exportLocation.path
     @State private var anthropicKey = ""
@@ -96,6 +97,14 @@ struct SettingsView: View {
                     do { v ? try SMAppService.mainApp.register() : try SMAppService.mainApp.unregister() }
                     catch { launchAtLogin = SMAppService.mainApp.status == .enabled }
                 }
+            LabeledContent("Filename") {
+                VStack(alignment: .leading, spacing: 2) {
+                    TextField("", text: $filenameTemplate)
+                    Text("%Y %m %d · %H %M %S · %n (capture/recording)")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+            }
             LabeledContent("Export location") {
                 HStack {
                     Text((exportPath as NSString).abbreviatingWithTildeInPath)
