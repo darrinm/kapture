@@ -24,8 +24,9 @@ a flick toward the screen edge). Discarding is one gesture, not a dialog, becaus
 case is three shots of the same thing and only the best one is worth keeping. Anything
 discarded sits in a trash for seven days.
 
-**Annotate** — arrows, boxes, ellipses, lines, freehand, text, step counters, highlighter, and
-blur or pixelate for the parts you shouldn't have captured. Crop with the usual aspect ratios.
+**Annotate** — arrows, boxes, ellipses, lines, freehand, text, step counters and a highlighter.
+Crop with the usual aspect ratios. No redaction yet: if a capture has something in it you don't
+want to keep, crop it out rather than covering it.
 Every layer stays editable and every edit is undoable; the untouched original is always kept
 aside, so a crop is never permanent.
 
