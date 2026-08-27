@@ -100,6 +100,8 @@ final class EditorViewController: NSViewController {
     private var sizeSlider: NSSlider!
     private var fillCheck: NSButton!
     private var ratioPopup: NSPopUpButton!
+    private var undoButton: NSButton!
+    private var redoButton: NSButton!
     /// menu order matches: nil = Free, .infinity sentinel = image's own aspect ("Original")
     private let ratioChoices: [(String, CGFloat?)] = [
         ("Free", nil), ("Original", .infinity), ("1:1", 1), ("4:3", 4.0 / 3),
@@ -215,6 +217,15 @@ final class EditorViewController: NSViewController {
         options.addArrangedSubview(NSView())
         updateOptionsBar()
 
+        // Undo/redo live at the right, next to Copy and Done: always present, never shifted by
+        // the per-tool controls that come and go on the left.
+        undoButton = historyButton("arrow.uturn.backward", "Undo (⌘Z)", #selector(undoTapped))
+        redoButton = historyButton("arrow.uturn.forward", "Redo (⇧⌘Z)", #selector(redoTapped))
+        options.addArrangedSubview(undoButton)
+        options.addArrangedSubview(redoButton)
+        canvas.onHistoryChanged = { [weak self] in self?.updateHistoryButtons() }
+        updateHistoryButtons()
+
         let done = NSButton(title: "Done", target: self, action: #selector(doneTapped))
         done.bezelStyle = .rounded
         done.keyEquivalent = "\r"
@@ -243,6 +254,32 @@ final class EditorViewController: NSViewController {
             options.heightAnchor.constraint(equalToConstant: 28),
         ])
         view = root
+    }
+
+    private func historyButton(_ symbol: String, _ tip: String, _ action: Selector) -> NSButton {
+        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: tip)!
+            .withSymbolConfiguration(.init(pointSize: 13, weight: .medium))!
+        let b = NSButton(image: image, target: self, action: action)
+        b.bezelStyle = .rounded
+        b.toolTip = tip
+        return b
+    }
+
+    /// Dimmed when there is nothing to undo or redo — the button is the only place the editor
+    /// says whether a mistake is still recoverable.
+    private func updateHistoryButtons() {
+        undoButton?.isEnabled = canvas.canUndo
+        redoButton?.isEnabled = canvas.canRedo
+    }
+
+    @objc private func undoTapped() {
+        canvas.undo()
+        updateOptionsBar()
+    }
+
+    @objc private func redoTapped() {
+        canvas.redo()
+        updateOptionsBar()
     }
 
     @objc private func toolTapped(_ sender: NSButton) {
@@ -400,6 +437,11 @@ final class CanvasView: NSView, NSTextFieldDelegate {
     private var dragOrigin: CGPoint?
     private var preGesture: [Annotation]?   // gesture-start snapshot; pushed on first real mutation
     private var undoStack: [[Annotation]] = []
+    private var redoStack: [[Annotation]] = []
+    /// Fired whenever the history changes, so the buttons can reflect what is actually available.
+    var onHistoryChanged: (() -> Void)?
+    var canUndo: Bool { !undoStack.isEmpty }
+    var canRedo: Bool { !redoStack.isEmpty }
     private var textField: NSTextField?
     private var pendingTextPos: CGPoint?
     private var chipApplyRect: CGRect?    // view-space crop chips, refreshed each draw
@@ -723,7 +765,7 @@ final class CanvasView: NSView, NSTextFieldDelegate {
     }
 
     /// endpoints/corners of the selected shape a drag can grab (image-space)
-    private func handlePositions(of layer: Annotation) -> [CGPoint] {
+    func handlePositions(of layer: Annotation) -> [CGPoint] {
         switch layer.tool {
         case .crop:
             // 8 handles: corners then edge midpoints — order matched by resizeCrop(_:handle:to:)
@@ -733,7 +775,9 @@ final class CanvasView: NSView, NSTextFieldDelegate {
                     CGPoint(x: r.minX, y: r.maxY), CGPoint(x: r.maxX, y: r.maxY),
                     CGPoint(x: r.midX, y: r.minY), CGPoint(x: r.midX, y: r.maxY),
                     CGPoint(x: r.minX, y: r.midY), CGPoint(x: r.maxX, y: r.midY)]
-        case .arrow, .line, .rect, .ellipse, .highlight:
+        case .arrow, .line, .rect, .ellipse, .highlight, .blur, .pixelate:
+            // a redaction is a rect like the others: same two corner handles, so the region it
+            // covers can be adjusted after the fact instead of deleted and redrawn
             return layer.points.count >= 2 ? [layer.points[0], layer.points[1]] : []
         default:
             return []
@@ -873,8 +917,8 @@ final class CanvasView: NSView, NSTextFieldDelegate {
             needsDisplay = true
             onSelectionChanged?()
         } else if event.modifierFlags.contains(.command),
-                  event.charactersIgnoringModifiers == "z" {
-            undo()
+                  event.charactersIgnoringModifiers?.lowercased() == "z" {
+            event.modifierFlags.contains(.shift) ? redo() : undo()
         } else {
             super.keyDown(with: event)
         }
@@ -883,6 +927,9 @@ final class CanvasView: NSView, NSTextFieldDelegate {
     private func pushUndo() {
         undoStack.append(layers)
         if undoStack.count > 100 { undoStack.removeFirst() }
+        // a new edit is a new branch: whatever was undone is no longer reachable
+        redoStack.removeAll()
+        onHistoryChanged?()
     }
     /// Push the gesture-start snapshot the first time a drag actually mutates the layer.
     private func commitPreGesture() {
@@ -890,13 +937,27 @@ final class CanvasView: NSView, NSTextFieldDelegate {
         preGesture = nil
         undoStack.append(pre)
         if undoStack.count > 100 { undoStack.removeFirst() }
+        redoStack.removeAll()
+        onHistoryChanged?()
     }
-    private func undo() {
+    func undo() {
         guard let prev = undoStack.popLast() else { return }
+        redoStack.append(layers)
         layers = prev
         selected = nil
         needsDisplay = true
         onSelectionChanged?()
+        onHistoryChanged?()
+    }
+
+    func redo() {
+        guard let next = redoStack.popLast() else { return }
+        undoStack.append(layers)
+        layers = next
+        selected = nil
+        needsDisplay = true
+        onSelectionChanged?()
+        onHistoryChanged?()
     }
 
     // MARK: text tool
