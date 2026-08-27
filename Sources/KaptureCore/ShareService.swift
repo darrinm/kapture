@@ -115,14 +115,30 @@ public enum ShareService {
         let json = try decode(data, response)
         let base = Settings.shared.shareEndpoint
         let items = (json["items"] as? [[String: Any]]) ?? []
-        return items.compactMap { item in
+        return items.compactMap { item -> ShareLink? in
             guard let id = item["id"] as? String else { return nil }
-            let uploaded = (item["uploadedAt"] as? String).flatMap(ISO8601DateFormatter().date(from:))
+            let uploaded = (item["uploadedAt"] as? String).flatMap(parseTimestamp)
             return ShareLink(id: id, url: base.appendingPathComponent(id),
                              filename: item["filename"] as? String ?? "",
                              bytes: item["bytes"] as? Int ?? 0,
                              uploadedAt: uploaded ?? Date())
         }
+        .sorted { $0.uploadedAt > $1.uploadedAt }
+    }
+
+    /// The Worker stamps uploads with JavaScript's `toISOString()`, which always carries
+    /// milliseconds — and a default `ISO8601DateFormatter` refuses those. Parsed with fractional
+    /// seconds first, then without, so every link keeps its real date instead of falling back to
+    /// "now" and sorting the Shared filter at random.
+    static func parseTimestamp(_ raw: String) -> Date? {
+        let candidates: [ISO8601DateFormatter.Options] = [[.withInternetDateTime, .withFractionalSeconds],
+                                                          [.withInternetDateTime]]
+        for options in candidates {
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = options
+            if let date = formatter.date(from: raw) { return date }
+        }
+        return nil
     }
 
     /// Cheap round trip so Settings can say "connected" before the user relies on it mid-share.

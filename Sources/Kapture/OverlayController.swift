@@ -381,6 +381,13 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
         }
     }
 
+    /// End a gesture that never moved the card — a swipe that turned out to be vertical, or one
+    /// that was abandoned before it committed to an axis. Nothing to animate back, but the
+    /// window must still shrink around the card: left grown, the next stack layout resizes it to
+    /// the slot while the card is still parked at `swipePad`, which puts the card outside the
+    /// window and it vanishes.
+    func cancelSwipe() { settleAfterSwipe() }
+
     /// Put the window back around the card once a gesture is over.
     private func settleAfterSwipe() {
         guard swiping else { return }
@@ -683,9 +690,12 @@ final class OverlayView: NSView, NSDraggingSource {
             // the slot, not the current frame: a previous gesture may have left the card adrift
             swipeStart = panel.restingFrame == .zero ? panel.frame : panel.restingFrame
             panel.beginSwipe()
-            armSwipeWatchdog()
+            // no watchdog yet: it exists for a card that has moved out from under the pointer,
+            // and arming it here would end a gesture that has simply not moved yet — a slow
+            // downward swipe would be resolved 250ms in, before it had travelled far enough to
+            // mean anything.
         case .changed:
-            guard let start = swipeStart else { return }
+            guard swipeStart != nil else { return }
             swipeX += event.scrollingDeltaX
             swipeY += event.scrollingDeltaY
             // lock the axis once the gesture commits to one, so a slightly diagonal swipe
@@ -698,7 +708,6 @@ final class OverlayView: NSView, NSDraggingSource {
             let elapsed = max(event.timestamp - swipeTime, 1.0 / 240)
             swipeTime = event.timestamp
             swipeVelocity = swipeVelocity * 0.6 + (event.scrollingDeltaX * towardEdgeSign / elapsed) * 0.4
-            _ = start
             panel.swipe(to: swipeOffset())
         case .ended, .cancelled:
             finishSwipe(cancelled: event.phase == .cancelled)
@@ -710,25 +719,28 @@ final class OverlayView: NSView, NSDraggingSource {
     private func finishSwipe(cancelled: Bool) {
         swipeWatchdog?.cancel()
         swipeWatchdog = nil
-        let start = swipeStart
+        let inProgress = swipeStart != nil
         let axis = swipeAxis
         swipeStart = nil
         swipeAxis = .undecided
-        guard let start else { return }
+        guard inProgress else { return }
         switch axis {
         case .vertical:
+            // the card never moved, but beginSwipe grew the window around it and only settling
+            // puts it back
+            panel.cancelSwipe()
             if swipeY < -40 { OverlayController.shared.hideAll() }
         case .horizontal:
             let dismiss = SwipePhysics.shouldDismiss(progress: swipeX * towardEdgeSign,
                                                      velocity: swipeVelocity,
                                                      width: bounds.width)
             if !cancelled, dismiss {
-                flyOff(from: start)
+                flyOff()
             } else {
-                springBack(to: start)
+                springBack()
             }
         case .undecided:
-            springBack(to: start)
+            springBack()
         }
     }
 
@@ -750,17 +762,17 @@ final class OverlayView: NSView, NSDraggingSource {
         SwipePhysics.offset(progress: swipeX * towardEdgeSign, width: bounds.width) * edgeScreenSign
     }
 
-    private func flyOff(from start: NSRect) {
+    private func flyOff() {
         // commit first: if the record is already gone there is nothing to fly away, and the card
         // should settle back rather than pretend it discarded something
-        guard panel.commitDiscard() else { springBack(to: start); return }
+        guard panel.commitDiscard() else { springBack(); return }
         let remaining = max(bounds.width + 60 - abs(swipeOffset()), 40)
         let duration = SwipePhysics.flyOffDuration(remaining: remaining, velocity: swipeVelocity)
         panel.flyOffAndClose(direction: edgeScreenSign, over: duration)
     }
 
-    private func springBack(to start: NSRect) {
-        _ = start
+    /// The card animates back to its slot, which also shrinks the window around it again.
+    private func springBack() {
         panel.endSwipe(springBackOver: 0.32)
     }
 

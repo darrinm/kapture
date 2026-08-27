@@ -143,7 +143,10 @@ async function checkQuota(env: Env, owner: string, bytes: number): Promise<strin
   const day = new Date().toISOString().slice(0, 10);
   const key = `quota:${owner}:${day}`;
   const current = (await env.QUOTAS.get(key, "json")) as { bytes: number; objects: number } | null;
-  const used = current ?? { bytes: 0, objects: 0 };
+  // a counter that ever went non-finite would otherwise compare false against every limit and
+  // silently disable the quota for the rest of the day
+  const finite = (n: unknown) => (typeof n === "number" && Number.isFinite(n) && n > 0 ? n : 0);
+  const used = { bytes: finite(current?.bytes), objects: finite(current?.objects) };
   if (used.bytes + bytes > DAILY_BYTES_PER_OWNER) return "daily byte quota reached";
   if (used.objects + 1 > DAILY_OBJECTS_PER_OWNER) return "daily object quota reached";
   await env.QUOTAS.put(
@@ -176,18 +179,21 @@ export default {
       const ext = ALLOWED_TYPES.get(contentType);
       if (!ext) return json({ error: `unsupported content-type: ${contentType}` }, 415);
 
-      const declared = Number(request.headers.get("content-length") ?? "0");
-      if (declared > MAX_SINGLE_UPLOAD) {
+      // content-length is a hint, not a fact: it lets an oversized upload be refused before the
+      // body is read, but it is attacker-controlled (absent, zero or a lie), so the quota is
+      // charged against the bytes that actually arrived.
+      const declared = Number(request.headers.get("content-length"));
+      if (Number.isFinite(declared) && declared > MAX_SINGLE_UPLOAD) {
         return json({ error: "too large for a single upload", maxBytes: MAX_SINGLE_UPLOAD }, 413);
       }
-      const quotaError = await checkQuota(env, owner, declared);
-      if (quotaError) return json({ error: quotaError }, 429);
 
       const filename = sanitizeFilename(request.headers.get("x-filename"), ext);
       const body = await request.arrayBuffer();
       if (body.byteLength > MAX_SINGLE_UPLOAD) {
         return json({ error: "too large for a single upload" }, 413);
       }
+      const quotaError = await checkQuota(env, owner, body.byteLength);
+      if (quotaError) return json({ error: quotaError }, 429);
 
       // create-only put; regenerate on the (vanishingly unlikely) collision
       let id = newID();
@@ -208,20 +214,32 @@ export default {
       const owner = await authorize(request, env);
       if (!owner) return json({ error: "unauthorized" }, 401);
       // customMetadata is omitted from list results unless asked for — without this the
-      // owner filter below sees undefined for every object and nobody lists anything
-      const listed = await env.BUCKET.list({
-        prefix: "shares/",
-        limit: 1000,
-        include: ["customMetadata"],
-      });
-      const mine = listed.objects
-        .filter((o) => o.customMetadata?.owner === owner)
-        .map((o) => ({
-          id: o.key.slice("shares/".length),
-          filename: o.customMetadata?.filename ?? "",
-          bytes: o.size,
-          uploadedAt: o.customMetadata?.uploadedAt ?? o.uploaded.toISOString(),
-        }));
+      // owner filter below sees undefined for every object and nobody lists anything.
+      // R2 pages at 1000 keys and the filter runs client-side, so a single page would start
+      // hiding an owner's shares as soon as the bucket held more objects than one page.
+      const mine: { id: string; filename: string; bytes: number; uploadedAt: string }[] = [];
+      let cursor: string | undefined;
+      for (let page = 0; page < 20; page++) {
+        const listed = await env.BUCKET.list({
+          prefix: "shares/",
+          limit: 1000,
+          cursor,
+          include: ["customMetadata"],
+        });
+        for (const o of listed.objects) {
+          if (o.customMetadata?.owner !== owner) continue;
+          mine.push({
+            id: o.key.slice("shares/".length),
+            filename: o.customMetadata?.filename ?? "",
+            bytes: o.size,
+            uploadedAt: o.customMetadata?.uploadedAt ?? o.uploaded.toISOString(),
+          });
+        }
+        if (!listed.truncated) break;
+        cursor = listed.cursor;
+      }
+      // newest first, which is what the app's Shared filter shows
+      mine.sort((a, b) => (a.uploadedAt < b.uploadedAt ? 1 : a.uploadedAt > b.uploadedAt ? -1 : 0));
       return json({ items: mine });
     }
 

@@ -34,6 +34,40 @@ final class EffectsTests: XCTestCase {
         return (Int(data[p]), Int(data[p + 1]), Int(data[p + 2]))
     }
 
+    private func solid(_ color: NSColor) -> CGImage {
+        let size = 200
+        let ctx = CGContext(data: nil, width: size, height: size, bitsPerComponent: 8, bytesPerRow: 0,
+                            space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        ctx.setFillColor(color.cgColor)
+        ctx.fill(CGRect(x: 0, y: 0, width: size, height: size))
+        return ctx.makeImage()!
+    }
+
+    /// Two captures of the same display are the same size. A cache keyed only by dimensions
+    /// served the first capture's patch inside the second capture's redaction — the one place a
+    /// stale cache leaks image content, and precisely what redaction exists to prevent.
+    func testAPatchIsNeverReusedAcrossCaptures() throws {
+        let rect = CGRect(x: 20, y: 20, width: 60, height: 60)
+        let fromRed = try XCTUnwrap(AnnotationEffects.render(tool: .pixelate, rect: rect,
+                                                             intensity: 16, base: solid(.systemRed)))
+        let fromBlue = try XCTUnwrap(AnnotationEffects.render(tool: .pixelate, rect: rect,
+                                                              intensity: 16, base: solid(.systemBlue)))
+        func centre(_ image: CGImage) -> (r: Int, g: Int, b: Int) {
+            let ctx = CGContext(data: nil, width: image.width, height: image.height,
+                                bitsPerComponent: 8, bytesPerRow: image.width * 4,
+                                space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+            ctx.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+            let data = ctx.data!.bindMemory(to: UInt8.self, capacity: ctx.bytesPerRow * image.height)
+            let p = (image.height / 2) * ctx.bytesPerRow + (image.width / 2) * 4
+            return (Int(data[p]), Int(data[p + 1]), Int(data[p + 2]))
+        }
+        let red = centre(fromRed), blue = centre(fromBlue)
+        XCTAssertGreaterThan(red.r, red.b, "the red capture's patch is not red")
+        XCTAssertGreaterThan(blue.b, blue.r, "the second capture got the first capture's pixels")
+    }
+
     func testPixelateStaysInsideItsRectAndKeepsTheRegionsColour() throws {
         let base = makeBase()
         // a block in the red half only

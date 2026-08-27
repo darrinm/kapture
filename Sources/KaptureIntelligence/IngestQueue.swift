@@ -103,6 +103,10 @@ public actor IngestQueue {
     private func waitForJob(seconds: TimeInterval) async {
         let timer = Task { [weak self] in
             try? await Task.sleep(for: .seconds(seconds))
+            // A cancelled sleep throws, and `try?` swallows it — without this check the woken
+            // timer would go on to fire anyway and resume the *next* wait's continuation the
+            // moment it was installed, which spins the drain loop instead of letting it sleep.
+            guard !Task.isCancelled else { return }
             await self?.timerFired()
         }
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in

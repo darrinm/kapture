@@ -118,17 +118,23 @@ public struct Annotation: Codable, Identifiable {
             ctx.setFillColor(c.withAlphaComponent(0.45).cgColor)
             ctx.fill(rect)
         case .blur, .pixelate:
-            guard let base, rect.width >= 1, rect.height >= 1,
-                  let patch = AnnotationEffects.render(tool: tool, rect: rect,
+            // The patch can only reproduce pixels the base actually has, so a redaction dragged
+            // past the edge of the capture is clipped to the part that exists — drawing the
+            // clipped patch across the whole rect would stretch it and slide the mosaic off
+            // whatever it was covering.
+            guard let base else { break }
+            let clipped = rect.intersection(CGRect(x: 0, y: 0, width: base.width, height: base.height))
+            guard clipped.width >= 1, clipped.height >= 1,
+                  let patch = AnnotationEffects.render(tool: tool, rect: clipped,
                                                        intensity: intensity ?? tool.defaultIntensity,
                                                        base: base)
             else { break }
             // this context is image space with y down; undo the flip within the rect so the
             // patch lands upright instead of mirrored
             ctx.saveGState()
-            ctx.translateBy(x: rect.minX, y: rect.maxY)
+            ctx.translateBy(x: clipped.minX, y: clipped.maxY)
             ctx.scaleBy(x: 1, y: -1)
-            ctx.draw(patch, in: CGRect(origin: .zero, size: rect.size))
+            ctx.draw(patch, in: CGRect(origin: .zero, size: clipped.size))
             ctx.restoreGState()
         case .text:
             guard let text, let pos = points.first else { break }
@@ -252,11 +258,23 @@ public enum AnnotationRenderer {
 public enum AnnotationEffects {
     private static let context = CIContext(options: [.cacheIntermediates: false])
     private static let cache = NSCache<NSString, CGImage>()
+    /// The image every cached patch was sampled from, held strongly so its identity can't be
+    /// reused by a later allocation. Dimensions alone would not do: two captures of the same
+    /// display are the same size, and a hit across them would show one capture's pixels inside
+    /// the other's redaction — the one place in this app where a stale cache leaks content.
+    private static var cachedBase: CGImage?
 
-    public static func clearCache() { cache.removeAllObjects() }
+    public static func clearCache() {
+        cache.removeAllObjects()
+        cachedBase = nil
+    }
 
     static func render(tool: Tool, rect: CGRect, intensity: CGFloat, base: CGImage) -> CGImage? {
-        let key = "\(tool.rawValue)|\(Int(rect.minX)),\(Int(rect.minY)),\(Int(rect.width)),\(Int(rect.height))|\(Int(intensity))|\(base.width)x\(base.height)" as NSString
+        if cachedBase !== base {
+            cache.removeAllObjects()
+            cachedBase = base
+        }
+        let key = "\(tool.rawValue)|\(Int(rect.minX)),\(Int(rect.minY)),\(Int(rect.width)),\(Int(rect.height))|\(Int(intensity))" as NSString
         if let hit = cache.object(forKey: key) { return hit }
 
         // annotation geometry is top-left origin; CIImage is bottom-left

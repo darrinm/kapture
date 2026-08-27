@@ -56,6 +56,44 @@ describe("uploads", () => {
   });
 });
 
+describe("quotas", () => {
+  /// content-length is attacker-controlled. Charging it instead of the bytes that arrive let a
+  /// valid token upload the 95MB maximum per request while consuming none of the daily budget.
+  it("charges the quota for the bytes that arrive, not the header", async () => {
+    const payload = new Uint8Array(40_000);
+    payload.set([0x89, 0x50, 0x4e, 0x47]);
+    const request = new Request("https://kapture.sh/api/upload", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${TOKEN}`,
+        "content-type": "image/png",
+        "content-length": "0",   // the lie
+      },
+      body: payload as BodyInit,
+    });
+    const ctx = createExecutionContext();
+    expect((await worker.fetch(request, env, ctx)).status).toBe(200);
+    await waitOnExecutionContext(ctx);
+
+    const day = new Date().toISOString().slice(0, 10);
+    const quota = (await env.QUOTAS.get(`quota:darrin:${day}`, "json")) as
+      { bytes: number; objects: number } | null;
+    expect(quota).not.toBeNull();
+    expect(quota!.bytes).toBeGreaterThanOrEqual(40_000);
+  });
+
+  it("ignores a poisoned counter rather than disabling the quota", async () => {
+    const day = new Date().toISOString().slice(0, 10);
+    await env.QUOTAS.put(`quota:darrin:${day}`, JSON.stringify({ bytes: null, objects: "lots" }));
+    const response = await upload();
+    expect(response.status).toBe(200);
+    const quota = (await env.QUOTAS.get(`quota:darrin:${day}`, "json")) as
+      { bytes: number; objects: number };
+    expect(Number.isFinite(quota.bytes)).toBe(true);
+    expect(Number.isFinite(quota.objects)).toBe(true);
+  });
+});
+
 describe("viewer", () => {
   it("escapes a hostile filename everywhere it renders", async () => {
     const hostile = `"><meta http-equiv=refresh content=0;url=https://evil.example>`;

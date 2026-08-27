@@ -42,11 +42,11 @@ cp "$BIN" "$APP/Contents/MacOS/Kapture"
 # Sparkle ships as an XCFramework; the .app carries just the macOS slice, with its XPC services
 # and Updater.app nested inside the framework where Sparkle expects to find them.
 SPARKLE=$(find .build/artifacts -type d -name "Sparkle.framework" -path "*macos*" | head -1)
-if [ -n "$SPARKLE" ]; then
-  cp -R "$SPARKLE" "$APP/Contents/Frameworks/"
-else
-  echo "warning: Sparkle.framework not found — the app will not launch" >&2
-fi
+# Not a warning: the executable links against Sparkle, so a bundle without it cannot launch at
+# all. Shipping one anyway turns a build problem into a "Kapture won't open" report — and the
+# release workflow would happily sign, notarize and publish it.
+[ -n "$SPARKLE" ] || { echo "Sparkle.framework not found under .build/artifacts" >&2; exit 1; }
+cp -R "$SPARKLE" "$APP/Contents/Frameworks/"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

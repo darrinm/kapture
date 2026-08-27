@@ -62,14 +62,43 @@ final class HotkeyRecorderView: NSView {
         if mods.contains(.option) { carbon |= UInt32(optionKey) }
         if mods.contains(.control) { carbon |= UInt32(controlKey) }
 
-        // charactersIgnoringModifiers, so ⌥4 records as "4" and not "¢"
-        let character = (event.charactersIgnoringModifiers ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        // The key's own label, so ⌥4 records as "4" and not "¢" — and ⇧4 as "4" and not "$".
+        let raw = HotkeyRecorderView.unshiftedCharacter(for: event.keyCode)
+            ?? event.charactersIgnoringModifiers ?? ""
+        let character = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !character.isEmpty else { NSSound.beep(); return }
 
         recording = false
         window?.makeFirstResponder(nil)
         onRecord?(HotkeyBinding(keyCode: UInt32(event.keyCode), carbonModifiers: carbon,
                                 character: character))
+    }
+
+    /// The character a key is labelled with — what it types with no modifier held at all.
+    ///
+    /// `charactersIgnoringModifiers` ignores every modifier *except* Shift, so recording ⇧⌘5
+    /// hands back "%": the Settings row would read ⇧⌘% and the matching menu item would carry
+    /// "%" as its key equivalent, neither of which is what the user pressed. Translating the key
+    /// code through the active layout answers with the "5" on the keycap, in whatever layout is
+    /// current. nil falls back to the event's own characters.
+    static func unshiftedCharacter(for keyCode: UInt16) -> String? {
+        guard let source = TISCopyCurrentKeyboardLayoutInputSource()?.takeRetainedValue(),
+              let raw = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData)
+        else { return nil }
+        let data = Unmanaged<CFData>.fromOpaque(raw).takeUnretainedValue() as Data
+        var deadKeyState: UInt32 = 0
+        var length = 0
+        var characters = [UniChar](repeating: 0, count: 4)
+        let status = data.withUnsafeBytes { buffer -> OSStatus in
+            guard let layout = buffer.baseAddress?.assumingMemoryBound(to: UCKeyboardLayout.self)
+            else { return OSStatus(paramErr) }
+            return UCKeyTranslate(layout, keyCode, UInt16(kUCKeyActionDisplay), 0,
+                                  UInt32(LMGetKbdType()), OptionBits(kUCKeyTranslateNoDeadKeysMask),
+                                  &deadKeyState, characters.count, &length, &characters)
+        }
+        guard status == noErr, length > 0 else { return nil }
+        let text = String(utf16CodeUnits: characters, count: length)
+        return text.isEmpty ? nil : text
     }
 
     /// Swallow the chord's modifier-only flagsChanged so the field doesn't flicker mid-press.
