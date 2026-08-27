@@ -51,6 +51,9 @@ public enum Tokens {
         CGSize(width: 208, height: 130),
     ]
 
+    /// Circular scrim behind a small glyph badge — the share badge and the pin's close button.
+    public static let badgeScrim = NSColor.black.withAlphaComponent(0.45)
+
     // MARK: Motion; honor Reduce Motion
     public static var reduceMotion: Bool {
         NSWorkspace.shared.accessibilityDisplayShouldReduceMotion

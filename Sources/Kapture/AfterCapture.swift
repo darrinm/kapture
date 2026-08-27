@@ -12,23 +12,15 @@ enum AfterCapture {
     @discardableResult
     static func run(record: CaptureRecord, url: URL, image: CGImage?) -> Bool {
         let actions = Settings.shared.afterCaptureActions
-        guard !actions.isEmpty else { return true }
 
-        for action in actions {
-            switch action {
-            case .copy:
-                Clipboard.write(url: url, image: image.map { NSImage(cgImage: $0, size: .zero) })
-            case .save:
-                save(url)
-            case .editor, .pin, .share:
-                break   // handled below, after the capture is marked kept
-            }
+        if actions.contains(.copy) {
+            Clipboard.write(url: url, image: image.map { NSImage(cgImage: $0, size: .zero) })
         }
+        if actions.contains(.save) { save(url) }
 
         // anything that opens a window or leaves the Mac counts as acting on the capture, so it
         // stops being a staged card and gets indexed now
-        let opensSomething = actions.contains(where: { $0 == .editor || $0 == .pin || $0 == .share })
-        if opensSomething {
+        if actions.contains(where: \.marksKept) {
             Task { await IngestQueue.shared.expedite(record.id) }
             try? OverlayController.shared.library?.setStatus(record.id, .kept)
         }
@@ -36,16 +28,17 @@ enum AfterCapture {
         if actions.contains(.share) { ShareCoordinator.shared.share(record) }
         if actions.contains(.editor), record.canAnnotate {
             EditorController.shared.open(recordID: record.id)
-            return false
+            return false      // the editor replaces the card rather than stacking on it
         }
         return true
     }
 
+    /// Off the main actor: this runs inside the capture's MainActor hop, and a stop-recording
+    /// takes the same path — copying a large movie there would stall the UI for its duration.
     private static func save(_ url: URL) {
-        let destination = Library.uniqueURL(in: Settings.shared.exportLocation,
-                                            base: url.deletingPathExtension().lastPathComponent,
-                                            ext: url.pathExtension)
-        do { try FileManager.default.copyItem(at: url, to: destination) }
-        catch { Log.store.error("after-capture save failed: \(error)") }
+        Task.detached(priority: .utility) {
+            do { try Library.copyToExportLocation(url) }
+            catch { Log.store.error("after-capture save failed: \(error)") }
+        }
     }
 }

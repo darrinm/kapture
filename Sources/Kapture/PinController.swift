@@ -107,7 +107,7 @@ final class PinView: NSImageView {
         closeButton.isBordered = false
         closeButton.contentTintColor = .white
         closeButton.wantsLayer = true
-        closeButton.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.45).cgColor
+        closeButton.layer?.backgroundColor = Tokens.badgeScrim.cgColor
         closeButton.layer?.cornerRadius = 10
         closeButton.toolTip = "Close pin (esc)"
         closeButton.target = self

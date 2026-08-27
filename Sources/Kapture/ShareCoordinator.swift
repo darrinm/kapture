@@ -12,8 +12,6 @@ final class ShareCoordinator {
     /// ids with an upload in flight, so a double-press can't upload the same capture twice
     private var inFlight: Set<String> = []
 
-    func isSharing(_ id: String) -> Bool { inFlight.contains(id) }
-
     /// Shares a capture and puts the link on the clipboard. A capture that already has a link
     /// and hasn't been edited since is not re-uploaded — the existing link is simply copied,
     /// which is what pressing share a second time almost always means.

@@ -6,14 +6,7 @@ import AppKit
 
 @MainActor
 final class RedactionHandleTests: XCTestCase {
-    private func makeCanvas() -> CanvasView {
-        let ctx = CGContext(data: nil, width: 200, height: 200, bitsPerComponent: 8, bytesPerRow: 0,
-                            space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
-        let canvas = CanvasView(image: ctx.makeImage()!, layers: [])
-        canvas.frame = NSRect(x: 0, y: 0, width: 400, height: 400)
-        return canvas
-    }
+    private func makeCanvas() -> CanvasView { TestCanvas.make() }
 
     private func layer(_ tool: Tool) -> Annotation {
         Annotation(tool: tool, points: [CGPoint(x: 20, y: 20), CGPoint(x: 80, y: 80)],
@@ -40,12 +33,7 @@ final class RedactionHandleTests: XCTestCase {
     /// Resizing must re-render. The effect cache is keyed by rect, and a stale patch would leave
     /// the old region showing at the new size — a redaction that no longer covers what it did.
     func testResizingProducesADifferentPatch() throws {
-        let ctx = CGContext(data: nil, width: 200, height: 200, bitsPerComponent: 8, bytesPerRow: 0,
-                            space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
-        ctx.setFillColor(NSColor.systemRed.cgColor)
-        ctx.fill(CGRect(x: 0, y: 0, width: 200, height: 200))
-        let base = ctx.makeImage()!
+        let base = TestImages.blank(200, 200, fill: .systemRed)
 
         let small = try XCTUnwrap(AnnotationEffects.render(
             tool: .pixelate, rect: CGRect(x: 10, y: 10, width: 40, height: 40),

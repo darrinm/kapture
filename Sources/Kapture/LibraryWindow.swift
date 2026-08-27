@@ -44,7 +44,12 @@ final class LibraryWindowController: NSObject, NSWindowDelegate {
         content.focusSearch()
     }
 
-    func reload() { grid?.reload() }
+    /// The window is kept alive after it closes (isReleasedWhenClosed = false), so without this
+    /// every share and unshare re-ran a full FTS query and grid rebuild for nothing.
+    func reload() {
+        guard window?.isVisible == true else { return }
+        grid?.reload()
+    }
 
     func windowWillClose(_ notification: Notification) {
         ActivationPolicy.release()
@@ -151,7 +156,7 @@ final class LibraryContentView: NSView, NSSearchFieldDelegate {
         if appFilter.indexOfSelectedItem > 0 || dateFilter.indexOfSelectedItem > 0 {
             return "No captures match these filters."
         }
-        return "Nothing here yet — press ⌘⇧4 to take a capture."
+        return "Nothing here yet — press \(HotkeyCenter.shared.binding(for: .area).display) to take a capture."
     }
 
     /// Re-read the library: the grid's contents and the source-app menu, which otherwise keeps
@@ -586,7 +591,7 @@ final class LibraryGridView: NSView {
     /// points at pixels the capture no longer has.
     private func drawShareBadge(_ item: Item, in r: CGRect, ctx: CGContext) {
         let box = CGRect(x: r.maxX - 24, y: r.minY + 6, width: 18, height: 18)
-        ctx.setFillColor(NSColor.black.withAlphaComponent(0.45).cgColor)
+        ctx.setFillColor(Tokens.badgeScrim.cgColor)
         ctx.fillEllipse(in: box)
         // NSImage.draw, not CGContext.draw: this view is flipped, and only the AppKit path
         // orients the glyph for it

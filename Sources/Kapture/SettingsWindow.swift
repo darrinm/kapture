@@ -72,6 +72,50 @@ final class SettingsWindowController {
     }
 }
 
+/// A Keychain-backed secret: shown only as "stored", never read back into the field.
+///
+/// Both secrets Kapture holds — the Anthropic key and the share token — need the same three
+/// rules, and had two copies of them. A Keychain write is a SecItemDelete + SecItemAdd pair of
+/// blocking XPC calls, so it cannot ride every keystroke; committing only on submit lost the
+/// value whenever the user clicked away instead; and an untouched field must never commit,
+/// because it starts empty by design and would wipe a secret that is already there.
+struct SecretField: View {
+    let title: String
+    let emptyPrompt: String
+    /// Written on commit. nil clears the secret.
+    let write: (String?) -> Void
+
+    @Binding var isStored: Bool
+    @State private var typed = ""
+    @State private var edited = false
+    @State private var commitTask: Task<Void, Never>?
+
+    var body: some View {
+        SecureField(title, text: $typed,
+                    prompt: Text(isStored ? "stored — type to replace" : emptyPrompt))
+            .textFieldStyle(.roundedBorder)
+            .onChange(of: typed) { _, value in
+                isStored = !value.isEmpty
+                edited = true
+                commitTask?.cancel()
+                commitTask = Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(600))
+                    guard !Task.isCancelled else { return }
+                    commit()
+                }
+            }
+            .onDisappear {
+                commitTask?.cancel()
+                commit()
+            }
+    }
+
+    private func commit() {
+        guard edited else { return }
+        write(typed.isEmpty ? nil : typed)
+    }
+}
+
 struct SettingsView: View {
     enum Tab: Hashable { case general, overlay, recording, library, shortcuts, sharing }
 
@@ -109,23 +153,12 @@ struct SettingsView: View {
     // Not @AppStorage: this key's default depends on whether an API key is set. Seeded in
     // `refreshKeychainState()` rather than here — see the note on hasStoredKey.
     @State private var aiNaming = false
-    // The stored key is never shown; the field starts empty and only what the user types is
-    // committed, so an untouched field can't wipe a key that's already there.
-    @State private var anthropicKey = ""
     // Seeded asynchronously: even the attribute-only existence check is a blocking XPC call,
     // and three of them during view construction stall the main thread every time this window
     // opens — and hang outright when the Keychain can't be reached (a locked screen).
     @State private var hasStoredKey = false
-    // A Keychain write is a SecItemDelete + SecItemAdd pair of blocking XPC calls, so it can't
-    // ride every keystroke — an `sk-ant-…` key is ~100 of them. Debounce, and flush on the way
-    // out so a key typed and immediately dismissed still lands.
-    @State private var keyCommit: Task<Void, Never>?
-    @State private var keyEdited = false
     @AppStorage("copyShareLink") private var copyShareLink = true
-    @State private var shareToken = ""
     @State private var hasShareToken = false
-    @State private var shareCommit: Task<Void, Never>?
-    @State private var shareTokenEdited = false
     // not @AppStorage: the value is an ordered array behind a Settings accessor that also
     // migrates the old single copy-after-capture flag
     @State private var afterCapture = Set(Settings.shared.afterCaptureActions.map(\.rawValue))
@@ -235,21 +268,10 @@ struct SettingsView: View {
         Form {
             Toggle("Name captures automatically", isOn: $aiNaming)
                 .onChange(of: aiNaming) { _, v in Settings.shared.aiNamingEnabled = v }
-            SecureField("Anthropic API key", text: $anthropicKey,
-                        prompt: Text(hasStoredKey ? "stored — type to replace" : "sk-ant-… (optional)"))
-                .textFieldStyle(.roundedBorder)
-                // commit as typed: onSubmit alone lost the key whenever the user clicked away
-                // or closed the window instead of pressing Return
-                .onChange(of: anthropicKey) { _, v in
-                    hasStoredKey = !v.isEmpty
-                    keyEdited = true
-                    keyCommit?.cancel()
-                    keyCommit = Task { @MainActor in
-                        try? await Task.sleep(for: .milliseconds(600))
-                        guard !Task.isCancelled else { return }
-                        commitKey()
-                    }
-                }
+            SecretField(title: "Anthropic API key",
+                        emptyPrompt: "sk-ant-… (optional)",
+                        write: { Keychain.anthropicKey = $0 },
+                        isStored: $hasStoredKey)
             Text(!hasStoredKey
                  ? "Without a key, names come from an on-device heuristic that is rough — it often "
                    + "latches onto menu-bar text. With your own Anthropic key, each capture (image "
@@ -266,17 +288,6 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .padding(.top, 4)
-        .onDisappear {
-            keyCommit?.cancel()
-            commitKey()
-        }
-    }
-
-    /// Write the typed key to the Keychain. Never runs for an untouched field: the field starts
-    /// empty by design, so committing "" without an edit would wipe a key that is already there.
-    private func commitKey() {
-        guard keyEdited else { return }
-        Keychain.anthropicKey = anthropicKey.isEmpty ? nil : anthropicKey
     }
 
     var shortcuts: some View {
@@ -351,29 +362,15 @@ struct SettingsView: View {
 
     var sharing: some View {
         Form {
-            SecureField("Share token", text: $shareToken,
-                        prompt: Text(hasShareToken ? "stored — type to replace" : "paste your kapture.sh token"))
-                .textFieldStyle(.roundedBorder)
-                // same debounce as the API key: a Keychain write is two blocking XPC calls
-                .onChange(of: shareToken) { _, v in
-                    hasShareToken = !v.isEmpty
-                    shareTokenEdited = true
-                    shareStatus = ""
-                    shareCommit?.cancel()
-                    shareCommit = Task { @MainActor in
-                        try? await Task.sleep(for: .milliseconds(600))
-                        guard !Task.isCancelled else { return }
-                        commitShareToken()
-                    }
-                }
+            SecretField(title: "Share token",
+                        emptyPrompt: "paste your kapture.sh token",
+                        write: { Keychain.shareToken = $0 },
+                        isStored: $hasShareToken)
             LabeledContent("Server") {
                 HStack {
                     Text(Settings.shared.shareEndpoint.host ?? "kapture.sh")
                         .foregroundStyle(.secondary)
-                    Button("Check") {
-                        commitShareToken()
-                        checkShareToken()
-                    }
+                    Button("Check") { checkShareToken() }
                     .disabled(!hasShareToken || checkingShare)
                 }
             }
@@ -394,15 +391,6 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .padding(.top, 4)
-        .onDisappear {
-            shareCommit?.cancel()
-            commitShareToken()
-        }
-    }
-
-    private func commitShareToken() {
-        guard shareTokenEdited else { return }
-        Keychain.shareToken = shareToken.isEmpty ? nil : shareToken
     }
 
     /// One real request, so "connected" means the token actually authorizes rather than merely

@@ -386,10 +386,10 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
     /// window must still shrink around the card: left grown, the next stack layout resizes it to
     /// the slot while the card is still parked at `swipePad`, which puts the card outside the
     /// window and it vanishes.
-    func cancelSwipe() { settleAfterSwipe() }
+
 
     /// Put the window back around the card once a gesture is over.
-    private func settleAfterSwipe() {
+    func settleAfterSwipe() {
         guard swiping else { return }
         swiping = false
         setFrame(restingFrame, display: true)
@@ -405,10 +405,7 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
     }
 
     func saveToExportLocation() {
-        let dest = Library.uniqueURL(in: Settings.shared.exportLocation,
-                                     base: fileURL.deletingPathExtension().lastPathComponent,
-                                     ext: fileURL.pathExtension)
-        do { try FileManager.default.copyItem(at: fileURL, to: dest) }
+        do { try Library.copyToExportLocation(fileURL) }
         catch { Log.store.error("export failed: \(error)") }
         keepAndClose()
     }
@@ -557,7 +554,7 @@ final class OverlayView: NSView, NSDraggingSource {
     // sat still under your finger and dismissal felt like a command rather than a movement.
     private enum SwipeAxis { case undecided, horizontal, vertical }
     private var swipeAxis: SwipeAxis = .undecided
-    private var swipeStart: NSRect?
+    private var swiping = false
     private var swipeX: CGFloat = 0
     private var swipeY: CGFloat = 0
     /// Toward-edge points per second, smoothed so one jittery frame can't fling the card.
@@ -566,6 +563,7 @@ final class OverlayView: NSView, NSDraggingSource {
     /// A swipe that carries the card out from under the pointer stops receiving scroll events,
     /// so `.ended` never arrives. Without this the card would sit stranded mid-gesture.
     private var swipeWatchdog: DispatchWorkItem?
+    private var swipeWatchdogArmed = Date.distantPast
 
     /// Sign of accumulated deltaX that means "toward the edge the cards live on".
     private var towardEdgeSign: CGFloat { Settings.shared.overlayOnLeftEdge ? 1 : -1 }
@@ -687,15 +685,13 @@ final class OverlayView: NSView, NSDraggingSource {
             swipeY = 0
             swipeVelocity = 0
             swipeTime = event.timestamp
-            // the slot, not the current frame: a previous gesture may have left the card adrift
-            swipeStart = panel.restingFrame == .zero ? panel.frame : panel.restingFrame
-            panel.beginSwipe()
+            swiping = true
             // no watchdog yet: it exists for a card that has moved out from under the pointer,
             // and arming it here would end a gesture that has simply not moved yet — a slow
             // downward swipe would be resolved 250ms in, before it had travelled far enough to
             // mean anything.
         case .changed:
-            guard swipeStart != nil else { return }
+            guard swiping else { return }
             swipeX += event.scrollingDeltaX
             swipeY += event.scrollingDeltaY
             // lock the axis once the gesture commits to one, so a slightly diagonal swipe
@@ -704,6 +700,9 @@ final class OverlayView: NSView, NSDraggingSource {
                 swipeAxis = abs(swipeX) > abs(swipeY) ? .horizontal : .vertical
             }
             guard swipeAxis == .horizontal else { return }
+            // the window only has to grow once the gesture is known to be horizontal: a swipe
+            // down to hide the stack was paying for a resize it never used
+            panel.beginSwipe()
             armSwipeWatchdog()
             let elapsed = max(event.timestamp - swipeTime, 1.0 / 240)
             swipeTime = event.timestamp
@@ -719,16 +718,15 @@ final class OverlayView: NSView, NSDraggingSource {
     private func finishSwipe(cancelled: Bool) {
         swipeWatchdog?.cancel()
         swipeWatchdog = nil
-        let inProgress = swipeStart != nil
+        let inProgress = swiping
         let axis = swipeAxis
-        swipeStart = nil
+        swiping = false
         swipeAxis = .undecided
         guard inProgress else { return }
         switch axis {
         case .vertical:
-            // the card never moved, but beginSwipe grew the window around it and only settling
-            // puts it back
-            panel.cancelSwipe()
+            // the window is only grown once a gesture turns horizontal, so there is nothing
+            // to put back here
             if swipeY < -40 { OverlayController.shared.hideAll() }
         case .horizontal:
             let dismiss = SwipePhysics.shouldDismiss(progress: swipeX * towardEdgeSign,
@@ -748,9 +746,14 @@ final class OverlayView: NSView, NSDraggingSource {
     /// never arrives. Treat a gap in the stream as the end of the gesture so the card always
     /// resolves — dismissed if it was already far enough, back in its slot if it wasn't.
     private func armSwipeWatchdog() {
+        // re-arming per scroll event allocated and cancelled a work item at trackpad rate;
+        // the gap this detects is 250ms, so refreshing it a few times a second is plenty
+        if let existing = swipeWatchdog, !existing.isCancelled,
+           Date().timeIntervalSince(swipeWatchdogArmed) < 0.1 { return }
+        swipeWatchdogArmed = Date()
         swipeWatchdog?.cancel()
         let work = DispatchWorkItem { [weak self] in
-            guard let self, self.swipeStart != nil else { return }
+            guard let self, self.swiping else { return }
             self.finishSwipe(cancelled: false)
         }
         swipeWatchdog = work

@@ -9,6 +9,20 @@ public enum Tool: String, CaseIterable, Codable {
     /// Tools that obscure what is under them rather than drawing on top of it.
     var isRedaction: Bool { self == .blur || self == .pixelate }
 
+    /// Tools whose geometry is two opposite corners: they resize by those corners and hit-test
+    /// as a box. Adding a tool without answering this question is how blur and pixelate first
+    /// shipped with no resize handles at all — a silent `default:` rather than a compiler error.
+    var isRectangular: Bool {
+        switch self {
+        case .rect, .ellipse, .highlight, .crop, .blur, .pixelate: return true
+        case .select, .arrow, .line, .freehand, .text, .counter: return false
+        }
+    }
+
+    /// Tools that cover the area they enclose rather than outlining it, so a press anywhere
+    /// inside them counts as hitting them.
+    var isSolid: Bool { isRedaction || self == .highlight || self == .crop }
+
     /// Image-space radius (blur) or block size (pixelate).
     var defaultIntensity: CGFloat { self == .blur ? 24 : 16 }
 }
@@ -211,8 +225,7 @@ public struct Annotation: Codable, Identifiable {
             return distanceToSegment(p, points[0], points[1]) < pad
         default:
             return rect.insetBy(dx: -pad, dy: -pad).contains(p) && !rect.insetBy(dx: pad, dy: pad).contains(p)
-                || (tool == .highlight || tool == .crop || tool.isRedaction || filled == true)
-                    && rect.contains(p)
+                || (tool.isSolid || filled == true) && rect.contains(p)
         }
     }
 

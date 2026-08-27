@@ -203,6 +203,17 @@ public final class Library: @unchecked Sendable {
         }
     }
 
+    /// Copy a capture into the export folder under a non-colliding name. Both the overlay's
+    /// Save and the After Capture list want exactly this; they had a copy each.
+    @discardableResult
+    public static func copyToExportLocation(_ url: URL) throws -> URL {
+        let destination = uniqueURL(in: Settings.shared.exportLocation,
+                                    base: url.deletingPathExtension().lastPathComponent,
+                                    ext: url.pathExtension)
+        try FileManager.default.copyItem(at: url, to: destination)
+        return destination
+    }
+
     /// Record (or clear) the kapture.sh link for a capture. Setting a link also clears the stale
     /// flag: a fresh upload is by definition the current pixels, whatever edits preceded it.
     public func setShareLink(_ id: String, url: String?) throws {

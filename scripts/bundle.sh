@@ -92,6 +92,8 @@ if [ -d "$APP/Contents/Frameworks/Sparkle.framework" ]; then
   codesign --force "${EXTRA[@]}" -s "$SIGN_ID" "$APP/Contents/Frameworks/Sparkle.framework"
 fi
 codesign --force "${EXTRA[@]}" -s "$SIGN_ID" "$APP"
+# recorded so the DMG step signs the image with the same certificate as the app
+printf '%s' "$SIGN_ID" > dist/.sign-identity
 echo "signed as: $SIGN_ID"
 [ -n "$PUBLIC_ED_KEY" ] || echo "note: no SUPublicEDKey — in-app updates are disabled in this build"
 echo "built $APP ($VERSION build $BUILD) — run with: open $APP"

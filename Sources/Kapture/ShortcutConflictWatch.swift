@@ -48,7 +48,10 @@ final class ShortcutConflictWatch {
     private func warn(about app: NSRunningApplication, name: String) {
         let alert = NSAlert()
         alert.messageText = "\(name) is using the capture shortcuts"
-        alert.informativeText = "macOS gives ⌘⇧3 / ⌘⇧4 / ⌘⇧5 to whichever app claimed them first, and \(name) is running, so those presses may not reach Kapture. Both apps can be installed — only one can hold the shortcuts at a time."
+        let contended = [HotkeyCenter.Action.fullscreen, .area, .record]
+            .map { HotkeyCenter.shared.binding(for: $0).display }
+            .joined(separator: " / ")
+        alert.informativeText = "macOS gives \(contended) to whichever app claimed them first, and \(name) is running, so those presses may not reach Kapture. Both apps can be installed — only one can hold the shortcuts at a time."
         // "Keep both" is the default: quitting someone else's app should take a deliberate click
         alert.addButton(withTitle: "Keep \(name) running")
         alert.addButton(withTitle: "Quit \(name)")

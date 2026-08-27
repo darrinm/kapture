@@ -67,6 +67,12 @@ public final class EditorController {
     /// Flatten + PNG encode + applyEdit are hundreds of ms for large captures — run them off
     /// the main actor. The onFlattened hop back to MainActor fires only after applyEdit finishes,
     /// so the reopened card reads the fresh pixels.
+    /// The effects cache holds the capture it was sampled from — a full-resolution CGImage,
+    /// tens of megabytes — so it must not outlive the editor.
+    private func releaseEditorMemory() {
+        AnnotationEffects.clearCache()
+    }
+
     private func save(recordID: String, base: CGImage, layers: [Annotation], reopenAsCard: Bool) {
         guard let library else { return }
         let onFlattened = self.onFlattened
@@ -315,7 +321,7 @@ final class EditorViewController: NSViewController {
         // the live element owns the controls whatever tool is in hand — that is the point of
         // not having to enter a select mode to adjust what you just drew
         let selectedLayer = canvas.selectedLayer
-        let effective = selectedLayer?.tool ?? canvas.tool
+        let effective = canvas.effectiveTool
 
         var showColor = true, showWidth = false, showSize = false, showFill = false
         var showRatio = false
@@ -388,7 +394,8 @@ final class EditorViewController: NSViewController {
     private var sliderGestureActive = false
     @objc private func widthChanged(_ sender: NSSlider) {
         let w = CGFloat(sender.doubleValue)
-        let effective = (canvas.tool == .select ? canvas.selectedLayer?.tool : canvas.tool) ?? canvas.tool
+        // the same rule the options bar uses: whatever the controls are pointed at
+        let effective = canvas.effectiveTool
         // both setters update the default for the next element and apply to the live one if
         // there is one, so the slider means the same thing either way
         if effective.isRedaction {
@@ -600,6 +607,11 @@ final class CanvasView: NSView, NSTextFieldDelegate {
         return live.hitTest(p) ? .moveLive : .newElement
     }
 
+    /// What the tool controls apply to: the live element if there is one, otherwise the tool in
+    /// hand. Defined once — the options bar and the sliders disagreed about this, which decided
+    /// both a slider's range and what it wrote to.
+    var effectiveTool: Tool { selectedLayer?.tool ?? tool }
+
     func selectMostRecent() {
         selected = layers.last(where: { !($0.tool == .crop && $0.applied == true) })?.id
         needsDisplay = true
@@ -751,10 +763,7 @@ final class CanvasView: NSView, NSTextFieldDelegate {
         case .newElement:
             // outside the live element: this press starts something new, so the old one stops
             // being live
-            if selected != nil, tool != .select, tool != .crop {
-                selected = nil
-                onSelectionChanged?()
-            }
+            if tool != .select, tool != .crop { clearSelection() }
         }
 
         switch tool {
@@ -831,12 +840,12 @@ final class CanvasView: NSView, NSTextFieldDelegate {
                     CGPoint(x: r.minX, y: r.maxY), CGPoint(x: r.maxX, y: r.maxY),
                     CGPoint(x: r.midX, y: r.minY), CGPoint(x: r.midX, y: r.maxY),
                     CGPoint(x: r.minX, y: r.midY), CGPoint(x: r.maxX, y: r.midY)]
-        case .arrow, .line, .rect, .ellipse, .highlight, .blur, .pixelate:
-            // a redaction is a rect like the others: same two corner handles, so the region it
-            // covers can be adjusted after the fact instead of deleted and redrawn
+        case .arrow, .line:
             return layer.points.count >= 2 ? [layer.points[0], layer.points[1]] : []
         default:
-            return []
+            // every box-shaped tool resizes by its two drawn corners, redactions included
+            guard layer.tool.isRectangular, layer.points.count >= 2 else { return [] }
+            return [layer.points[0], layer.points[1]]
         }
     }
     /// Resize the crop rect by one of its 8 handles (order per handlePositions: 4 corners TL/TR/BL/BR,
@@ -984,8 +993,12 @@ final class CanvasView: NSView, NSTextFieldDelegate {
         }
     }
 
-    private func pushUndo() {
-        undoStack.append(layers)
+    private func pushUndo() { record(layers) }
+
+    /// One place that knows what recording a history step means, so a rule added later cannot
+    /// land on one of the two callers.
+    private func record(_ snapshot: [Annotation]) {
+        undoStack.append(snapshot)
         if undoStack.count > 100 { undoStack.removeFirst() }
         // a new edit is a new branch: whatever was undone is no longer reachable
         redoStack.removeAll()
@@ -995,25 +1008,23 @@ final class CanvasView: NSView, NSTextFieldDelegate {
     private func commitPreGesture() {
         guard let pre = preGesture else { return }
         preGesture = nil
-        undoStack.append(pre)
-        if undoStack.count > 100 { undoStack.removeFirst() }
-        redoStack.removeAll()
-        onHistoryChanged?()
+        record(pre)
     }
     func undo() {
         guard let prev = undoStack.popLast() else { return }
         redoStack.append(layers)
-        layers = prev
-        selected = nil
-        needsDisplay = true
-        onSelectionChanged?()
-        onHistoryChanged?()
+        adopt(prev)
     }
 
     func redo() {
         guard let next = redoStack.popLast() else { return }
         undoStack.append(layers)
-        layers = next
+        adopt(next)
+    }
+
+    /// Step to a snapshot from the history. Mirror images otherwise drift.
+    private func adopt(_ snapshot: [Annotation]) {
+        layers = snapshot
         selected = nil
         needsDisplay = true
         onSelectionChanged?()

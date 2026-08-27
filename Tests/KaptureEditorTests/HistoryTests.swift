@@ -7,15 +7,9 @@ import AppKit
 @MainActor
 final class HistoryTests: XCTestCase {
     private func makeCanvas() -> CanvasView {
-        let ctx = CGContext(data: nil, width: 200, height: 200, bitsPerComponent: 8, bytesPerRow: 0,
-                            space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
         let layer = Annotation(tool: .rect, points: [CGPoint(x: 10, y: 10), CGPoint(x: 90, y: 90)],
                                colorHex: "#FF0000", strokeWidth: 6)
-        let canvas = CanvasView(image: ctx.makeImage()!, layers: [layer])
-        canvas.frame = NSRect(x: 0, y: 0, width: 400, height: 400)
-        canvas.selectMostRecent()
-        return canvas
+        return TestCanvas.make(layers: [layer], selectingMostRecent: true)
     }
 
     func testNothingToUndoOnAFreshCanvas() {

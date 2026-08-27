@@ -92,7 +92,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                                            label: paused ? "Paused" : "Stop recording")
             button.imagePosition = .imageLeft
             button.title = paused ? " ⏸ " + elapsed : " " + elapsed
-            button.toolTip = "Click to stop recording (⌘⇧5) · right-click for more"
+            button.toolTip = "Click to stop recording (\(HotkeyCenter.shared.binding(for: .record).display)) · right-click for more"
             // while recording the item is a stop BUTTON, not a menu opener
             statusItem.menu = nil
             button.target = self

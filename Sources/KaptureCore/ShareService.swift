@@ -131,20 +131,26 @@ public enum ShareService {
     /// seconds first, then without, so every link keeps its real date instead of falling back to
     /// "now" and sorting the Shared filter at random.
     static func parseTimestamp(_ raw: String) -> Date? {
-        let candidates: [ISO8601DateFormatter.Options] = [[.withInternetDateTime, .withFractionalSeconds],
-                                                          [.withInternetDateTime]]
-        for options in candidates {
-            let formatter = ISO8601DateFormatter()
-            formatter.formatOptions = options
-            if let date = formatter.date(from: raw) { return date }
-        }
-        return nil
+        fractionalTimestamps.date(from: raw) ?? plainTimestamps.date(from: raw)
     }
 
     /// Cheap round trip so Settings can say "connected" before the user relies on it mid-share.
     public static func verifyToken() async throws {
         _ = try await list()
     }
+
+    /// Built once: constructing an ISO8601DateFormatter costs far more than using one, and
+    /// list() parses a timestamp per share.
+    private static let fractionalTimestamps: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+    private static let plainTimestamps: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f
+    }()
 
     static func decode(_ data: Data, _ response: URLResponse) throws -> [String: Any] {
         guard let http = response as? HTTPURLResponse else { throw ShareFailure("no response") }

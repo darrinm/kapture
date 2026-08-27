@@ -33,6 +33,9 @@ const ALLOWED_TYPES = new Map([
   ["video/quicktime", "mov"],
 ]);
 
+/** Ids are generated from ID_ALPHABET below; the routes accept exactly what it can produce. */
+const SHARE_ID = "[A-Za-z0-9]{4,16}";
+
 const ID_ALPHABET = "123456789abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ"; // base58
 
 function newID(): string {
@@ -106,7 +109,8 @@ const VIEWER_CSP =
 function viewerHTML(id: string, filename: string, contentType: string, origin: string): string {
   const safeName = escapeHTML(filename);
   const url = `${origin}/${id}/raw`;
-  const media = contentType.startsWith("video/")
+  const isVideo = contentType.startsWith("video/");
+  const media = isVideo
     ? `<video src="${url}" controls playsinline preload="metadata"></video>`
     : `<img src="${url}" alt="${safeName}">`;
   return `<!doctype html>
@@ -115,7 +119,7 @@ function viewerHTML(id: string, filename: string, contentType: string, origin: s
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${safeName}</title>
 <meta property="og:title" content="${safeName}">
-<meta property="og:type" content="${contentType.startsWith("video/") ? "video.other" : "image"}">
+<meta property="og:type" content="${isVideo ? "video.other" : "image"}">
 <meta property="og:image" content="${url}">
 <meta name="twitter:card" content="summary_large_image">
 <style>
@@ -155,6 +159,10 @@ async function checkQuota(env: Env, owner: string, bytes: number): Promise<strin
     { expirationTtl: 60 * 60 * 30 },
   );
   return null;
+}
+
+function notFound(): Response {
+  return new Response("Not found", { status: 404, headers: SECURITY_HEADERS });
 }
 
 function json(body: unknown, status = 200): Response {
@@ -244,7 +252,7 @@ export default {
     }
 
     // ---- delete (owner or admin) -----------------------------------------
-    const deleteMatch = path.match(/^\/api\/([A-Za-z0-9]{4,16})$/);
+    const deleteMatch = path.match(new RegExp(`^/api/(${SHARE_ID})$`));
     if (deleteMatch && request.method === "DELETE") {
       const owner = await authorize(request, env);
       if (!owner) return json({ error: "unauthorized" }, 401);
@@ -263,7 +271,10 @@ export default {
       return Response.redirect(`${env.RELEASES_BASE}/latest/download/Kapture.dmg`, 302);
     }
     if (path === "/appcast.xml") {
-      const upstream = await fetch(`${env.RELEASES_BASE}/latest/download/appcast.xml`);
+      // every install checks daily and gets identical bytes; let the edge answer most of them
+      const upstream = await fetch(`${env.RELEASES_BASE}/latest/download/appcast.xml`, {
+        cf: { cacheTtl: 300, cacheEverything: true },
+      });
       return new Response(upstream.body, {
         status: upstream.status,
         headers: { "content-type": "application/xml", ...SECURITY_HEADERS },
@@ -271,7 +282,7 @@ export default {
     }
 
     // ---- raw asset --------------------------------------------------------
-    const rawMatch = path.match(/^\/([A-Za-z0-9]{4,16})\/raw$/);
+    const rawMatch = path.match(new RegExp(`^/(${SHARE_ID})/raw$`));
     if (rawMatch && (request.method === "GET" || request.method === "HEAD")) {
       const object = await env.BUCKET.get(`shares/${rawMatch[1]}`);
       if (!object) return new Response("Not found", { status: 404, headers: SECURITY_HEADERS });
@@ -288,7 +299,7 @@ export default {
     }
 
     // ---- viewer -----------------------------------------------------------
-    const viewMatch = path.match(/^\/([A-Za-z0-9]{4,16})$/);
+    const viewMatch = path.match(new RegExp(`^/(${SHARE_ID})$`));
     if (viewMatch && request.method === "GET") {
       const head = await env.BUCKET.head(`shares/${viewMatch[1]}`);
       if (!head) return new Response("Not found", { status: 404, headers: SECURITY_HEADERS });
@@ -319,7 +330,7 @@ export default {
       });
     }
 
-    return new Response("Not found", { status: 404, headers: SECURITY_HEADERS });
+    return notFound();
   },
 } satisfies ExportedHandler<Env>;
 

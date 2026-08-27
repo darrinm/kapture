@@ -20,6 +20,10 @@ on:
 permissions:
   contents: write
 
+env:
+  # one definition: the app is built against this and the appcast advertises it
+  FEED_URL: ${{ vars.SU_FEED_URL || 'https://kapture.sh/appcast.xml' }}
+
 jobs:
   release:
     runs-on: macos-15
@@ -57,8 +61,7 @@ jobs:
           KAPTURE_VERSION: ${{ steps.version.outputs.version }}
           KAPTURE_BUILD: ${{ github.run_number }}
           KAPTURE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_KEY }}
-          # same default as the appcast step, so the shipped app and the feed agree
-          KAPTURE_FEED_URL: ${{ vars.SU_FEED_URL || 'https://kapture.sh/appcast.xml' }}
+          KAPTURE_FEED_URL: ${{ env.FEED_URL }}
         run: bash scripts/bundle.sh
 
       - name: Verify the signature is Developer ID and hardened
@@ -79,10 +82,11 @@ jobs:
           hdiutil create -volname "Kapture" -srcfolder "$staging" -ov -format UDZO dist/Kapture.dmg
           # sign the disk image itself, not just the app inside it: Gatekeeper assesses what the
           # user actually double-clicks, and an unsigned image is "no usable signature" to spctl
-          # even after it has been notarized and stapled
-          identity=$(security find-identity -v -p codesigning \
-            | grep -oE '"Developer ID Application[^"]*"' | head -1 | tr -d '"')
-          [ -n "$identity" ] || { echo "no Developer ID identity in the keychain"; exit 1; }
+          # even after it has been notarized and stapled.
+          # bundle.sh already chose an identity and recorded it; re-deriving it here risked the
+          # app and the image being signed by different certificates.
+          identity=$(cat dist/.sign-identity)
+          [ -n "$identity" ] || { echo "bundle.sh recorded no signing identity"; exit 1; }
           codesign --force --timestamp --sign "$identity" dist/Kapture.dmg
           codesign --verify --verbose dist/Kapture.dmg
 
@@ -123,7 +127,6 @@ jobs:
           # or its users would be updated from someone else's builds
           REPO: ${{ github.repository }}
           SERVER: ${{ github.server_url }}
-          FEED_URL: ${{ vars.SU_FEED_URL || 'https://kapture.sh/appcast.xml' }}
         run: |
           # one entry, always pointing at this release's asset: Sparkle only needs the newest
           cat > dist/appcast.xml <<XML

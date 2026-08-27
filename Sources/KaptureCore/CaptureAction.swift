@@ -22,6 +22,15 @@ public enum CaptureAction: String, CaseIterable, Sendable {
         }
     }
 
+    /// Actions that act on the capture rather than just copying it — the capture stops being a
+    /// staged card and is indexed immediately.
+    public var marksKept: Bool {
+        switch self {
+        case .copy, .save: return false
+        case .editor, .pin, .share: return true
+        }
+    }
+
     public var detail: String? {
         switch self {
         case .editor: "Opens the editor instead of the corner card."
@@ -48,10 +57,6 @@ extension Settings {
             let ordered = CaptureAction.allCases.filter(newValue.contains)
             UserDefaults.standard.set(ordered.map(\.rawValue), forKey: "afterCaptureActions")
         }
-    }
-
-    public func isAfterCaptureActionEnabled(_ action: CaptureAction) -> Bool {
-        afterCaptureActions.contains(action)
     }
 
     public mutating func setAfterCaptureAction(_ action: CaptureAction, enabled: Bool) {

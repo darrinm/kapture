@@ -11,14 +11,7 @@ final class LiveSelectionTests: XCTestCase {
                                   colorHex: "#FF0000", strokeWidth: 6)
 
     private func makeCanvas(tool: Tool, selecting: Bool) -> CanvasView {
-        let ctx = CGContext(data: nil, width: 400, height: 400, bitsPerComponent: 8, bytesPerRow: 0,
-                            space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
-        let canvas = CanvasView(image: ctx.makeImage()!, layers: [rect])
-        canvas.frame = NSRect(x: 0, y: 0, width: 400, height: 400)
-        canvas.tool = tool
-        if selecting { canvas.selectMostRecent() }
-        return canvas
+        TestCanvas.make(layers: [rect], tool: tool, selectingMostRecent: selecting)
     }
 
     func testACornerOfTheLiveElementResizesIt() {
@@ -47,15 +40,9 @@ final class LiveSelectionTests: XCTestCase {
     /// The redaction tools are the ones this model matters most for — a blur usually needs a
     /// nudge right after it is drawn.
     func testRedactionsAreLiveToo() {
-        let ctx = CGContext(data: nil, width: 400, height: 400, bitsPerComponent: 8, bytesPerRow: 0,
-                            space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
         let blur = Annotation(tool: .blur, points: [CGPoint(x: 40, y: 40), CGPoint(x: 140, y: 120)],
                               colorHex: "#000000", strokeWidth: 1)
-        let canvas = CanvasView(image: ctx.makeImage()!, layers: [blur])
-        canvas.frame = NSRect(x: 0, y: 0, width: 400, height: 400)
-        canvas.tool = .blur
-        canvas.selectMostRecent()
+        let canvas = TestCanvas.make(layers: [blur], tool: .blur, selectingMostRecent: true)
 
         XCTAssertEqual(canvas.pressTarget(at: CGPoint(x: 140, y: 120)), .resizeLive(1))
         XCTAssertEqual(canvas.pressTarget(at: CGPoint(x: 90, y: 80)), .moveLive, "inside the region")

@@ -7,14 +7,8 @@ import AppKit
 @MainActor
 final class ZoomTests: XCTestCase {
     private func makeCanvas(_ width: Int = 400, _ height: Int = 300) -> CanvasView {
-        let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
-                            space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
-        ctx.setFillColor(NSColor.gray.cgColor)
-        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
-        let canvas = CanvasView(image: ctx.makeImage()!, layers: [])
-        canvas.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
-        return canvas
+        TestCanvas.make(image: TestImages.blank(width, height),
+                        frame: NSSize(width: 800, height: 600))
     }
 
     func testStartsFittedAndClampsToFitAsTheFloor() {
