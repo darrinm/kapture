@@ -75,8 +75,15 @@ final class SettingsWindowController {
 struct SettingsView: View {
     enum Tab: Hashable { case general, overlay, recording, library, shortcuts, sharing }
 
-    /// Fixed, and tall enough for the longest pane (Shortcuts) without scrolling.
-    static let windowSize = NSSize(width: 520, height: 600)
+    /// Fixed. Wide enough that the six tab items fit the bar — below roughly 600 points AppKit
+    /// collapses them into a "navigation tab bar" overflow chevron, which hides the whole of
+    /// Settings behind a menu. The six labels measure ~554 points plus window margins.
+    /// Tall enough for the longest pane (Shortcuts) without scrolling.
+    static let windowSize = NSSize(width: 640, height: 600)
+
+    /// Measured: icon + label + padding across the six tabs, plus window margins. Narrower than
+    /// this and the tab bar becomes an overflow menu instead of a row of tabs.
+    static let minimumTabBarWidth: CGFloat = 594
 
     @ObservedObject var selection: SettingsSelection
 

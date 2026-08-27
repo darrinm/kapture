@@ -287,9 +287,17 @@ if let i = CommandLine.arguments.firstIndex(of: "--settings-shot"), CommandLine.
             }
             let expected = SettingsView.windowSize
             print("settings-probe: content \(content.frame.size), expected \(expected)")
-            let ok = content.frame.height >= expected.height - 60
+            let sized = content.frame.height >= expected.height - 60
                 && content.frame.width >= expected.width - 60
-            print(ok ? "settings-probe: ok" : "settings-probe: COLLAPSED")
+            if !sized { print("settings-probe: COLLAPSED") }
+            // too narrow and AppKit hides every tab behind an overflow chevron, which looks like
+            // a settings window with no tabs at all
+            let fitsTabs = content.frame.width >= SettingsView.minimumTabBarWidth
+            if !fitsTabs {
+                print("settings-probe: TABS OVERFLOW (needs \(SettingsView.minimumTabBarWidth))")
+            }
+            let ok = sized && fitsTabs
+            if ok { print("settings-probe: ok") }
             exit(ok ? 0 : 1)
         }
         app.run()
