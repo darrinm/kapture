@@ -285,6 +285,7 @@ final class EditorViewController: NSViewController {
     @objc private func toolTapped(_ sender: NSButton) {
         guard let raw = sender.identifier?.rawValue, let tool = Tool(rawValue: raw) else { return }
         canvas.commitPendingText()   // leaving the text tool commits the in-progress entry
+        if tool != canvas.tool, tool != .select { canvas.clearSelection() }
         canvas.tool = tool
         if tool == .select { canvas.selectMostRecent() }
         updateColorSelection()
@@ -311,7 +312,9 @@ final class EditorViewController: NSViewController {
     /// anything painted; width for stroked marks ("Size" for counters); text size for text;
     /// fill for rect/ellipse; nothing for crop (it has its on-canvas chips).
     private func updateOptionsBar() {
-        let selectedLayer = canvas.tool == .select ? canvas.selectedLayer : nil
+        // the live element owns the controls whatever tool is in hand — that is the point of
+        // not having to enter a select mode to adjust what you just drew
+        let selectedLayer = canvas.selectedLayer
         let effective = selectedLayer?.tool ?? canvas.tool
 
         var showColor = true, showWidth = false, showSize = false, showFill = false
@@ -386,12 +389,12 @@ final class EditorViewController: NSViewController {
     @objc private func widthChanged(_ sender: NSSlider) {
         let w = CGFloat(sender.doubleValue)
         let effective = (canvas.tool == .select ? canvas.selectedLayer?.tool : canvas.tool) ?? canvas.tool
+        // both setters update the default for the next element and apply to the live one if
+        // there is one, so the slider means the same thing either way
         if effective.isRedaction {
-            if !canvas.reintensifySelected(w, recordUndo: !sliderGestureActive) { canvas.intensity = w }
-        } else if canvas.tool == .select {
-            canvas.rewidthSelected(w, recordUndo: !sliderGestureActive)
+            canvas.reintensifySelected(w, recordUndo: !sliderGestureActive)
         } else {
-            canvas.strokeWidth = w
+            canvas.rewidthSelected(w, recordUndo: !sliderGestureActive)
         }
         // a gesture continues only through mouse tracking; keyboard changes are discrete
         // (each records its own undo) and must not leave the flag stuck on
@@ -570,6 +573,33 @@ final class CanvasView: NSView, NSTextFieldDelegate {
                        y: r.maxY - (q.y - vp.minY) * scale)
     }
 
+    /// Drop the live selection — picking a different tool is a statement of intent to draw
+    /// something new, not to keep nudging the last thing.
+    func clearSelection() {
+        guard selected != nil else { return }
+        selected = nil
+        needsDisplay = true
+        onSelectionChanged?()
+    }
+
+    /// What a press does under the live-selection model: whatever you just drew stays
+    /// manipulable with the same tool in hand — handles resize it, its body moves it — and a
+    /// press anywhere else begins the next element, which becomes live in its turn. The select
+    /// and crop tools keep their own dispatch, which already worked this way.
+    enum PressTarget: Equatable {
+        case resizeLive(Int)
+        case moveLive
+        case newElement
+    }
+
+    func pressTarget(at p: CGPoint) -> PressTarget {
+        guard tool != .select, tool != .crop, let sel = selected,
+              let live = layers.first(where: { $0.id == sel })
+        else { return .newElement }
+        if let h = handleIndex(of: live, at: p) { return .resizeLive(h) }
+        return live.hitTest(p) ? .moveLive : .newElement
+    }
+
     func selectMostRecent() {
         selected = layers.last(where: { !($0.tool == .crop && $0.applied == true) })?.id
         needsDisplay = true
@@ -704,6 +734,29 @@ final class CanvasView: NSView, NSTextFieldDelegate {
         if let a = chipApplyRect, a.contains(viewPoint) { applyCrop(); return }
         if let x = chipRemoveRect, x.contains(viewPoint) { removeCrop(); return }
         let p = toImage(viewPoint)
+
+        switch pressTarget(at: p) {
+        case .resizeLive(let h):
+            preGesture = layers          // snapshot; pushed only if the drag mutates
+            dragMode = .handle(h)
+            dragOrigin = p
+            needsDisplay = true
+            return
+        case .moveLive:
+            preGesture = layers
+            dragMode = .move
+            dragOrigin = p
+            needsDisplay = true
+            return
+        case .newElement:
+            // outside the live element: this press starts something new, so the old one stops
+            // being live
+            if selected != nil, tool != .select, tool != .crop {
+                selected = nil
+                onSelectionChanged?()
+            }
+        }
+
         switch tool {
         case .select:
             // double-click on a text layer re-opens it for editing
@@ -730,8 +783,11 @@ final class CanvasView: NSView, NSTextFieldDelegate {
         case .counter:
             pushUndo()
             let next = (layers.compactMap(\.number).max() ?? 0) + 1
-            layers.append(Annotation(tool: .counter, points: [p], colorHex: colorHex,
-                                     strokeWidth: strokeWidth, number: next))
+            let counter = Annotation(tool: .counter, points: [p], colorHex: colorHex,
+                                     strokeWidth: strokeWidth, number: next)
+            layers.append(counter)
+            selected = counter.id
+            onSelectionChanged?()
         case .crop:
             // With a crop already placed, dragging its handles resizes and dragging its inside
             // moves it; a drag outside starts a replacement crop.
@@ -896,6 +952,10 @@ final class CanvasView: NSView, NSTextFieldDelegate {
                 pushUndo()
                 if d.tool == .crop { layers.removeAll { $0.tool == .crop } }   // one crop at a time
                 layers.append(d)
+                if d.tool != .crop {
+                    selected = d.id       // finished: now live, no mode switch needed
+                    onSelectionChanged?()
+                }
             }
             draft = nil
         }
@@ -1047,8 +1107,11 @@ final class CanvasView: NSView, NSTextFieldDelegate {
         guard let s = dismissTextField(), let pos = s.pos else { return }
         if !s.value.isEmpty {
             pushUndo()
-            layers.append(Annotation(tool: .text, points: [pos], colorHex: colorHex,
-                                     strokeWidth: strokeWidth, text: s.value, fontSize: s.fontSize))
+            let text = Annotation(tool: .text, points: [pos], colorHex: colorHex,
+                                  strokeWidth: strokeWidth, text: s.value, fontSize: s.fontSize)
+            layers.append(text)
+            selected = text.id      // finished text is live like anything else you just drew
+            onSelectionChanged?()
         } else if s.wasEditingExisting {
             undo()   // blanked out an existing layer's text — treat as cancel, restore it
         }
