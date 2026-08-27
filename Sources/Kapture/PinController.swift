@@ -182,8 +182,7 @@ final class PinView: NSImageView {
     }
     @objc func lockTapped() { panel.toggleLock() }
     @objc func copyTapped() {
-        NSPasteboard.general.clearContents()
-        if let img = image { NSPasteboard.general.writeObjects([img]) }
+        Clipboard.write(url: panel.fileURL, image: image)
     }
     @objc func closeTapped() { panel.closePin() }
 }

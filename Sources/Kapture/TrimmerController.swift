@@ -24,7 +24,7 @@ final class TrimmerController {
               let record = try? library.db.queue.read({ try CaptureRecord.fetchOne($0, key: recordID) }),
               record.canTrim else { return }
         if let existing = open[recordID] { existing.window.makeKeyAndOrderFront(nil); return }
-        let url = library.root.appendingPathComponent(record.relPath)
+        let url = library.url(for: record)
 
         let playerView = AVPlayerView()
         playerView.player = AVPlayer(url: url)

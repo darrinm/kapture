@@ -5,6 +5,9 @@ public enum Tokens {
     // MARK: Color
     public static let accent = NSColor(srgbRed: 0.78, green: 0.26, blue: 0.23, alpha: 1)  // record red #C7423A
     public static let overlayScrim = NSColor.black.withAlphaComponent(0.38)
+    /// Backing for the floating bottom-center pills (the toast, the keystroke HUD). One value:
+    /// they can appear one above the other, and two near-identical blacks read as a mistake.
+    public static let pillScrim = NSColor.black.withAlphaComponent(0.72)
 
     // MARK: Duration
     /// m:ss for every duration Kapture shows (live recording timer, overlay card pill).
@@ -19,6 +22,8 @@ public enum Tokens {
     public static let cornerMargin: CGFloat = 16
     public static let stackGap: CGFloat = 8
     public static let radiusOverlay: CGFloat = 10
+    /// How far a bottom-center pill sits above the bottom of the screen.
+    public static let pillBottomInset: CGFloat = 90
 
     // MARK: Aspect math
     /// Rect that fits `imageSize` inside `bounds` preserving aspect ratio (letterboxed, centered).

@@ -183,7 +183,8 @@ final class KeystrokeWindow: NSPanel {
 
     init() {
         let screen = NSScreen.main?.frame ?? .zero
-        super.init(contentRect: NSRect(x: screen.midX - 220, y: screen.minY + 90, width: 440, height: 52),
+        super.init(contentRect: NSRect(x: screen.midX - 220, y: screen.minY + Tokens.pillBottomInset,
+                                       width: 440, height: 52),
                    styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         isOpaque = false
         backgroundColor = .clear
@@ -192,8 +193,8 @@ final class KeystrokeWindow: NSPanel {
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         let container = NSView()
         container.wantsLayer = true
-        container.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.72).cgColor
-        container.layer?.cornerRadius = 12
+        container.layer?.backgroundColor = Tokens.pillScrim.cgColor
+        container.layer?.cornerRadius = Tokens.radiusOverlay
         label.font = .monospacedSystemFont(ofSize: 22, weight: .semibold)
         label.textColor = .white
         label.alignment = .center
@@ -224,7 +225,8 @@ final class KeystrokeWindow: NSPanel {
         // size to content, keep centered on the main screen
         let width = max(120, label.intrinsicContentSize.width + 48)
         if let screen = NSScreen.main {
-            setFrame(NSRect(x: screen.frame.midX - width / 2, y: screen.frame.minY + 90,
+            setFrame(NSRect(x: screen.frame.midX - width / 2,
+                            y: screen.frame.minY + Tokens.pillBottomInset,
                             width: width, height: 52), display: true)
         }
         alphaValue = 1

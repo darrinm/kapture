@@ -81,6 +81,11 @@ struct SettingsView: View {
     // committed, so an untouched field can't wipe a key that's already there.
     @State private var anthropicKey = ""
     @State private var hasStoredKey = Keychain.anthropicKey?.isEmpty == false
+    // A Keychain write is a SecItemDelete + SecItemAdd pair of blocking XPC calls, so it can't
+    // ride every keystroke — an `sk-ant-…` key is ~100 of them. Debounce, and flush on the way
+    // out so a key typed and immediately dismissed still lands.
+    @State private var keyCommit: Task<Void, Never>?
+    @State private var keyEdited = false
 
     var body: some View {
         TabView {
@@ -166,8 +171,14 @@ struct SettingsView: View {
                 // commit as typed: onSubmit alone lost the key whenever the user clicked away
                 // or closed the window instead of pressing Return
                 .onChange(of: anthropicKey) { _, v in
-                    Keychain.anthropicKey = v.isEmpty ? nil : v
                     hasStoredKey = !v.isEmpty
+                    keyEdited = true
+                    keyCommit?.cancel()
+                    keyCommit = Task { @MainActor in
+                        try? await Task.sleep(for: .milliseconds(600))
+                        guard !Task.isCancelled else { return }
+                        commitKey()
+                    }
                 }
             Text(!hasStoredKey
                  ? "Without a key, names come from an on-device heuristic that is rough — it often "
@@ -185,6 +196,17 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .padding(.top, 4)
+        .onDisappear {
+            keyCommit?.cancel()
+            commitKey()
+        }
+    }
+
+    /// Write the typed key to the Keychain. Never runs for an untouched field: the field starts
+    /// empty by design, so committing "" without an edit would wipe a key that is already there.
+    private func commitKey() {
+        guard keyEdited else { return }
+        Keychain.anthropicKey = anthropicKey.isEmpty ? nil : anthropicKey
     }
 
     var recording: some View {

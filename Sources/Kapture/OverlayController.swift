@@ -73,7 +73,7 @@ final class OverlayController {
         guard let library,
               let record = try? library.db.queue.read({ try CaptureRecord.fetchOne($0, key: recordID) }),
               record.status != .trashed else { return }
-        let url = library.root.appendingPathComponent(record.relPath)
+        let url = library.url(for: record)
         // decoding the flattened PNG is slow for big captures — keep it off the main actor
         Task.detached(priority: .userInitiated) {
             guard let image = OverlayController.poster(for: url) else { return }
@@ -296,8 +296,7 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
     }
 
     func copyToClipboard() {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.writeObjects([fileURL as NSURL, NSImage(cgImage: image, size: .zero)])
+        Clipboard.write(url: fileURL, image: NSImage(cgImage: image, size: .zero))
         keepAndClose()
     }
 

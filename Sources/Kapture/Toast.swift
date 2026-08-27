@@ -20,7 +20,8 @@ enum Toast {
 
         let width = min(max(label.intrinsicContentSize.width + 40, 160), 520)
         let screen = NSScreen.main?.visibleFrame ?? .zero
-        let frame = NSRect(x: screen.midX - width / 2, y: screen.minY + 120, width: width, height: 44)
+        let frame = NSRect(x: screen.midX - width / 2, y: screen.minY + Tokens.pillBottomInset,
+                           width: width, height: 44)
 
         let p = panel ?? {
             let p = NSPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel],
@@ -35,8 +36,8 @@ enum Toast {
         }()
         let container = NSView(frame: NSRect(origin: .zero, size: frame.size))
         container.wantsLayer = true
-        container.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.78).cgColor
-        container.layer?.cornerRadius = 10
+        container.layer?.backgroundColor = Tokens.pillScrim.cgColor
+        container.layer?.cornerRadius = Tokens.radiusOverlay
         container.addSubview(label)
         label.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
@@ -55,9 +56,11 @@ enum Toast {
         dismiss?.cancel()
         dismiss = Task { @MainActor in
             try? await Task.sleep(for: .seconds(2))
-            guard !Task.isCancelled, gen == generation else { return }
+            guard !Task.isCancelled else { return }
             Tokens.animate(0.25, { p.animator().alphaValue = 0 }) {
-                guard gen == generation else { return }   // a newer message took the panel over
+                // the only check that earns its keep: the completion runs outside the task, so
+                // cancelling doesn't stop it — a newer message may already own the panel
+                guard gen == generation else { return }
                 p.orderOut(nil)
             }
         }

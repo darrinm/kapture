@@ -7,6 +7,7 @@ import Quartz
 import KaptureCore
 import KaptureEditor
 import KaptureDesign
+import KaptureIntelligence
 
 @MainActor
 final class LibraryWindowController: NSObject, NSWindowDelegate {
@@ -60,6 +61,7 @@ final class LibraryContentView: NSView, NSSearchFieldDelegate {
     private let dateFilter = NSPopUpButton(frame: .zero, pullsDown: false)
     private let countLabel = NSTextField(labelWithString: "")
     private let emptyLabel = NSTextField(labelWithString: "")
+    private var searchDebounce: Task<Void, Never>?
 
     init(library: Library) {
         self.library = library
@@ -90,14 +92,13 @@ final class LibraryContentView: NSView, NSSearchFieldDelegate {
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = false
         scroll.documentView = grid
-        grid.onCountChanged = { [weak self] count, query, filtered in
-            self?.countLabel.stringValue = count == 1 ? "1 capture" : "\(count) captures"
-            self?.emptyLabel.isHidden = count > 0
-            // "nothing here yet" is only true with nothing narrowing the view — a full library
-            // hidden behind an app or date filter needs a different answer
-            self?.emptyLabel.stringValue = !query.isEmpty ? "No captures match “\(query)”."
-                : filtered ? "No captures match these filters."
-                : "Nothing here yet — press ⌘⇧4 to take a capture."
+        // the grid reports how many rows it drew; what that means is this view's business —
+        // it owns the search field and both filter popups
+        grid.onCountChanged = { [weak self] count in
+            guard let self else { return }
+            countLabel.stringValue = count == 1 ? "1 capture" : "\(count) captures"
+            emptyLabel.isHidden = count > 0
+            emptyLabel.stringValue = emptyMessage
         }
 
         appFilter.target = self
@@ -141,6 +142,17 @@ final class LibraryContentView: NSView, NSSearchFieldDelegate {
     required init?(coder: NSCoder) { fatalError() }
 
     func focusSearch() { window?.makeFirstResponder(searchField) }
+
+    /// Why the grid is empty. "Nothing here yet" is only true with nothing narrowing the view —
+    /// a full library hidden behind a search term or a filter needs a different answer.
+    private var emptyMessage: String {
+        let query = searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !query.isEmpty { return "No captures match “\(query)”." }
+        if appFilter.indexOfSelectedItem > 0 || dateFilter.indexOfSelectedItem > 0 {
+            return "No captures match these filters."
+        }
+        return "Nothing here yet — press ⌘⇧4 to take a capture."
+    }
 
     /// Re-read the library: the grid's contents and the source-app menu, which otherwise keeps
     /// the app list from whenever the window was first opened.
@@ -186,10 +198,27 @@ final class LibraryContentView: NSView, NSSearchFieldDelegate {
         grid.reload()
     }
 
+    /// Typing is the one input that arrives faster than a query can answer it: without this,
+    /// every keystroke ran a full FTS query and a thumbnail pass. Filter and scope changes are
+    /// single deliberate clicks and stay immediate.
     func controlTextDidChange(_ obj: Notification) {
-        grid.query = searchField.stringValue
-        grid.reload()
+        let text = searchField.stringValue
+        searchDebounce?.cancel()
+        searchDebounce = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(150))
+            guard !Task.isCancelled, let self else { return }
+            grid.query = text
+            grid.reload()
+        }
     }
+}
+
+/// One thumbnail, off the main thread. Free-standing so the generating task never has to touch
+/// the (main-actor) grid view.
+private func generateThumbnail(_ url: URL, size: CGSize, scale: CGFloat) async -> CGImage? {
+    let request = QLThumbnailGenerator.Request(fileAt: url, size: size, scale: scale,
+                                               representationTypes: .thumbnail)
+    return try? await QLThumbnailGenerator.shared.generateBestRepresentation(for: request).cgImage
 }
 
 /// Justified rows of thumbnails: no chrome per item, metadata on hover only.
@@ -199,19 +228,44 @@ final class LibraryGridView: NSView {
         var frame: CGRect = .zero
         var thumb: CGImage?
     }
+    /// NSCache holds class instances only, so a generated thumbnail rides in a box.
+    private final class ThumbBox {
+        let image: CGImage
+        init(_ image: CGImage) { self.image = image }
+    }
+
     let library: Library
     var query = ""
     var scope: Library.SearchScope = .all
     var app: String?
     var range: Library.DateRange = .any
-    var onCountChanged: ((Int, String, Bool) -> Void)?
+    var onCountChanged: ((Int) -> Void)?
 
     private var items: [Item] = []
     private var hovered: Int?
     private var selected: String?
     private let rowHeight: CGFloat = 168
     private let gutter: CGFloat = 4
-    private var loadGeneration = 0
+    /// QuickLook is happy to work in parallel; four at a time fills a screen fast without
+    /// starving the rest of the machine.
+    private let thumbsInFlight = 4
+    private var reloadTask: Task<Void, Never>?
+    private var thumbTask: Task<Void, Never>?
+    private var scrollSettle: Task<Void, Never>?
+
+    /// Generated thumbnails, keyed so an entry self-invalidates: fastID changes on every edit
+    /// and trim, so an edited capture can never redraw from stale pixels. Shared across reloads,
+    /// which is the point — a keystroke, a filter change or a discard must not regenerate what
+    /// is already in memory. Bounded, and NSCache drops entries under memory pressure too.
+    private static let thumbCache: NSCache<NSString, ThumbBox> = {
+        let cache = NSCache<NSString, ThumbBox>()
+        cache.countLimit = 600
+        return cache
+    }()
+
+    private static func thumbKey(_ record: CaptureRecord) -> String {
+        "\(record.id):\(record.fastID)"
+    }
 
     init(library: Library) {
         self.library = library
@@ -223,25 +277,66 @@ final class LibraryGridView: NSView {
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
 
+    override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+        guard let clip = enclosingScrollView?.contentView else { return }
+        clip.postsBoundsChangedNotifications = true
+        NotificationCenter.default.removeObserver(self, name: NSView.boundsDidChangeNotification,
+                                                  object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(visibleAreaChanged),
+                                               name: NSView.boundsDidChangeNotification, object: clip)
+    }
+
+    /// Scrolling brings new rows into view; generate those next. Coalesced so a flick doesn't
+    /// restart the pass on every frame, and nearly free when the cache already has them.
+    @objc private func visibleAreaChanged() {
+        scrollSettle?.cancel()
+        scrollSettle = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(120))
+            guard !Task.isCancelled else { return }
+            self?.loadThumbnails()
+        }
+    }
+
+    /// Re-run the query. The search itself goes off the main thread — the app has one
+    /// serialized DB connection, so it can queue behind an ingest write — and a pass superseded
+    /// by the next keystroke is cancelled before it can apply.
     func reload() {
-        let records = library.search(query, scope: scope, app: app, range: range)
-        items = records.map { Item(record: $0) }
+        let (q, s, a, r) = (query, scope, app, range)
+        reloadTask?.cancel()
+        thumbTask?.cancel()
+        reloadTask = Task { [weak self] in
+            guard let self else { return }
+            let records = await library.searchAsync(q, scope: s, app: a, range: r)
+            guard !Task.isCancelled else { return }
+            apply(records)
+        }
+    }
+
+    private func apply(_ records: [CaptureRecord]) {
+        items = records.map { record in
+            Item(record: record,
+                 thumb: Self.thumbCache.object(forKey: Self.thumbKey(record) as NSString)?.image)
+        }
         hovered = nil
-        onCountChanged?(items.count, query, app != nil || range != .any)
-        layoutItems()
+        onCountChanged?(items.count)
+        relayout()
         loadThumbnails()
     }
 
     // MARK: layout — justified rows, aspect preserved, tight uniform gutters
-    private func layoutItems() {
-        let width = max(320, bounds.width)
-        var x: CGFloat = gutter, y: CGFloat = gutter
-        var row: [Int] = []
 
-        func flush(_ stretch: Bool) {
+    /// Lay the rows out and return the height they need. It doesn't resize the view itself:
+    /// setFrameSize calls back into layout, and the two used to bounce off each other until a
+    /// half-point epsilon happened to stop them.
+    private func layoutItems() -> CGFloat {
+        let width = max(320, bounds.width)
+        var y: CGFloat = gutter
+        var row: [Int] = []
+        var natural: CGFloat = 0   // the row's items at their unstretched widths
+
+        func flush(scale: CGFloat) {
             guard !row.isEmpty else { return }
-            let totalGut = CGFloat(row.count + 1) * gutter
-            let scale = stretch ? (width - totalGut) / (x - gutter * CGFloat(row.count + 1)) : 1
             var cursor = gutter
             for i in row {
                 let w = items[i].frame.width * scale
@@ -250,50 +345,87 @@ final class LibraryGridView: NSView {
             }
             y += rowHeight * scale + gutter
             row = []
-            x = gutter
+            natural = 0
         }
 
         for i in items.indices {
             let r = items[i].record
             let aspect = r.height > 0 ? CGFloat(r.width) / CGFloat(r.height) : 1.6
             let w = min(max(rowHeight * aspect, 60), width - gutter * 2)
-            if x + w + gutter > width, !row.isEmpty { flush(true) }
-            items[i].frame = CGRect(x: x, y: y, width: w, height: rowHeight)
+            // gutters for the row this item would join: one on each side plus one per item
+            if natural + w + CGFloat(row.count + 2) * gutter > width, !row.isEmpty {
+                flush(scale: (width - CGFloat(row.count + 1) * gutter) / natural)
+            }
+            items[i].frame = CGRect(x: 0, y: y, width: w, height: rowHeight)
             row.append(i)
-            x += w + gutter
+            natural += w
         }
-        flush(false)   // last row keeps natural size
-        setFrameSize(NSSize(width: width, height: max(y + gutter, 200)))
+        flush(scale: 1)   // last row keeps natural size
+        return max(y + gutter, 200)
+    }
+
+    private func relayout() {
+        let height = layoutItems()
+        let width = max(320, bounds.width)   // the width layoutItems just justified against
+        if abs(height - frame.height) > 0.5 || abs(width - frame.width) > 0.5 {
+            // super, not self: the override below would re-enter layout
+            super.setFrameSize(NSSize(width: width, height: height))
+        }
         needsDisplay = true
     }
 
     override func setFrameSize(_ newSize: NSSize) {
         let widthChanged = abs(newSize.width - frame.width) > 0.5
         super.setFrameSize(newSize)
-        if widthChanged { layoutItems() }
+        if widthChanged { relayout() }
     }
 
     // MARK: thumbnails — QuickLook handles stills, movies and GIFs alike
     private func loadThumbnails() {
-        loadGeneration += 1
-        let generation = loadGeneration
-        let urls = items.map { library.url(for: $0.record) }
+        let visible = enclosingScrollView?.documentVisibleRect ?? bounds
+        let pending = items.indices.filter { items[$0].thumb == nil }
+        // what the reader is looking at first, the rest trailing behind it
+        let order = pending.filter { items[$0].frame.intersects(visible) }
+            + pending.filter { !items[$0].frame.intersects(visible) }
+        guard !order.isEmpty else { return }   // nothing missing: leave any running pass alone
+        thumbTask?.cancel()
+
+        let jobs = order.map { (index: $0, key: Self.thumbKey(items[$0].record),
+                                url: library.url(for: items[$0].record)) }
         let size = CGSize(width: 480, height: 480)
         let scale = window?.backingScaleFactor ?? 2
-        Task.detached(priority: .userInitiated) {
-            for (i, url) in urls.enumerated() {
-                let request = QLThumbnailGenerator.Request(fileAt: url, size: size, scale: scale,
-                                                           representationTypes: .thumbnail)
-                guard let rep = try? await QLThumbnailGenerator.shared.generateBestRepresentation(for: request)
-                else { continue }
-                let cg = rep.cgImage
-                await MainActor.run {
-                    guard generation == self.loadGeneration, i < self.items.count else { return }
-                    self.items[i].thumb = cg
-                    self.setNeedsDisplay(self.items[i].frame)
+        let limit = thumbsInFlight
+        thumbTask = Task.detached(priority: .userInitiated) { [weak self] in
+            let view = self   // immutable: the nested group closure can't capture the weak var
+            await withTaskGroup(of: (index: Int, key: String, image: CGImage?).self) { group in
+                var next = 0
+                func start() {
+                    guard next < jobs.count else { return }
+                    let job = jobs[next]
+                    next += 1
+                    group.addTask {
+                        (job.index, job.key, await generateThumbnail(job.url, size: size, scale: scale))
+                    }
+                }
+                for _ in 0..<limit { start() }
+                while let done = await group.next() {
+                    // top of the iteration: a superseded pass stops here rather than running on
+                    if Task.isCancelled { group.cancelAll(); break }
+                    if let image = done.image {
+                        await MainActor.run { view?.applyThumbnail(image, at: done.index, key: done.key) }
+                    }
+                    start()
                 }
             }
         }
+    }
+
+    private func applyThumbnail(_ image: CGImage, at index: Int, key: String) {
+        Self.thumbCache.setObject(ThumbBox(image), forKey: key as NSString)
+        // the row at that index may have been replaced between the generate and this hop
+        guard index < items.count, Self.thumbKey(items[index].record) == key else { return }
+        items[index].thumb = image
+        setNeedsDisplay(items[index].frame)
     }
 
     // MARK: hit testing + interaction
@@ -390,19 +522,22 @@ final class LibraryGridView: NSView {
     @objc private func openSelected() { if let r = selectedRecord { open(r) } }
     @objc private func copySelected() {
         guard let r = selectedRecord else { return }
-        let url = library.url(for: r)
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.writeObjects([url as NSURL])
-        if let img = NSImage(contentsOf: url) { NSPasteboard.general.writeObjects([img]) }
+        Clipboard.write(url: library.url(for: r))
     }
     @objc private func revealSelected() {
         guard let r = selectedRecord else { return }
         NSWorkspace.shared.activateFileViewerSelecting([library.url(for: r)])
     }
     @objc private func discardSelected() { if let r = selectedRecord { discard(r) } }
+    /// Restore *this* capture. Restoring "the last discarded" from a right-click on a specific
+    /// trashed item put a different file back.
     @objc private func restoreSelected() {
-        guard selectedRecord != nil else { return }
-        _ = try? library.restoreLastDiscarded()
+        guard let record = selectedRecord,
+              let restored = try? library.restore(id: record.id) else { return }
+        // discard cancelled its ingest job; an unnamed capture needs another pass
+        if restored.aiState.acceptsName {
+            Task { await IngestQueue.shared.enqueue(restored.id, after: 0) }
+        }
         reload()
     }
 

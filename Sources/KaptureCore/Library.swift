@@ -33,15 +33,6 @@ public final class Library: @unchecked Sendable {
         f.dateFormat = "yyyy/MM"
         return f
     }()
-    /// Matches GRDB's own Date encoding, for date comparisons in raw SQL.
-    static let sqlDateFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = TimeZone(secondsFromGMT: 0)
-        return f
-    }()
-
     private static let timestampFormatter: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
@@ -53,10 +44,6 @@ public final class Library: @unchecked Sendable {
         let dir = root.appendingPathComponent(Library.shardFormatter.string(from: date), isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
-    }
-
-    public static func timestampName(_ date: Date = Date()) -> String {
-        templatedName(kind: "capture", at: date)
     }
 
     /// Date parts a filename template can name; anything else after `%` stays literal.
@@ -113,6 +100,11 @@ public final class Library: @unchecked Sendable {
     /// Path of `url` relative to the library root — the one place that owns this string surgery.
     func rel(_ url: URL) -> String {
         url.path.replacingOccurrences(of: root.path + "/", with: "")
+    }
+
+    /// Absolute URL for a capture's file — `rel(_:)` run backwards.
+    public func url(for record: CaptureRecord) -> URL {
+        root.appendingPathComponent(record.relPath)
     }
 
     public static func fastID(of url: URL) -> String {
@@ -182,7 +174,8 @@ public final class Library: @unchecked Sendable {
                          sourceApp: String?, windowTitle: String?, screenID: Int?) throws -> (CaptureRecord, URL) {
         let now = Date()
         let dir = try shardDir(for: now)
-        let url = Library.uniqueURL(in: dir, base: Library.timestampName(now), ext: "png")
+        let url = Library.uniqueURL(in: dir, base: Library.templatedName(kind: "capture", at: now),
+                                    ext: "png")
         let id = ULID.generate(now: now)
         let relPath = rel(url)
 
@@ -230,7 +223,7 @@ public final class Library: @unchecked Sendable {
     public func applyTrim(_ id: String, trimmedURL: URL, duration: Double) throws {
         guard let record = try db.queue.read({ try CaptureRecord.fetchOne($0, key: id) }) else { return }
         let fm = FileManager.default
-        let fileURL = root.appendingPathComponent(record.relPath)
+        let fileURL = url(for: record)
         let trimmedBytes = Library.byteSize(of: trimmedURL)
         let bytes = trimmedBytes > 0 ? trimmedBytes : record.bytes
 
@@ -261,7 +254,7 @@ public final class Library: @unchecked Sendable {
     public func applyEdit(_ id: String, flattenedPNG: Data, layersJSON: String,
                           width: Int, height: Int) throws {
         guard let record = try db.queue.read({ try CaptureRecord.fetchOne($0, key: id) }) else { return }
-        let fileURL = root.appendingPathComponent(record.relPath)
+        let fileURL = url(for: record)
 
         _ = try OpJournal.run(db, op: "flatten", captureId: id, src: record.relPath, dst: record.relPath,
             fileOp: {
@@ -284,7 +277,7 @@ public final class Library: @unchecked Sendable {
 
     /// The image the editor should open: pristine original if one exists, else the file itself.
     public func editBase(for record: CaptureRecord) -> (image: URL, layersJSON: String?) {
-        let fileURL = root.appendingPathComponent(record.relPath)
+        let fileURL = url(for: record)
         guard let ann = Sidecar.read(for: fileURL)?.annotations else { return (fileURL, nil) }
         let orig = root.appendingPathComponent(ann.original)
         return (FileManager.default.fileExists(atPath: orig.path) ? orig : fileURL, ann.layersJSON)
@@ -317,7 +310,7 @@ public final class Library: @unchecked Sendable {
     /// Discard: journal → move file (+sidecar) into .trash/ + write tombstone → status=trashed.
     public func discard(_ record: CaptureRecord) throws {
         let fm = FileManager.default
-        let src = root.appendingPathComponent(record.relPath)
+        let src = url(for: record)
         let trashShard = trashDir.appendingPathComponent((record.relPath as NSString).deletingLastPathComponent,
                                                          isDirectory: true)
         try fm.createDirectory(at: trashShard, withIntermediateDirectories: true)
@@ -341,13 +334,24 @@ public final class Library: @unchecked Sendable {
         Log.store.info("discarded \(record.relPath, privacy: .public)")
     }
 
-    /// Restore the most recently discarded capture. Status flips first (fails if sweeping),
-    /// then the file moves back; returns the restored record.
+    /// Restore the most recently discarded capture — the menu bar's "Restore Last Discarded".
     @discardableResult
     public func restoreLastDiscarded() throws -> CaptureRecord? {
-        guard let record = try db.queue.read({ d in
-            try CaptureRecord.fetchOne(d, sql: "SELECT * FROM captures WHERE status = 'trashed' ORDER BY trashedAt DESC LIMIT 1")
+        guard let id = try db.queue.read({ d in
+            try String.fetchOne(d, sql: """
+                SELECT id FROM captures WHERE status = 'trashed' ORDER BY trashedAt DESC LIMIT 1
+                """)
         }) else { return nil }
+        return try restore(id: id)
+    }
+
+    /// Restore one specific trashed capture. Status flips first (a sweeping row refuses), then
+    /// the file moves back under the journal; returns the restored record, or nil when the id
+    /// isn't a trashed capture any more.
+    @discardableResult
+    public func restore(id: String) throws -> CaptureRecord? {
+        guard let record = try db.queue.read({ try CaptureRecord.fetchOne($0, key: id) }),
+              record.status == .trashed else { return nil }
 
         let fm = FileManager.default
         let tombURL = tombstoneURL(record.id)
@@ -370,7 +374,7 @@ public final class Library: @unchecked Sendable {
             let base = dst.deletingPathExtension().lastPathComponent
             dst = dst.deletingLastPathComponent().appendingPathComponent("\(base)-restored.png")
         }
-        let src = root.appendingPathComponent(record.relPath)
+        let src = url(for: record)
         let dstRel = rel(dst)
         do {
             _ = try OpJournal.run(db, op: "restore", captureId: record.id, src: record.relPath, dst: dstRel,
@@ -412,7 +416,7 @@ public final class Library: @unchecked Sendable {
                 return true
             }) ?? false
             guard marked else { continue }
-            let file = root.appendingPathComponent(record.relPath)
+            let file = url(for: record)
             try? fm.removeItem(at: file)
             try? fm.removeItem(at: Sidecar.url(for: file))
             try? fm.removeItem(at: tombstoneURL(record.id))

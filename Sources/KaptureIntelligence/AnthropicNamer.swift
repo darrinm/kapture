@@ -2,24 +2,20 @@
 // Claude with the user's own key. Opt-in and off unless a key is set — image content leaves the
 // Mac only on this path (spec §8). The key lives in the Keychain, never in UserDefaults.
 import Foundation
-import CoreGraphics
-import ImageIO
-import UniformTypeIdentifiers
 import KaptureCore
 
 public enum AnthropicNamer {
     public static let model = "claude-haiku-4-5"
     private static let endpoint = URL(string: "https://api.anthropic.com/v1/messages")!
-    private static let maxEdge: CGFloat = 1024   // downscaled: naming needs layout, not pixels
 
     public struct Failure: Error, CustomStringConvertible {
         public let description: String
     }
 
-    public static func name(image: CGImage, ocr: String, app: String?, windowTitle: String?,
+    /// Takes already-encoded JPEG bytes, never a CGImage: the caller encodes on a background
+    /// task and lets the full-size image go, so only ~100 KB is alive across the network await.
+    public static func name(jpeg: Data, ocr: String, app: String?, windowTitle: String?,
                             kind: CaptureKind, key: String) async throws -> CaptureNaming {
-        guard let jpeg = downscaledJPEG(image) else { throw Failure(description: "encode failed") }
-
         var context = ""
         if let app { context += "Source app bundle id: \(app)\n" }
         if let windowTitle, !windowTitle.isEmpty { context += "Window title: \(windowTitle)\n" }
@@ -85,37 +81,11 @@ public enum AnthropicNamer {
               let rawName = obj["filename"] as? String
         else { throw Failure(description: "no JSON object in reply") }
 
-        let filename = sanitize(rawName)
+        let filename = NamingService.sanitize(rawName)
         guard filename.count >= 3 else { throw Failure(description: "empty filename") }
-        let tags = ((obj["tags"] as? [String]) ?? []).map { sanitize($0) }.filter { !$0.isEmpty }
+        let tags = ((obj["tags"] as? [String]) ?? [])
+            .map { NamingService.sanitize($0) }.filter { !$0.isEmpty }
         let summary = (obj["summary"] as? String ?? "").prefix(140).trimmingCharacters(in: .whitespaces)
         return CaptureNaming(filename: filename, tags: Array(tags.prefix(4)), summary: summary)
-    }
-
-    /// kebab-case, filesystem-safe, capped — the model's output is never trusted as a path.
-    static func sanitize(_ raw: String) -> String {
-        var out = raw.lowercased()
-            .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
-            .joined(separator: "-")
-        if out.count > 48 { out = String(out.prefix(48)) }
-        while out.hasSuffix("-") { out.removeLast() }
-        return out
-    }
-
-    private static func downscaledJPEG(_ image: CGImage) -> Data? {
-        let scale = min(1, maxEdge / CGFloat(max(image.width, image.height)))
-        let w = Int(CGFloat(image.width) * scale), h = Int(CGFloat(image.height) * scale)
-        guard let ctx = CGContext(data: nil, width: max(w, 1), height: max(h, 1), bitsPerComponent: 8,
-                                  bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                                  bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return nil }
-        ctx.interpolationQuality = .high
-        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
-        guard let scaled = ctx.makeImage() else { return nil }
-        let data = NSMutableData()
-        guard let dest = CGImageDestinationCreateWithData(data, UTType.jpeg.identifier as CFString, 1, nil)
-        else { return nil }
-        CGImageDestinationAddImage(dest, scaled, [kCGImageDestinationLossyCompressionQuality: 0.7] as CFDictionary)
-        guard CGImageDestinationFinalize(dest) else { return nil }
-        return data as Data
     }
 }

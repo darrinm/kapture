@@ -12,6 +12,24 @@ public enum CaptureStatus: String, Codable, Sendable {
 public struct CaptureRecord: Codable, Sendable, FetchableRecord, PersistableRecord {
     public static let databaseTableName = "captures"
 
+    /// How far the intelligence pipeline has taken this capture. Stored as the same text the
+    /// column has always held, so no migration: "none", "ocr", "named:local", "named:api".
+    public enum AIState: String, Codable, Sendable {
+        case none, ocr
+        case namedLocal = "named:local"
+        case namedAPI = "named:api"
+
+        /// Lenient: a value written by a newer build (or a hand-edited row) degrades to `.none`
+        /// rather than failing the whole row fetch and making the capture vanish from the grid.
+        public init(from decoder: any Decoder) throws {
+            let raw = try decoder.singleValueContainer().decode(String.self)
+            self = AIState(rawValue: raw) ?? .none
+        }
+
+        /// True while naming may still overwrite the file name — a manual rename pins the row.
+        public var acceptsName: Bool { self == .none || self == .ocr }
+    }
+
     public var id: String            // ULID
     public var kind: CaptureKind
     public var status: CaptureStatus
@@ -26,7 +44,7 @@ public struct CaptureRecord: Codable, Sendable, FetchableRecord, PersistableReco
     public var screenID: Int?
     public var fastID: String        // "size:mtimeNs:inode" — primary identity (spec §2.2 F11)
     public var contentHash: String?  // lazy SHA-256
-    public var aiState: String
+    public var aiState: AIState
     public var summary: String?
     public var shareURL: String?
     public var shareStale: Bool
@@ -40,7 +58,7 @@ public struct CaptureRecord: Codable, Sendable, FetchableRecord, PersistableReco
         self.trashedAt = nil; self.width = width; self.height = height; self.bytes = bytes
         self.relPath = relPath; self.sourceApp = sourceApp; self.windowTitle = windowTitle
         self.screenID = screenID; self.fastID = fastID; self.contentHash = nil
-        self.aiState = "none"; self.summary = nil; self.shareURL = nil; self.shareStale = false
+        self.aiState = .none; self.summary = nil; self.shareURL = nil; self.shareStale = false
         self.durationS = nil
     }
 

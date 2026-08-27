@@ -72,115 +72,68 @@ extension Library {
         }
     }
 
+    /// One query in two shapes: SQL text plus its bound arguments. Only the scope's literal
+    /// status/kind sets are interpolated (fixed strings this file owns); everything derived from
+    /// user input — the app id, the date cutoff, the FTS pattern — is bound as `?`.
+    private struct SearchQuery {
+        let sql: String
+        let arguments: StatementArguments
+    }
+
+    private func searchQuery(_ query: String, scope: SearchScope, app: String?,
+                             range: DateRange, limit: Int) -> SearchQuery {
+        var clauses = [scope == .trash ? "c.status = 'trashed'" : "c.status IN ('staged', 'kept')"]
+        var args: [(any DatabaseValueConvertible)?] = []
+        switch scope {
+        case .screenshots: clauses.append("c.kind IN ('screenshot', 'gif')")
+        case .recordings: clauses.append("c.kind = 'recording'")
+        case .all, .trash: break
+        }
+        if let app {
+            clauses.append("c.sourceApp = ?")
+            args.append(app)
+        }
+        // bound as a Date: GRDB encodes it the same way it stored the column, so the comparison
+        // matches. An epoch number here would silently match nothing.
+        if let since = range.since {
+            clauses.append("c.createdAt >= ?")
+            args.append(since)
+        }
+        let filter = clauses.joined(separator: " AND ")
+
+        // Prefix-match every term so partial words match as you type. Punctuation is FTS5
+        // syntax, so a query like "scripts/build.mjs" or "v1.2" must be split into bare tokens
+        // first — passing it through raw throws and silently returns nothing.
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let pattern = trimmed.isEmpty ? "" : Library.ftsPattern(trimmed)
+        guard !pattern.isEmpty else {
+            return SearchQuery(sql: """
+                SELECT c.* FROM captures c WHERE \(filter)
+                ORDER BY c.createdAt DESC LIMIT ?
+                """, arguments: StatementArguments(args + [limit]))
+        }
+        return SearchQuery(sql: """
+            SELECT c.* FROM captures c
+            JOIN fts_source s ON s.captureId = c.id
+            JOIN captures_fts f ON f.rowid = s.rowid
+            WHERE captures_fts MATCH ? AND \(filter)
+            ORDER BY bm25(captures_fts, 8.0, 2.0, 4.0, 1.0), c.createdAt DESC LIMIT ?
+            """, arguments: StatementArguments([pattern] + args + [limit]))
+    }
+
     public func search(_ query: String = "", scope: SearchScope = .all, app: String? = nil,
                        range: DateRange = .any, limit: Int = 500) -> [CaptureRecord] {
-        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        let statusClause = scope == .trash ? "c.status = 'trashed'" : "c.status IN ('staged', 'kept')"
-        var kindClause = ""
-        if scope == .screenshots { kindClause = " AND c.kind IN ('screenshot', 'gif')" }
-        if scope == .recordings { kindClause = " AND c.kind = 'recording'" }
-        var appClause = ""
-        if let app { appClause = " AND c.sourceApp = '\(app.replacingOccurrences(of: "'", with: "''"))'" }
-        // GRDB stores Date as a UTC "yyyy-MM-dd HH:mm:ss.SSS" string, which compares
-        // lexicographically — an epoch number here would silently match nothing.
-        var dateClause = ""
-        if let since = range.since {
-            dateClause = " AND c.createdAt >= '\(Library.sqlDateFormatter.string(from: since))'"
-        }
-
-        return (try? db.queue.read { d -> [CaptureRecord] in
-            guard !trimmed.isEmpty else {
-                return try CaptureRecord.fetchAll(d, sql: """
-                    SELECT c.* FROM captures c WHERE \(statusClause)\(kindClause)\(appClause)\(dateClause)
-                    ORDER BY c.createdAt DESC LIMIT ?
-                    """, arguments: [limit])
-            }
-            // Prefix-match every term so partial words match as you type. Punctuation is FTS5
-            // syntax, so a query like "scripts/build.mjs" or "v1.2" must be split into bare
-            // tokens first — passing it through raw throws and silently returns nothing.
-            let pattern = Library.ftsPattern(trimmed)
-            guard !pattern.isEmpty else {
-                return try CaptureRecord.fetchAll(d, sql: """
-                    SELECT c.* FROM captures c WHERE \(statusClause)\(kindClause)\(appClause)\(dateClause)
-                    ORDER BY c.createdAt DESC LIMIT ?
-                    """, arguments: [limit])
-            }
-            return try CaptureRecord.fetchAll(d, sql: """
-                SELECT c.* FROM captures c
-                JOIN fts_source s ON s.captureId = c.id
-                JOIN captures_fts f ON f.rowid = s.rowid
-                WHERE captures_fts MATCH ? AND \(statusClause)\(kindClause)\(appClause)\(dateClause)
-                ORDER BY bm25(captures_fts, 8.0, 2.0, 4.0, 1.0), c.createdAt DESC LIMIT ?
-                """, arguments: [pattern, limit])
-        }) ?? []
+        let q = searchQuery(query, scope: scope, app: app, range: range, limit: limit)
+        return (try? db.queue.read { try CaptureRecord.fetchAll($0, sql: q.sql, arguments: q.arguments) }) ?? []
     }
 
-    /// Files the shell is actively using — a drag in flight, an open save panel, a running
-    /// upload. An AI rename must not move a file out from under one of those (the pasteboard
-    /// holds a concrete URL), so applyName refuses and the ingest job retries later.
-    private static let inUseLock = NSLock()
-    nonisolated(unsafe) private static var inUseIDs: Set<String> = []
-
-    public static func markInUse(_ id: String) {
-        inUseLock.lock(); defer { inUseLock.unlock() }
-        inUseIDs.insert(id)
-    }
-    public static func clearInUse(_ id: String) {
-        inUseLock.lock(); defer { inUseLock.unlock() }
-        inUseIDs.remove(id)
-    }
-    public static func isInUse(_ id: String) -> Bool {
-        inUseLock.lock(); defer { inUseLock.unlock() }
-        return inUseIDs.contains(id)
-    }
-
-    /// Rename a capture's file to an AI-suggested base name (extension preserved), journaled and
-    /// compare-and-swapped: the rename is skipped if the row changed underneath (a manual rename
-    /// pins aiState) or the target already exists. Sidecar, search index and identity follow.
-    @discardableResult
-    public func applyName(_ id: String, baseName: String, tags: [String], summary: String,
-                          engine: String) -> Bool {
-        guard !Library.isInUse(id) else { return false }   // drag/upload/save panel holds the path
-        guard let record = try? db.queue.read({ try CaptureRecord.fetchOne($0, key: id) }),
-              record.aiState == "ocr" || record.aiState == "none",   // never overwrite a named/manual row
-              record.status != .trashed, record.status != .sweeping else { return false }
-
-        let fm = FileManager.default
-        let current = url(for: record)
-        let ext = current.pathExtension
-        let dir = current.deletingLastPathComponent()
-        let target = Library.uniqueURL(in: dir, base: baseName, ext: ext)
-        guard target.lastPathComponent != current.lastPathComponent else { return false }
-        let newRel = rel(target)
-
-        do {
-            _ = try OpJournal.run(db, op: "rename", captureId: id, src: record.relPath, dst: newRel,
-                fileOp: {
-                    guard fm.fileExists(atPath: current.path), !fm.fileExists(atPath: target.path) else {
-                        throw CocoaError(.fileNoSuchFile)
-                    }
-                    try moveWithSidecar(from: current, to: target)
-                },
-                stateUpdate: { d, _ in
-                    // CAS: only rewrite the row if nothing moved it while we worked
-                    try d.execute(sql: """
-                        UPDATE captures SET relPath = ?, fastID = ?, aiState = ?, summary = ?
-                        WHERE id = ? AND relPath = ?
-                        """, arguments: [newRel, Library.fastID(of: target), "named:" + engine,
-                                         summary, id, record.relPath])
-                    // CAS missed: something moved the row while the file op ran. Throw so the
-                    // journal entry survives for recovery rather than leaving the row pointing
-                    // at a path the file has already left.
-                    guard d.changesCount > 0 else { throw CocoaError(.fileWriteFileExists) }
-                    try Library.indexText(d, id: id, name: target.lastPathComponent,
-                                          summary: summary, tags: tags.joined(separator: " "))
-                })
-            Log.store.info("named \(record.relPath, privacy: .public) → \(newRel, privacy: .public)")
-            return true
-        } catch {
-            Log.store.error("rename failed for \(id): \(error)")
-            return false
-        }
+    /// The same query off the main thread. The app has one serialized DB connection, so a
+    /// keystroke's search can queue behind an ingest write of 20k characters of OCR text —
+    /// blocking the main thread for it stutters typing in the search field.
+    public func searchAsync(_ query: String = "", scope: SearchScope = .all, app: String? = nil,
+                            range: DateRange = .any, limit: Int = 500) async -> [CaptureRecord] {
+        let q = searchQuery(query, scope: scope, app: app, range: range, limit: limit)
+        return (try? await db.queue.read { try CaptureRecord.fetchAll($0, sql: q.sql, arguments: q.arguments) }) ?? []
     }
 
     /// Query text → an FTS5 prefix pattern. Splits on anything the unicode61 tokenizer treats
@@ -212,10 +165,5 @@ extension Library {
                 WHERE length(ocr) > 0 ORDER BY rowid DESC LIMIT 1
                 """, arguments: [limit])
         } ?? nil
-    }
-
-    /// Absolute URL for a capture's file.
-    public func url(for record: CaptureRecord) -> URL {
-        root.appendingPathComponent(record.relPath)
     }
 }

@@ -182,9 +182,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     @objc private func menuPinClipboard() { PinController.shared.pinFromClipboard() }
     @objc private func menuRestore() {
-        guard let library = CaptureCoordinator.shared.library else { return }
-        if (try? library.restoreLastDiscarded()) != nil {
-            Sounds.play("Pop")
+        guard let library = CaptureCoordinator.shared.library,
+              let restored = try? library.restoreLastDiscarded() else { return }
+        Sounds.play("Pop")
+        // discard cancelled its ingest job; an unnamed capture needs another pass
+        if restored.aiState.acceptsName {
+            Task { await IngestQueue.shared.enqueue(restored.id, after: 0) }
         }
     }
     @objc private func menuShowOverlays() { OverlayController.shared.showAll() }
@@ -209,72 +212,13 @@ if CommandLine.arguments.contains("--tcc-check") {
     exit(CGPreflightScreenCaptureAccess() ? 0 : 1)
 }
 
-// GIF-exporter smoke mode: converts the given movie and prints the result.
-// Ingest smoke mode: OCRs every un-indexed capture immediately (no debounce) and reports.
-// Works with the display locked, unlike the UI-driven scripts. Driven by scripts/test-ingest.command.
+// Ingest smoke mode: OCRs every un-indexed capture immediately (no debounce) and reports, or
+// with --dry-run previews the names naming would produce. Driven by scripts/test-ingest.command.
 if CommandLine.arguments.contains("--ingest-now") {
-    setvbuf(stdout, nil, _IONBF, 0)   // unbuffered: harness output survives a timeout
-    let sem = DispatchSemaphore(value: 0)
-    Task {
-        do {
-            let library = try Library(db: KaptureCore.Database())
-            await IngestQueue.shared.configure(library: library)
-            let useAPI = CommandLine.arguments.contains("--api")
-            let dryRun = CommandLine.arguments.contains("--dry-run")
-            if dryRun {
-                // show what naming WOULD produce without touching any file
-                // only touch the Keychain when the API engine is actually being exercised —
-                // an unauthorized read blocks on a permission prompt
-                // the harness prefers an env key: a Keychain read blocks on a permission prompt,
-                // which can't be answered when the display is locked. The app uses the Keychain.
-                let key = useAPI
-                    ? (ProcessInfo.processInfo.environment["ANTHROPIC_API_KEY"] ?? Keychain.anthropicKey)
-                    : nil
-                if useAPI && key == nil { print("no Anthropic key in the Keychain"); sem.signal(); return }
-                var records = library.search("", scope: .all)
-                if let i = CommandLine.arguments.firstIndex(of: "--limit"),
-                   CommandLine.arguments.count > i + 1, let n = Int(CommandLine.arguments[i + 1]) {
-                    records = Array(records.prefix(n))
-                }
-                for r in records {
-                    let ocr = library.ocrText(r.id) ?? ""
-                    let old = (r.relPath as NSString).lastPathComponent
-                    if useAPI, let key {
-                        guard let image = OverlayPosterDecoder.decode(library.url(for: r)) else {
-                            print("\(old) → (undecodable)"); continue
-                        }
-                        do {
-                            let n = try await AnthropicNamer.name(image: image, ocr: ocr, app: r.sourceApp,
-                                                                  windowTitle: r.windowTitle, kind: r.kind,
-                                                                  key: key)
-                            print("\(old) → \(n.filename)  tags=\(n.tags.joined(separator: ",")) — \(n.summary)")
-                        } catch { print("\(old) → API failed: \(error)") }
-                    } else {
-                        let naming = NamingService.local(ocr: ocr, app: r.sourceApp,
-                                                         windowTitle: r.windowTitle, kind: r.kind)
-                        print("\(old) → \(naming?.filename ?? "(no name)")  tags=\(naming?.tags.joined(separator: ",") ?? "")")
-                    }
-                }
-                sem.signal(); return
-            }
-            let ids = library.search("", scope: .all).map(\.id)
-            for id in ids { await IngestQueue.shared.enqueue(id, after: 0) }
-            print("enqueued \(ids.count) captures; indexing…")
-            try? await Task.sleep(for: .seconds(Double(min(90, 8 + ids.count * 2))))
-            let indexed = library.indexedCount()
-            print("indexed: \(indexed)/\(ids.count)")
-            if let sample = library.sampleIndexedText() {
-                print("sample: \(sample)")
-                let term = sample.split(separator: " ").first(where: { $0.count > 3 }).map(String.init) ?? "zzz"
-                print("search '\(term)' hits: \(library.search(term).count)")
-            }
-        } catch { print("ingest-now failed: \(error)") }
-        sem.signal()
-    }
-    sem.wait()
-    exit(0)
+    Diagnostics.runIngestNow()
 }
 
+// GIF-exporter smoke mode: converts the given movie and prints the result.
 // Driven by scripts/gif-test.command — that script is the entry point, this is the harness.
 if let i = CommandLine.arguments.firstIndex(of: "--gif-test"), CommandLine.arguments.count > i + 1 {
     let path = CommandLine.arguments[i + 1]

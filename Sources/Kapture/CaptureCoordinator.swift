@@ -131,8 +131,7 @@ final class CaptureCoordinator {
                     sourceApp: app, windowTitle: windowTitle, screenID: screenID)
                 await MainActor.run {
                     if Settings.shared.copyToClipboardAfterCapture {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.writeObjects([url as NSURL, NSImage(cgImage: image, size: .zero)])
+                        Clipboard.write(url: url, image: NSImage(cgImage: image, size: .zero))
                     }
                     OverlayController.shared.show(record: record, fileURL: url, image: image, from: sourceRect)
                     Sounds.play("Tink")
