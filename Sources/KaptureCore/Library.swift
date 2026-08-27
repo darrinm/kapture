@@ -33,6 +33,15 @@ public final class Library: @unchecked Sendable {
         f.dateFormat = "yyyy/MM"
         return f
     }()
+    /// Matches GRDB's own Date encoding, for date comparisons in raw SQL.
+    static let sqlDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(secondsFromGMT: 0)
+        return f
+    }()
+
     private static let timestampFormatter: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"

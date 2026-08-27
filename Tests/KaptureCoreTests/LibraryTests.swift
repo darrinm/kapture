@@ -114,6 +114,26 @@ final class LibraryTests: XCTestCase {
         XCTAssertEqual(lib.search("!!!").count, 1)
     }
 
+    func testDateAndAppFilters() throws {
+        let (lib, dir) = try makeTempLibrary()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let (recent, _) = try lib.storePNG(Data([1]), width: 1, height: 1,
+                                           sourceApp: "com.apple.dt.Xcode", windowTitle: nil, screenID: nil)
+        let (old, _) = try lib.storePNG(Data([2]), width: 1, height: 1,
+                                        sourceApp: "com.googlecode.iterm2", windowTitle: nil, screenID: nil)
+        // age one capture past the week window
+        try lib.db.queue.write { d in
+            try d.execute(sql: "UPDATE captures SET createdAt = ? WHERE id = ?",
+                          arguments: [Date().addingTimeInterval(-20 * 86400), old.id])
+        }
+
+        XCTAssertEqual(lib.search(range: .week).map(\.id), [recent.id])
+        XCTAssertEqual(Set(lib.search(range: .month).map(\.id)), [recent.id, old.id])
+        XCTAssertEqual(lib.search(app: "com.googlecode.iterm2").map(\.id), [old.id])
+        XCTAssertEqual(lib.search(app: "com.apple.dt.Xcode", range: .today).map(\.id), [recent.id])
+        XCTAssertEqual(Set(lib.sourceApps()), ["com.apple.dt.Xcode", "com.googlecode.iterm2"])
+    }
+
     func testULIDSortsByTime() {
         let a = ULID.generate(now: Date(timeIntervalSince1970: 1000))
         let b = ULID.generate(now: Date(timeIntervalSince1970: 2000))

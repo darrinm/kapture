@@ -49,8 +49,31 @@ extension Library {
         }) ?? []
     }
 
+    public enum DateRange: String, CaseIterable, Sendable {
+        case any, today, week, month
+
+        public var title: String {
+            switch self {
+            case .any: "Any time"
+            case .today: "Today"
+            case .week: "Last 7 days"
+            case .month: "Last 30 days"
+            }
+        }
+
+        var since: Date? {
+            let cal = Calendar.current
+            switch self {
+            case .any: return nil
+            case .today: return cal.startOfDay(for: Date())
+            case .week: return cal.date(byAdding: .day, value: -7, to: Date())
+            case .month: return cal.date(byAdding: .day, value: -30, to: Date())
+            }
+        }
+    }
+
     public func search(_ query: String = "", scope: SearchScope = .all, app: String? = nil,
-                       limit: Int = 500) -> [CaptureRecord] {
+                       range: DateRange = .any, limit: Int = 500) -> [CaptureRecord] {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         let statusClause = scope == .trash ? "c.status = 'trashed'" : "c.status IN ('staged', 'kept')"
         var kindClause = ""
@@ -58,11 +81,17 @@ extension Library {
         if scope == .recordings { kindClause = " AND c.kind = 'recording'" }
         var appClause = ""
         if let app { appClause = " AND c.sourceApp = '\(app.replacingOccurrences(of: "'", with: "''"))'" }
+        // GRDB stores Date as a UTC "yyyy-MM-dd HH:mm:ss.SSS" string, which compares
+        // lexicographically — an epoch number here would silently match nothing.
+        var dateClause = ""
+        if let since = range.since {
+            dateClause = " AND c.createdAt >= '\(Library.sqlDateFormatter.string(from: since))'"
+        }
 
         return (try? db.queue.read { d -> [CaptureRecord] in
             guard !trimmed.isEmpty else {
                 return try CaptureRecord.fetchAll(d, sql: """
-                    SELECT c.* FROM captures c WHERE \(statusClause)\(kindClause)\(appClause)
+                    SELECT c.* FROM captures c WHERE \(statusClause)\(kindClause)\(appClause)\(dateClause)
                     ORDER BY c.createdAt DESC LIMIT ?
                     """, arguments: [limit])
             }
@@ -72,7 +101,7 @@ extension Library {
             let pattern = Library.ftsPattern(trimmed)
             guard !pattern.isEmpty else {
                 return try CaptureRecord.fetchAll(d, sql: """
-                    SELECT c.* FROM captures c WHERE \(statusClause)\(kindClause)\(appClause)
+                    SELECT c.* FROM captures c WHERE \(statusClause)\(kindClause)\(appClause)\(dateClause)
                     ORDER BY c.createdAt DESC LIMIT ?
                     """, arguments: [limit])
             }
@@ -80,7 +109,7 @@ extension Library {
                 SELECT c.* FROM captures c
                 JOIN fts_source s ON s.captureId = c.id
                 JOIN captures_fts f ON f.rowid = s.rowid
-                WHERE captures_fts MATCH ? AND \(statusClause)\(kindClause)\(appClause)
+                WHERE captures_fts MATCH ? AND \(statusClause)\(kindClause)\(appClause)\(dateClause)
                 ORDER BY bm25(captures_fts, 8.0, 2.0, 4.0, 1.0), c.createdAt DESC LIMIT ?
                 """, arguments: [pattern, limit])
         }) ?? []

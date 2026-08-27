@@ -55,6 +55,8 @@ final class LibraryContentView: NSView, NSSearchFieldDelegate {
     private let searchField = NSSearchField()
     private let scopeControl: NSSegmentedControl
     private let appFilter = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let dateFilter = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let countLabel = NSTextField(labelWithString: "")
     private let emptyLabel = NSTextField(labelWithString: "")
 
     init(library: Library) {
@@ -87,6 +89,7 @@ final class LibraryContentView: NSView, NSSearchFieldDelegate {
         scroll.drawsBackground = false
         scroll.documentView = grid
         grid.onCountChanged = { [weak self] count, query in
+            self?.countLabel.stringValue = count == 1 ? "1 capture" : "\(count) captures"
             self?.emptyLabel.isHidden = count > 0
             self?.emptyLabel.stringValue = query.isEmpty
                 ? "Nothing here yet — press ⌘⇧4 to take a capture."
@@ -97,7 +100,14 @@ final class LibraryContentView: NSView, NSSearchFieldDelegate {
         appFilter.action = #selector(appFilterChanged)
         reloadAppFilter()
 
-        for v in [searchField, scopeControl, appFilter, scroll, emptyLabel] {
+        dateFilter.addItems(withTitles: Library.DateRange.allCases.map(\.title))
+        dateFilter.target = self
+        dateFilter.action = #selector(dateFilterChanged)
+
+        countLabel.font = .systemFont(ofSize: 11)
+        countLabel.textColor = .secondaryLabelColor
+
+        for v in [searchField, scopeControl, appFilter, dateFilter, countLabel, scroll, emptyLabel] {
             addSubview(v)
             v.translatesAutoresizingMaskIntoConstraints = false
         }
@@ -109,9 +119,13 @@ final class LibraryContentView: NSView, NSSearchFieldDelegate {
             scopeControl.leadingAnchor.constraint(equalTo: searchField.trailingAnchor, constant: 12),
             appFilter.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
             appFilter.leadingAnchor.constraint(equalTo: scopeControl.trailingAnchor, constant: 12),
-            appFilter.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -16),
-            appFilter.widthAnchor.constraint(lessThanOrEqualToConstant: 180),
-            scroll.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 12),
+            appFilter.widthAnchor.constraint(lessThanOrEqualToConstant: 160),
+            dateFilter.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
+            dateFilter.leadingAnchor.constraint(equalTo: appFilter.trailingAnchor, constant: 8),
+            dateFilter.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -16),
+            countLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 18),
+            countLabel.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 6),
+            scroll.topAnchor.constraint(equalTo: countLabel.bottomAnchor, constant: 6),
             scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
             scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
@@ -142,6 +156,11 @@ final class LibraryContentView: NSView, NSSearchFieldDelegate {
         grid.reload()
     }
 
+    @objc private func dateFilterChanged() {
+        grid.range = Library.DateRange.allCases[max(0, dateFilter.indexOfSelectedItem)]
+        grid.reload()
+    }
+
     @objc private func scopeChanged() {
         grid.scope = Library.SearchScope.allCases[max(0, scopeControl.selectedSegment)]
         grid.reload()
@@ -164,6 +183,7 @@ final class LibraryGridView: NSView {
     var query = ""
     var scope: Library.SearchScope = .all
     var app: String?
+    var range: Library.DateRange = .any
     var onCountChanged: ((Int, String) -> Void)?
 
     private var items: [Item] = []
@@ -184,7 +204,7 @@ final class LibraryGridView: NSView {
     override var acceptsFirstResponder: Bool { true }
 
     func reload() {
-        let records = library.search(query, scope: scope, app: app)
+        let records = library.search(query, scope: scope, app: app, range: range)
         items = records.map { Item(record: $0) }
         hovered = nil
         onCountChanged?(items.count, query)
