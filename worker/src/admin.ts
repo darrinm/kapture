@@ -12,6 +12,7 @@ import {
   Env, OwnerTable, SECURITY_HEADERS, THEME_CSS, escapeHTML, formatBytes, loadOwners,
   newToken, notFound, ownerForToken, saveOwners, sha256Hex, validOwnerName,
 } from "./common";
+import { accessTokenFrom, issuerFor, loadJWKS, verifyAccessToken } from "./access";
 
 const COOKIE = "kapture_admin";
 const SESSION_SECONDS = 12 * 60 * 60;
@@ -86,8 +87,36 @@ function cookieToken(request: Request): string {
   return "";
 }
 
-/** The signed-in admin, or null. Accepts a bearer token too, so the dashboard is scriptable. */
-async function adminOwner(request: Request, env: Env): Promise<string | null> {
+/** True when this deployment is behind Cloudflare Access. */
+function accessConfigured(env: Env): boolean {
+  return Boolean(env.ACCESS_TEAM_DOMAIN && env.ACCESS_AUD);
+}
+
+/**
+ * Who is asking, or null.
+ *
+ * With Access configured, identity comes from the verified Access JWT and nothing else — the
+ * share token stops being an admin credential, which is the point of moving to Access: pasting
+ * your token into another Mac no longer hands over the dashboard.
+ *
+ * Without it, the admin signs in with their share token as before.
+ */
+async function adminIdentity(request: Request, env: Env): Promise<string | null> {
+  if (accessConfigured(env)) {
+    const token = accessTokenFrom(request);
+    if (!token) return null;
+    const jwks = await loadJWKS(env.ACCESS_TEAM_DOMAIN!, env.QUOTAS);
+    if (!jwks) return null;
+    const identity = await verifyAccessToken(token, jwks, {
+      audience: env.ACCESS_AUD!,
+      issuer: issuerFor(env.ACCESS_TEAM_DOMAIN!),
+    });
+    if (!identity) return null;
+    if (env.ADMIN_EMAIL && identity.email.toLowerCase() !== env.ADMIN_EMAIL.toLowerCase()) {
+      return null;
+    }
+    return identity.email;
+  }
   const header = request.headers.get("authorization") ?? "";
   const bearer = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
   const owner = await ownerForToken(bearer || cookieToken(request), env);
@@ -145,7 +174,8 @@ async function usageToday(env: Env, owner: string): Promise<{ bytes: number; obj
   return { bytes: Number(used?.bytes) || 0, objects: Number(used?.objects) || 0 };
 }
 
-async function dashboard(env: Env, minted?: { owner: string; token: string }): Promise<Response> {
+async function dashboard(env: Env, minted?: { owner: string; token: string },
+                         signedInAs?: string): Promise<Response> {
   const owners = await loadOwners(env);
   const shares = await allShares(env);
   const perOwner = new Map<string, { count: number; bytes: number }>();
@@ -197,9 +227,11 @@ async function dashboard(env: Env, minted?: { owner: string; token: string }): P
         <p class="sub">${shares.length} share${shares.length === 1 ? "" : "s"} ·
           ${formatBytes(total)} stored</p>
       </div>
-      <form method="POST" action="/admin/logout">
+      ${accessConfigured(env)
+        ? `<p class="sub">${escapeHTML(signedInAs ?? "")}</p>`
+        : `<form method="POST" action="/admin/logout">
         <button type="submit">Sign out</button>
-      </form>
+      </form>`}
     </div>
 
     ${minted ? `<div class="token">
@@ -236,6 +268,12 @@ export async function handleAdmin(request: Request, env: Env, url: URL): Promise
   const path = url.pathname;
   if (path !== "/admin" && !path.startsWith("/admin/")) return null;
 
+  // With Access in front, its own sign-in page is the only one; ours would be a second,
+  // weaker door into the same room.
+  if (accessConfigured(env) && (path === "/admin/login" || path === "/admin/logout")) {
+    return redirect("/admin");
+  }
+
   if (path === "/admin/login" && request.method === "POST") {
     const form = await request.formData();
     const token = String(form.get("token") ?? "");
@@ -253,10 +291,17 @@ export async function handleAdmin(request: Request, env: Env, url: URL): Promise
     });
   }
 
-  const admin = await adminOwner(request, env);
-  if (!admin) return path === "/admin" ? loginPage() : loginPage("Sign in first.");
+  const admin = await adminIdentity(request, env);
+  if (!admin) {
+    if (accessConfigured(env)) {
+      // Access should have stopped this request at the edge; reaching here means the app is
+      // misconfigured or someone found a way around it. Say nothing useful.
+      return new Response("Forbidden", { status: 403, headers: SECURITY_HEADERS });
+    }
+    return path === "/admin" ? loginPage() : loginPage("Sign in first.");
+  }
 
-  if (path === "/admin" && request.method === "GET") return dashboard(env);
+  if (path === "/admin" && request.method === "GET") return dashboard(env, undefined, admin);
 
   if (request.method === "POST" && !sameOrigin(request, url)) {
     return new Response("Cross-origin form post refused", { status: 403, headers: SECURITY_HEADERS });
@@ -265,13 +310,13 @@ export async function handleAdmin(request: Request, env: Env, url: URL): Promise
   if (path === "/admin/mint" && request.method === "POST") {
     const form = await request.formData();
     const owner = String(form.get("owner") ?? "").trim();
-    if (!validOwnerName(owner)) return dashboard(env);
+    if (!validOwnerName(owner)) return dashboard(env, undefined, admin);
     const owners: OwnerTable = await loadOwners(env);
-    if (owners[owner]) return dashboard(env);   // never silently replace someone's token
+    if (owners[owner]) return dashboard(env, undefined, admin);   // never re-mint silently
     const token = newToken();
     owners[owner] = { hash: await sha256Hex(token), createdAt: new Date().toISOString() };
     await saveOwners(env, owners);
-    return dashboard(env, { owner, token });
+    return dashboard(env, { owner, token }, admin);
   }
 
   if (path === "/admin/revoke" && request.method === "POST") {

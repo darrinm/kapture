@@ -16,6 +16,16 @@ export interface Env {
   ADMIN_OWNER: string;
   /** GitHub releases base for /download and /appcast.xml */
   RELEASES_BASE: string;
+  /**
+   * Cloudflare Access, guarding /admin. Both must be set for Access to be in force; with
+   * either missing the dashboard falls back to signing in with the admin's share token, so a
+   * deployment is never locked out by a half-finished Access setup.
+   */
+  ACCESS_TEAM_DOMAIN?: string;
+  /** The Access application's AUD tag — a token minted for another app must not be accepted. */
+  ACCESS_AUD?: string;
+  /** Optional second gate: only this address may use the dashboard, whatever Access allows. */
+  ADMIN_EMAIL?: string;
 }
 
 export interface Owner {
