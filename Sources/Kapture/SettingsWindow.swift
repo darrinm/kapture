@@ -101,6 +101,9 @@ struct SettingsView: View {
     @AppStorage("showClicksWhileRecording") private var showClicks = true
     @AppStorage("showKeysWhileRecording") private var showKeys = false
     @AppStorage("filenameTemplate") private var filenameTemplate = "%n %Y-%m-%d at %H.%M.%S"
+    // Sparkle reads this key itself, preferring the user default over the Info.plist value, so
+    // a plain toggle is the whole control
+    @AppStorage("SUEnableAutomaticChecks") private var automaticUpdates = true
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @State private var exportPath = Settings.shared.exportLocation.path
     // Not @AppStorage: this key's default depends on whether an API key is set. Seeded in
@@ -184,6 +187,7 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
             Toggle("Sounds", isOn: $sounds)
+            Toggle("Check for updates automatically", isOn: $automaticUpdates)
             Toggle("Launch at login", isOn: $launchAtLogin)
                 .onChange(of: launchAtLogin) { _, v in
                     do { v ? try SMAppService.mainApp.register() : try SMAppService.mainApp.unregister() }

@@ -6,16 +6,16 @@ lives on your Mac.
 
 Free, no account, no subscription. It replaced CleanShot X for the person who wrote it.
 
-> **Status: personal project, early.** It is used daily on the author's machines, but there is
-> no signed release yet — you build it yourself (see below). Interfaces and file layout can
-> still change under you.
+> **Status: personal project, early.** It is used daily on the author's machines and the
+> releases are signed and notarized, but this is one person's tool, not a product. Interfaces
+> and file layout can still change under you.
 
 ## What it does
 
 **Capture** — ⌘⇧4 for an area, ⌘⇧3 for a display, ⌥⇧4 to repeat the last region. The screen
 freezes while you drag, with a magnifier that shows pixels and the hex value under the
-crosshair. Press space to switch to window mode and click the window you want; it captures with
-its shadow and a transparent background. Also: all displays at once, a self-timer, and ⌘⇧2 to
+crosshair. Press space to switch to window mode and click the window you want; it captures the live window
+with its rounded corners and a transparent background. Also: all displays at once, a self-timer, and ⌘⇧2 to
 pull the *text* off the screen straight to the clipboard.
 
 **Triage** — each capture lands as a card in the corner instead of littering your desktop.
@@ -49,7 +49,14 @@ off until you configure it, and you can run the server yourself.
 
 ## Install
 
-No notarized release exists yet, so: build it.
+Download the latest DMG from [kapture.sh/download](https://kapture.sh/download) — or from
+[Releases](https://github.com/darrinm/kapture/releases) — and drag Kapture to Applications. It
+is signed with a Developer ID and notarized, so it opens without a Gatekeeper detour. After
+that it updates itself.
+
+Requires macOS 14 or later on Apple silicon.
+
+To build it yourself instead:
 
 ```sh
 git clone https://github.com/darrinm/kapture.git
@@ -59,10 +66,10 @@ cp -R dist/Kapture.app /Applications/
 open /Applications/Kapture.app
 ```
 
-Requires macOS 14 or later on Apple silicon, and Xcode installed (the command line tools alone
-aren't enough — Kapture uses ScreenCaptureKit and the macOS SDK). `bundle.sh` signs the app
-with whatever signing identity you have; if you have none it falls back to ad-hoc signing,
-which works but makes macOS re-ask for Screen Recording permission after every rebuild.
+That needs Xcode (the command line tools alone aren't enough — Kapture uses ScreenCaptureKit
+and the macOS SDK). `bundle.sh` signs with whatever identity you have; with none it falls back
+to ad-hoc signing, which works but makes macOS re-ask for Screen Recording permission after
+every rebuild, and leaves the updater switched off.
 
 ## Permissions
 
@@ -74,8 +81,10 @@ Kapture asks for as little as it can, as late as it can.
 | Microphone | first recording with the mic on | recording your voice |
 | Accessibility | optional, offered when relevant | keyboard shortcuts on the hovered card, and drawing keystrokes into a recording |
 
-It is not sandboxed and does not run a background service beyond its own menu bar item. It
-makes no network requests unless you turn on AI naming or share something.
+It is not sandboxed and does not run a background service beyond its own menu bar item. Left
+alone it talks to the network for one thing only: checking once a day whether a new version has
+been released (Sparkle, against kapture.sh/appcast.xml). Everything else — AI naming, sharing —
+happens only when you ask for it.
 
 ## Sharing
 
@@ -96,7 +105,10 @@ Captures are files in a folder you choose (`~/Pictures/Kapture` by default), wit
 index in Application Support. Nothing is uploaded, phoned home, or analyzed remotely by
 default.
 
-Exactly two things can send data off the Mac, both opt-in and both visible:
+The updater asks kapture.sh once a day whether there is a newer version; that request carries
+nothing about you or your captures, and Settings can turn it off.
+
+Two things can send your *content* off the Mac, both opt-in and both visible:
 
 - **AI naming**, if you add an Anthropic API key: the capture image and its recognized text go
   to the Anthropic API to produce a filename. Without a key, naming happens on-device.
