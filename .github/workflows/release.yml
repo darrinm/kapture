@@ -77,6 +77,14 @@ jobs:
           cp -R dist/Kapture.app "$staging/"
           ln -s /Applications "$staging/Applications"
           hdiutil create -volname "Kapture" -srcfolder "$staging" -ov -format UDZO dist/Kapture.dmg
+          # sign the disk image itself, not just the app inside it: Gatekeeper assesses what the
+          # user actually double-clicks, and an unsigned image is "no usable signature" to spctl
+          # even after it has been notarized and stapled
+          identity=$(security find-identity -v -p codesigning \
+            | grep -oE '"Developer ID Application[^"]*"' | head -1 | tr -d '"')
+          [ -n "$identity" ] || { echo "no Developer ID identity in the keychain"; exit 1; }
+          codesign --force --timestamp --sign "$identity" dist/Kapture.dmg
+          codesign --verify --verbose dist/Kapture.dmg
 
       - name: Notarize and staple
         env:
