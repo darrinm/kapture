@@ -74,6 +74,7 @@ struct SettingsView: View {
     @AppStorage("aiNamingEnabled") private var aiNaming = false
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @State private var exportPath = Settings.shared.exportLocation.path
+    @State private var anthropicKey = ""
 
     var body: some View {
         TabView {
@@ -144,11 +145,20 @@ struct SettingsView: View {
 
     var intelligence: some View {
         Form {
-            Toggle("Name captures automatically (experimental)", isOn: $aiNaming)
+            Toggle("Name captures automatically", isOn: $aiNaming)
+            SecureField("Anthropic API key", text: $anthropicKey, prompt: Text("sk-ant-… (optional)"))
+                .onSubmit { Keychain.anthropicKey = anthropicKey.isEmpty ? nil : anthropicKey }
+            Text(anthropicKey.isEmpty
+                 ? "Without a key, names come from an on-device heuristic that is rough — it often "
+                   + "latches onto menu-bar text. With your own Anthropic key, each capture (image "
+                   + "plus its recognized text) is named by Claude; that is the only path where "
+                   + "image content leaves this Mac, and macOS will ask once to unlock the key."
+                 : "Named by Claude using your key. The image and its recognized text are sent to "
+                   + "the Anthropic API for naming only. Clear the field to go back on-device.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
             Text("Every capture is read on your Mac and its text indexed for search — that always "
-                 + "happens and nothing leaves the machine. This option additionally renames files "
-                 + "from what was read. The on-device namer is rough (it often latches onto menu-bar "
-                 + "text), so it is off by default; captures keep their timestamp names.")
+                 + "happens and nothing leaves the machine.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }

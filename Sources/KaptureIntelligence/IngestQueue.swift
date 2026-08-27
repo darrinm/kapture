@@ -4,6 +4,7 @@
 // result that arrives for a trashed capture is dropped rather than applied.
 import Foundation
 import AppKit
+import AVFoundation
 import GRDB
 import KaptureCore
 
@@ -127,19 +128,44 @@ public actor IngestQueue {
 
         // Stage 2 — name it from what we just read. Optional: with naming off, captures keep
         // their timestamp names and everything else still works (spec §8).
-        if Settings.shared.aiNamingEnabled,
-           let naming = NamingService.local(ocr: text, app: record.sourceApp,
-                                            windowTitle: record.windowTitle, kind: record.kind) {
-            _ = library.applyName(job.captureId, baseName: naming.filename, tags: naming.tags,
-                                  summary: naming.summary, engine: "local")
+        if Settings.shared.aiNamingEnabled {
+            var naming: CaptureNaming?
+            var engine = "local"
+            // API engine when the user has set a key: verified far better than the heuristic
+            if let key = Keychain.anthropicKey, !key.isEmpty,
+               let image = OverlayPosterDecoder.decode(url) {
+                do {
+                    naming = try await AnthropicNamer.name(image: image, ocr: text, app: record.sourceApp,
+                                                           windowTitle: record.windowTitle,
+                                                           kind: record.kind, key: key)
+                    engine = "api"
+                } catch {
+                    Log.store.error("api naming failed, falling back: \(error)")
+                }
+            }
+            if naming == nil {
+                naming = NamingService.local(ocr: text, app: record.sourceApp,
+                                             windowTitle: record.windowTitle, kind: record.kind)
+            }
+            if let naming {
+                _ = library.applyName(job.captureId, baseName: naming.filename, tags: naming.tags,
+                                      summary: naming.summary, engine: engine)
+            }
         }
         clearJob(job.captureId)
     }
 }
 
-/// Decoding a library file to a CGImage without pulling AppKit UI code into the actor.
+/// Decoding a library file to a CGImage: stills directly, movies via their first frame
+/// (NSImage returns nil for .mp4, which silently skipped every recording).
 public enum OverlayPosterDecoder {
     public static func decode(_ url: URL) -> CGImage? {
-        NSImage(contentsOf: url)?.cgImage(forProposedRect: nil, context: nil, hints: nil)
+        if let still = NSImage(contentsOf: url)?.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+            return still
+        }
+        let generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = CGSize(width: 1600, height: 1600)
+        return try? generator.copyCGImage(at: .zero, actualTime: nil)
     }
 }

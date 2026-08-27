@@ -213,19 +213,47 @@ if CommandLine.arguments.contains("--tcc-check") {
 // Ingest smoke mode: OCRs every un-indexed capture immediately (no debounce) and reports.
 // Works with the display locked, unlike the UI-driven scripts. Driven by scripts/test-ingest.command.
 if CommandLine.arguments.contains("--ingest-now") {
+    setvbuf(stdout, nil, _IONBF, 0)   // unbuffered: harness output survives a timeout
     let sem = DispatchSemaphore(value: 0)
     Task {
         do {
             let library = try Library(db: KaptureCore.Database())
             await IngestQueue.shared.configure(library: library)
+            let useAPI = CommandLine.arguments.contains("--api")
             let dryRun = CommandLine.arguments.contains("--dry-run")
             if dryRun {
                 // show what naming WOULD produce without touching any file
-                for r in library.search("", scope: .all) {
+                // only touch the Keychain when the API engine is actually being exercised —
+                // an unauthorized read blocks on a permission prompt
+                // the harness prefers an env key: a Keychain read blocks on a permission prompt,
+                // which can't be answered when the display is locked. The app uses the Keychain.
+                let key = useAPI
+                    ? (ProcessInfo.processInfo.environment["ANTHROPIC_API_KEY"] ?? Keychain.anthropicKey)
+                    : nil
+                if useAPI && key == nil { print("no Anthropic key in the Keychain"); sem.signal(); return }
+                var records = library.search("", scope: .all)
+                if let i = CommandLine.arguments.firstIndex(of: "--limit"),
+                   CommandLine.arguments.count > i + 1, let n = Int(CommandLine.arguments[i + 1]) {
+                    records = Array(records.prefix(n))
+                }
+                for r in records {
                     let ocr = library.ocrText(r.id) ?? ""
-                    let naming = NamingService.local(ocr: ocr, app: r.sourceApp,
-                                                     windowTitle: r.windowTitle, kind: r.kind)
-                    print("\((r.relPath as NSString).lastPathComponent) → \(naming?.filename ?? "(no name)")  tags=\(naming?.tags.joined(separator: ",") ?? "")")
+                    let old = (r.relPath as NSString).lastPathComponent
+                    if useAPI, let key {
+                        guard let image = OverlayPosterDecoder.decode(library.url(for: r)) else {
+                            print("\(old) → (undecodable)"); continue
+                        }
+                        do {
+                            let n = try await AnthropicNamer.name(image: image, ocr: ocr, app: r.sourceApp,
+                                                                  windowTitle: r.windowTitle, kind: r.kind,
+                                                                  key: key)
+                            print("\(old) → \(n.filename)  tags=\(n.tags.joined(separator: ",")) — \(n.summary)")
+                        } catch { print("\(old) → API failed: \(error)") }
+                    } else {
+                        let naming = NamingService.local(ocr: ocr, app: r.sourceApp,
+                                                         windowTitle: r.windowTitle, kind: r.kind)
+                        print("\(old) → \(naming?.filename ?? "(no name)")  tags=\(naming?.tags.joined(separator: ",") ?? "")")
+                    }
                 }
                 sem.signal(); return
             }
