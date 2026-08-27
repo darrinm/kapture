@@ -69,7 +69,14 @@ jobs:
           codesign --verify --deep --strict --verbose=2 dist/Kapture.app
           codesign -dvvv dist/Kapture.app 2>&1 | grep -q "Developer ID Application" \
             || { echo "not signed with Developer ID"; exit 1; }
-          codesign -d --entitlements - dist/Kapture.app 2>/dev/null || true
+          # The entitlement and the profile are a pair, and shipping half of it is worse than
+          # shipping neither: keychain-access-groups without a profile to authorise it is not a
+          # denied keychain, it is SIGKILL at launch for everyone who downloads this. Assert both.
+          codesign -d --entitlements - --xml dist/Kapture.app 2>/dev/null \
+            | grep -q keychain-access-groups \
+            || { echo "no keychain-access-groups — secrets would not sync"; exit 1; }
+          [ -f dist/Kapture.app/Contents/embedded.provisionprofile ] \
+            || { echo "entitled but no embedded.provisionprofile — this build dies at launch"; exit 1; }
 
       - name: Build DMG
         env:
