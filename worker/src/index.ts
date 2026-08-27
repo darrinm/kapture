@@ -9,16 +9,12 @@
 //  · per-token daily quotas, because a leaked token is otherwise an unbounded R2 bill
 //  · links are permanent: there is no expiry, and deletion is an explicit owner action
 
-export interface Env {
-  BUCKET: R2Bucket;
-  QUOTAS: KVNamespace;
-  /** JSON: { "<owner>": "<sha256 hex of token>" } */
-  TOKENS: string;
-  /** owner allowed to delete anything */
-  ADMIN_OWNER: string;
-  /** GitHub releases base for /download and /appcast.xml */
-  RELEASES_BASE: string;
-}
+import {
+  Env, SECURITY_HEADERS, THEME_CSS, authorize, escapeHTML, json, notFound,
+} from "./common";
+import { handleAdmin } from "./admin";
+
+export type { Env };
 
 const MAX_SINGLE_UPLOAD = 95 * 1024 * 1024; // Workers' request body ceiling is 100MB
 const DAILY_BYTES_PER_OWNER = 2 * 1024 * 1024 * 1024;
@@ -44,37 +40,6 @@ function newID(): string {
   return Array.from(bytes, (b) => ID_ALPHABET[b % ID_ALPHABET.length]).join("");
 }
 
-async function sha256Hex(value: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
-  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-/** Constant-time compare over equal-length hex digests. */
-function timingSafeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return diff === 0;
-}
-
-/** Bearer token → owner name, or null. Never logs the token. */
-async function authorize(request: Request, env: Env): Promise<string | null> {
-  const header = request.headers.get("authorization") ?? "";
-  const token = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
-  if (!token) return null;
-  let table: Record<string, string>;
-  try {
-    table = JSON.parse(env.TOKENS);
-  } catch {
-    return null;
-  }
-  const presented = await sha256Hex(token);
-  for (const [owner, hash] of Object.entries(table)) {
-    if (timingSafeEqual(presented, hash)) return owner;
-  }
-  return null;
-}
-
 /**
  * Filenames are attacker-controlled: keep a conservative charset and a sane length.
  * An allowlist, not a denylist: the denylist this replaced carried literal control bytes
@@ -90,17 +55,6 @@ function sanitizeFilename(raw: string | null, fallbackExt: string): string {
     .slice(0, 128);
   return cleaned || `capture.${fallbackExt}`;
 }
-
-function escapeHTML(value: string): string {
-  return value.replace(/[&<>"']/g, (c) =>
-    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!,
-  );
-}
-
-const SECURITY_HEADERS: Record<string, string> = {
-  "x-content-type-options": "nosniff",
-  "referrer-policy": "no-referrer",
-};
 
 const VIEWER_CSP =
   "default-src 'none'; img-src 'self'; media-src 'self'; style-src 'unsafe-inline'; " +
@@ -161,22 +115,14 @@ async function checkQuota(env: Env, owner: string, bytes: number): Promise<strin
   return null;
 }
 
-function notFound(): Response {
-  return new Response("Not found", { status: 404, headers: SECURITY_HEADERS });
-}
-
-function json(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "content-type": "application/json", ...SECURITY_HEADERS },
-  });
-}
-
 export default {
   async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
     const origin = url.origin;
+
+    const adminResponse = await handleAdmin(request, env, url);
+    if (adminResponse) return adminResponse;
 
     // ---- upload -----------------------------------------------------------
     if (path === "/api/upload" && request.method === "POST") {

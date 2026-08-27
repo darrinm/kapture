@@ -65,10 +65,25 @@ npx wrangler secret put TOKENS               # {"darrin":"<hash>","friend":"<has
 npx wrangler deploy
 ```
 
-This is already done for kapture.sh: the Worker is deployed on the custom domain, with the
-`kapture-shares` bucket and the `QUOTAS` namespace whose id is in `wrangler.jsonc`. Adding a
-friend means minting one more token and re-putting `TOKENS` with both entries — the secret is
-the whole map, so a put that lists only the new owner would revoke everyone else.
+This is already done for kapture.sh. Adding a friend afterwards is the dashboard's job, below —
+`TOKENS` only seeds the first deployment.
+
+## The dashboard
+
+`https://kapture.sh/admin` — sign in with the admin's own share token.
+
+It lists everyone who has a token, what they have stored, and what they have used today; mints
+a token for a new person (shown once, never stored); revokes one; and deletes individual
+shares. It runs without any JavaScript — plain forms under the same `script-src 'none'` policy
+as the viewer — and the session cookie is HttpOnly, Secure and SameSite=Strict.
+
+**Where the owner table lives.** A Worker cannot write its own secrets, so the live table is a
+KV entry, not the `TOKENS` secret. On a deployment that has never written one, the secret is
+read once to seed it and ignored afterwards — which means that after the first mint or revoke,
+editing `TOKENS` does nothing. Manage people through the dashboard from then on.
+
+Revoking stops new uploads. It does **not** retract links the person already made: a share link
+is a capability, and the id is the authorization. Delete their shares as well if that matters.
 
 ## Giving the token to Kapture
 
@@ -88,11 +103,8 @@ To check the whole path without touching the UI:
 Kapture.app/Contents/MacOS/Kapture --share-test some.png --delete
 ```
 
-`TOKENS` is a JSON map of owner → sha256 hex of that owner's bearer token. Only
-the hash is ever stored server-side, so a leaked deployment reveals no token.
-Adding a friend means minting another token and re-putting the secret; removing
-one means dropping their entry. Each owner gets a daily quota (2 GB, 500
-objects) so a leaked token costs a day, not the account.
+Each owner gets their own daily quota (2 GB, 500 objects), so a leaked token costs a day rather
+than the account, and one person cannot exhaust another's.
 
 ## Design notes
 
