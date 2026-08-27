@@ -9,6 +9,7 @@ import KaptureCore
 import KaptureDesign
 import KaptureEditor
 import KaptureRecording
+import KaptureIntelligence
 
 @MainActor
 final class OverlayController {
@@ -270,6 +271,7 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
     // MARK: keep / discard
     /// Mark the capture kept in the library — every "walk away with it" gesture funnels here.
     func markKept() {
+        Task { await IngestQueue.shared.expedite(record.id) }   // acted on: index it now
         try? OverlayController.shared.library?.setStatus(record.id, .kept)
     }
 
@@ -288,6 +290,7 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
             } catch { Log.store.error("discard failed: \(error)") }
         }
         guard discarded else { fadeOut(); return }   // no false discard feedback
+        Task { await IngestQueue.shared.cancel(record.id) }     // discarded: don't spend OCR on it
         Sounds.play("Bottle")
         slideOff()
     }

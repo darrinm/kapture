@@ -3,6 +3,7 @@ import AppKit
 import ScreenCaptureKit
 import KaptureCore
 import KaptureCapture
+import KaptureIntelligence
 
 @MainActor
 final class CaptureCoordinator {
@@ -37,6 +38,31 @@ final class CaptureCoordinator {
     }
 
     func captureWindow() { captureArea(startInWindowMode: true) }
+
+    /// Capture Text (⌘⇧2): select a region, recognize its text on-device, put it on the
+    /// clipboard. Nothing is stored — this is a clipboard action, not a capture.
+    func captureText() {
+        Task {
+            guard ScreenshotService.hasPermission else { Onboarding.shared.show(); return }
+            do {
+                let frames = try await ScreenshotService.freezeAllDisplays()
+                guard case .area(let sel)? = await SelectionController.shared.select(frames: frames, windows: []),
+                      let cropped = ScreenshotService.crop(sel.frame, rectInPoints: sel.rectInPoints)
+                else { return }
+                let text = await Task.detached(priority: .userInitiated) {
+                    OCRService.clipboardText(for: cropped)
+                }.value
+                guard !text.isEmpty else {
+                    Toast.show("No text found")
+                    return
+                }
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(text, forType: .string)
+                Sounds.play("Tink")
+                Toast.show(text.count > 60 ? String(text.prefix(60)) + "…" : text)
+            } catch { Log.capture.error("capture text failed: \(error)") }
+        }
+    }
 
     func captureFullscreen(allDisplays: Bool = false) {
         Task {
@@ -110,6 +136,8 @@ final class CaptureCoordinator {
                     }
                     OverlayController.shared.show(record: record, fileURL: url, image: image, from: sourceRect)
                     Sounds.play("Tink")
+                    // OCR after the debounce — a burst-triage discard costs no work
+                    Task { await IngestQueue.shared.enqueue(record.id) }
                 }
             } catch { Log.store.error("store failed: \(error)") }
         }

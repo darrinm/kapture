@@ -4,6 +4,7 @@ import KaptureCapture
 import KaptureDesign
 import KaptureEditor
 import KaptureRecording
+import KaptureIntelligence
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
@@ -19,6 +20,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             EditorController.shared.library = library
             TrimmerController.shared.library = library
             LibraryWindowController.shared.library = library
+            Task {
+                await IngestQueue.shared.configure(library: library)
+                await IngestQueue.shared.resume()   // pick up jobs left by a previous run
+            }
             EditorController.shared.onFlattened = { id in
                 OverlayController.shared.showCard(recordID: id)
             }
@@ -41,6 +46,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             case .pinClipboard: PinController.shared.pinFromClipboard()
             case .record: RecordingCoordinator.shared.toggle()
             case .library: LibraryWindowController.shared.show()
+            case .captureText: CaptureCoordinator.shared.captureText()
             }
         }
         RecordingCoordinator.shared.library = CaptureCoordinator.shared.library
@@ -115,6 +121,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         menu.addItem(item("Capture Fullscreen", #selector(menuFullscreen), hotkey: .fullscreen))
         menu.addItem(item("Capture All Displays", #selector(menuAllDisplays)))
         menu.addItem(item("Capture Previous Area", #selector(menuPreviousArea), hotkey: .previousArea))
+        menu.addItem(item("Capture Text", #selector(menuCaptureText), hotkey: .captureText))
         menu.addItem(.separator())
         // one item, title swapped by validateMenuItem — same idiom as Pause/Resume below
         menu.addItem(item("Record Area or Window", #selector(menuRecord), hotkey: .record))
@@ -190,6 +197,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     @objc private func menuAllDisplays() { CaptureCoordinator.shared.captureFullscreen(allDisplays: true) }
     @objc private func menuPreviousArea() { CaptureCoordinator.shared.capturePreviousArea() }
     @objc private func menuTimer(_ sender: NSMenuItem) { CaptureCoordinator.shared.captureAreaAfter(seconds: sender.tag) }
+    @objc private func menuCaptureText() { CaptureCoordinator.shared.captureText() }
     @objc private func menuLibraryWindow() { LibraryWindowController.shared.show() }
     @objc private func menuLibrary() { NSWorkspace.shared.open(Settings.shared.libraryRoot) }
     @objc private func menuSettings() { SettingsWindowController.shared.show() }
@@ -202,6 +210,32 @@ if CommandLine.arguments.contains("--tcc-check") {
 }
 
 // GIF-exporter smoke mode: converts the given movie and prints the result.
+// Ingest smoke mode: OCRs every un-indexed capture immediately (no debounce) and reports.
+// Works with the display locked, unlike the UI-driven scripts. Driven by scripts/test-ingest.command.
+if CommandLine.arguments.contains("--ingest-now") {
+    let sem = DispatchSemaphore(value: 0)
+    Task {
+        do {
+            let library = try Library(db: KaptureCore.Database())
+            await IngestQueue.shared.configure(library: library)
+            let ids = library.search("", scope: .all).map(\.id)
+            for id in ids { await IngestQueue.shared.enqueue(id, after: 0) }
+            print("enqueued \(ids.count) captures; indexing…")
+            try? await Task.sleep(for: .seconds(Double(min(90, 8 + ids.count * 2))))
+            let indexed = library.indexedCount()
+            print("indexed: \(indexed)/\(ids.count)")
+            if let sample = library.sampleIndexedText() {
+                print("sample: \(sample)")
+                let term = sample.split(separator: " ").first(where: { $0.count > 3 }).map(String.init) ?? "zzz"
+                print("search '\(term)' hits: \(library.search(term).count)")
+            }
+        } catch { print("ingest-now failed: \(error)") }
+        sem.signal()
+    }
+    sem.wait()
+    exit(0)
+}
+
 // Driven by scripts/gif-test.command — that script is the entry point, this is the harness.
 if let i = CommandLine.arguments.firstIndex(of: "--gif-test"), CommandLine.arguments.count > i + 1 {
     let path = CommandLine.arguments[i + 1]

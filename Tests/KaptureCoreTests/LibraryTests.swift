@@ -99,6 +99,21 @@ final class LibraryTests: XCTestCase {
         _ = url
     }
 
+    func testSearchHandlesPunctuationInQuery() throws {
+        let (lib, dir) = try makeTempLibrary()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let (shot, _) = try lib.storePNG(Data([1]), width: 2, height: 2,
+                                         sourceApp: nil, windowTitle: nil, screenID: nil)
+        try lib.updateSearchText(shot.id, ocr: "scripts/build-blueprint.mjs failed at v1.2")
+
+        // punctuation is FTS5 syntax; unsanitized these throw and silently return nothing
+        for query in ["scripts/build-blueprint.mjs", "v1.2", "build-blueprint", "(failed)", "a\"b scripts"] {
+            XCTAssertFalse(lib.search(query).isEmpty, "no hits for \(query)")
+        }
+        // a query with no usable tokens falls back to listing rather than erroring
+        XCTAssertEqual(lib.search("!!!").count, 1)
+    }
+
     func testULIDSortsByTime() {
         let a = ULID.generate(now: Date(timeIntervalSince1970: 1000))
         let b = ULID.generate(now: Date(timeIntervalSince1970: 2000))

@@ -18,6 +18,10 @@ let package = Package(
             dependencies: ["KaptureCore", "KaptureDesign"],
             path: "Sources/KaptureCapture"),
         .target(
+            name: "KaptureIntelligence",
+            dependencies: ["KaptureCore"],
+            path: "Sources/KaptureIntelligence"),
+        .target(
             name: "KaptureEditor",
             dependencies: ["KaptureCore", "KaptureDesign"],
             path: "Sources/KaptureEditor"),
@@ -27,7 +31,8 @@ let package = Package(
             path: "Sources/KaptureRecording"),
         .executableTarget(
             name: "Kapture",
-            dependencies: ["KaptureCore", "KaptureCapture", "KaptureDesign", "KaptureEditor", "KaptureRecording"],
+            dependencies: ["KaptureCore", "KaptureCapture", "KaptureDesign", "KaptureEditor",
+                           "KaptureRecording", "KaptureIntelligence"],
             path: "Sources/Kapture"),
         .testTarget(name: "KaptureCoreTests", dependencies: ["KaptureCore"], path: "Tests/KaptureCoreTests"),
     ]

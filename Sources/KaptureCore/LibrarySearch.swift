@@ -54,10 +54,16 @@ extension Library {
                     ORDER BY c.createdAt DESC LIMIT ?
                     """, arguments: [limit])
             }
-            // prefix-match every term so partial words match as you type
-            let pattern = trimmed.split(separator: " ")
-                .map { $0.replacingOccurrences(of: "\"", with: "").appending("*") }
-                .joined(separator: " ")
+            // Prefix-match every term so partial words match as you type. Punctuation is FTS5
+            // syntax, so a query like "scripts/build.mjs" or "v1.2" must be split into bare
+            // tokens first — passing it through raw throws and silently returns nothing.
+            let pattern = Library.ftsPattern(trimmed)
+            guard !pattern.isEmpty else {
+                return try CaptureRecord.fetchAll(d, sql: """
+                    SELECT c.* FROM captures c WHERE \(statusClause)\(kindClause)
+                    ORDER BY c.createdAt DESC LIMIT ?
+                    """, arguments: [limit])
+            }
             return try CaptureRecord.fetchAll(d, sql: """
                 SELECT c.* FROM captures c
                 JOIN fts_source s ON s.captureId = c.id
@@ -66,6 +72,30 @@ extension Library {
                 ORDER BY bm25(captures_fts, 8.0, 2.0, 4.0, 1.0), c.createdAt DESC LIMIT ?
                 """, arguments: [pattern, limit])
         }) ?? []
+    }
+
+    /// Query text → an FTS5 prefix pattern. Splits on anything the unicode61 tokenizer treats
+    /// as a separator so punctuation in the query can't become MATCH syntax.
+    static func ftsPattern(_ query: String) -> String {
+        query.split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+            .map { $0.lowercased() + "*" }
+            .joined(separator: " ")
+    }
+
+    /// How many captures carry recognized text (ingest progress).
+    public func indexedCount() -> Int {
+        (try? db.queue.read {
+            try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM fts_source WHERE length(ocr) > 0") ?? 0
+        }) ?? 0
+    }
+
+    public func sampleIndexedText(limit: Int = 140) -> String? {
+        try? db.queue.read {
+            try String.fetchOne($0, sql: """
+                SELECT substr(replace(ocr, char(10), ' '), 1, ?) FROM fts_source
+                WHERE length(ocr) > 0 ORDER BY rowid DESC LIMIT 1
+                """, arguments: [limit])
+        } ?? nil
     }
 
     /// Absolute URL for a capture's file.

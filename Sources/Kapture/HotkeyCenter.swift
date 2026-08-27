@@ -16,6 +16,7 @@ final class HotkeyCenter {
         case previousArea = 4   // ⌥⇧4
         case pinClipboard = 5   // ⌘⇧1
         case library = 6        // ⌘⇧L
+        case captureText = 7    // ⌘⇧2
 
         var keyCode: UInt32 {
             switch self {
@@ -25,6 +26,7 @@ final class HotkeyCenter {
             case .previousArea: 21   // 4
             case .pinClipboard: 18   // 1
             case .library: 37        // L
+            case .captureText: 19    // 2
             }
         }
 
@@ -44,6 +46,7 @@ final class HotkeyCenter {
             case .previousArea: "4"
             case .pinClipboard: "1"
             case .library: "l"
+            case .captureText: "2"
             }
         }
 
