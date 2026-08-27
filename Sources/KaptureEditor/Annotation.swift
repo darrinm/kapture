@@ -1,9 +1,16 @@
 // Annotation layer model. All geometry lives in IMAGE space (pixels of the base image),
 // so rendering at canvas scale and flattening at native resolution are the same code path.
 import AppKit
+import CoreImage
 
 public enum Tool: String, CaseIterable, Codable {
-    case select, arrow, line, rect, ellipse, freehand, highlight, text, counter, crop
+    case select, arrow, line, rect, ellipse, freehand, highlight, blur, pixelate, text, counter, crop
+
+    /// Tools that obscure what is under them rather than drawing on top of it.
+    var isRedaction: Bool { self == .blur || self == .pixelate }
+
+    /// Image-space radius (blur) or block size (pixelate).
+    var defaultIntensity: CGFloat { self == .blur ? 24 : 16 }
 }
 
 public extension NSColor {
@@ -31,6 +38,7 @@ public struct Annotation: Codable, Identifiable {
     public var fontSize: CGFloat?     // text, image-space
     public var applied: Bool?         // crop: true once applied in-editor (canvas re-bases to its rect)
     public var filled: Bool?          // rect/ellipse: solid fill instead of outline
+    public var intensity: CGFloat?    // blur radius / pixelate block size, image-space
 
     public init(tool: Tool, points: [CGPoint], colorHex: String, strokeWidth: CGFloat,
                 text: String? = nil, number: Int? = nil, fontSize: CGFloat? = nil) {
@@ -71,7 +79,11 @@ public struct Annotation: Codable, Identifiable {
     }
 
     /// Draw into a CGContext whose coordinate space is image space (origin top-left, y down).
-    public func draw(in ctx: CGContext) {
+    ///
+    /// `base` is the untouched capture. Blur and pixelate need it because they reproduce what is
+    /// underneath rather than painting over it — and they sample the *base*, not the composite,
+    /// so a redaction covers whatever it is dragged over and cannot be undone by reordering.
+    public func draw(in ctx: CGContext, base: CGImage? = nil) {
         ctx.saveGState()
         defer { ctx.restoreGState() }
         let c = color
@@ -105,6 +117,19 @@ public struct Annotation: Codable, Identifiable {
             ctx.setBlendMode(.multiply)
             ctx.setFillColor(c.withAlphaComponent(0.45).cgColor)
             ctx.fill(rect)
+        case .blur, .pixelate:
+            guard let base, rect.width >= 1, rect.height >= 1,
+                  let patch = AnnotationEffects.render(tool: tool, rect: rect,
+                                                       intensity: intensity ?? tool.defaultIntensity,
+                                                       base: base)
+            else { break }
+            // this context is image space with y down; undo the flip within the rect so the
+            // patch lands upright instead of mirrored
+            ctx.saveGState()
+            ctx.translateBy(x: rect.minX, y: rect.maxY)
+            ctx.scaleBy(x: 1, y: -1)
+            ctx.draw(patch, in: CGRect(origin: .zero, size: rect.size))
+            ctx.restoreGState()
         case .text:
             guard let text, let pos = points.first else { break }
             let attrs: [NSAttributedString.Key: Any] = [
@@ -180,7 +205,8 @@ public struct Annotation: Codable, Identifiable {
             return distanceToSegment(p, points[0], points[1]) < pad
         default:
             return rect.insetBy(dx: -pad, dy: -pad).contains(p) && !rect.insetBy(dx: pad, dy: pad).contains(p)
-                || (tool == .highlight || tool == .crop || filled == true) && rect.contains(p)
+                || (tool == .highlight || tool == .crop || tool.isRedaction || filled == true)
+                    && rect.contains(p)
         }
     }
 
@@ -206,7 +232,7 @@ public enum AnnotationRenderer {
         ctx.draw(base, in: CGRect(x: 0, y: 0, width: w, height: h))
         ctx.translateBy(x: 0, y: CGFloat(h))
         ctx.scaleBy(x: 1, y: -1)
-        for l in layers { l.draw(in: ctx) }
+        for l in layers { l.draw(in: ctx, base: base) }
         guard let out = ctx.makeImage() else { return nil }
         // Crop applies last, over the fully composited image (one crop layer at a time; the editor
         // replaces any previous one). Its rect is image-space top-left — cropping(to:) matches.
@@ -214,6 +240,50 @@ public enum AnnotationRenderer {
             let clamped = crop.rect.intersection(CGRect(x: 0, y: 0, width: w, height: h))
             if clamped.width >= 1, clamped.height >= 1 { return out.cropping(to: clamped) ?? out }
         }
+        return out
+    }
+}
+
+/// Blur and pixelate, rendered through Core Image and cached.
+///
+/// The cache matters: the canvas redraws on every mouse move, and filtering a large region of a
+/// 5K capture per frame is not free. NSCache rather than a dictionary so this stays safe if
+/// flattening ever moves off the main thread.
+public enum AnnotationEffects {
+    private static let context = CIContext(options: [.cacheIntermediates: false])
+    private static let cache = NSCache<NSString, CGImage>()
+
+    public static func clearCache() { cache.removeAllObjects() }
+
+    static func render(tool: Tool, rect: CGRect, intensity: CGFloat, base: CGImage) -> CGImage? {
+        let key = "\(tool.rawValue)|\(Int(rect.minX)),\(Int(rect.minY)),\(Int(rect.width)),\(Int(rect.height))|\(Int(intensity))|\(base.width)x\(base.height)" as NSString
+        if let hit = cache.object(forKey: key) { return hit }
+
+        // annotation geometry is top-left origin; CIImage is bottom-left
+        let bounds = CGRect(x: 0, y: 0, width: base.width, height: base.height)
+        let region = CGRect(x: rect.minX, y: CGFloat(base.height) - rect.maxY,
+                            width: rect.width, height: rect.height).intersection(bounds)
+        guard region.width >= 1, region.height >= 1 else { return nil }
+
+        let source = CIImage(cgImage: base)
+        let filtered: CIImage
+        switch tool {
+        case .blur:
+            // clamp first, or the blur drags transparency in from beyond the image edges and a
+            // redaction against the edge of a capture comes out translucent
+            filtered = source.clampedToExtent()
+                .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: max(intensity, 1)])
+        case .pixelate:
+            // anchor the mosaic to the region, so blocks line up with what is being covered
+            filtered = source.applyingFilter("CIPixellate", parameters: [
+                kCIInputScaleKey: max(intensity, 2),
+                kCIInputCenterKey: CIVector(x: region.minX, y: region.minY),
+            ])
+        default:
+            return nil
+        }
+        guard let out = context.createCGImage(filtered, from: region) else { return nil }
+        cache.setObject(out, forKey: key)
         return out
     }
 }

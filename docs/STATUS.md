@@ -32,8 +32,8 @@ scale-Retina on right-click (needs editor plumbing, lands with M2).
 
 ## M2 status (It annotates)
 
-Done: annotation editor (arrow, rectangle, ellipse, line, freehand, text, counter, highlighter)
-with layer selection, control-point editing, per-layer recolor and width, undo
+Done: annotation editor (arrow, rectangle, ellipse, line, freehand, text, counter, highlighter,
+blur, pixelate) with canvas zoom (pinch / ⌘+ / ⌘− / ⌘0 fit / ⌘1 actual size), layer selection, control-point editing, per-layer recolor and width, undo
 per gesture · crop (draggable from inside, resizable from any edge or corner, clamped to the
 image, aspect-ratio presets, in-editor apply that stays undoable) · per-tool options bar ·
 originals preserved in `.originals/` so every destructive edit is reversible.

@@ -38,5 +38,7 @@ let package = Package(
                            .product(name: "Sparkle", package: "Sparkle")],
             path: "Sources/Kapture"),
         .testTarget(name: "KaptureCoreTests", dependencies: ["KaptureCore"], path: "Tests/KaptureCoreTests"),
+        .testTarget(name: "KaptureEditorTests", dependencies: ["KaptureEditor"],
+                    path: "Tests/KaptureEditorTests"),
     ]
 )

@@ -143,6 +143,8 @@ final class EditorViewController: NSViewController {
             (.ellipse, "circle", "Ellipse"),
             (.freehand, "scribble", "Pen"),
             (.highlight, "highlighter", "Highlight"),
+            (.blur, "drop.fill", "Blur out"),
+            (.pixelate, "square.grid.3x3.fill", "Pixelate"),
             (.text, "textformat", "Text"),
             (.counter, "1.circle", "Step counter"),
             (.crop, "crop", "Crop (applies when you press Done)"),
@@ -285,7 +287,15 @@ final class EditorViewController: NSViewController {
         case .counter: showWidth = true; widthTitle = "Size"
         case .rect, .ellipse: showWidth = true; showFill = true
         case .select, .arrow, .line, .freehand: showWidth = true
+        case .blur, .pixelate:
+            showColor = false      // a redaction has no colour to pick
+            showWidth = true
+            widthTitle = "Amount"
         }
+        // the width slider doubles as the redaction amount, on its own scale
+        let redacting = effective.isRedaction
+        widthSlider.minValue = redacting ? 4 : 2
+        widthSlider.maxValue = redacting ? 80 : 24
         colorButtons.forEach { $0.isHidden = !showColor }
         widthLabel.isHidden = !showWidth
         widthSlider.isHidden = !showWidth
@@ -297,11 +307,13 @@ final class EditorViewController: NSViewController {
 
         // sync control values to the selected layer (or the tool defaults)
         if let layer = selectedLayer {
-            widthSlider.doubleValue = Double(layer.strokeWidth)
+            widthSlider.doubleValue = redacting
+                ? Double(layer.intensity ?? layer.tool.defaultIntensity)
+                : Double(layer.strokeWidth)
             sizeSlider.doubleValue = Double(layer.fontSize ?? Annotation.defaultFontSize)
             fillCheck.state = layer.filled == true ? .on : .off
         } else {
-            widthSlider.doubleValue = Double(canvas.strokeWidth)
+            widthSlider.doubleValue = redacting ? Double(canvas.intensity) : Double(canvas.strokeWidth)
             sizeSlider.doubleValue = Double(canvas.textSize)
             fillCheck.state = canvas.fillShapes ? .on : .off
         }
@@ -336,7 +348,10 @@ final class EditorViewController: NSViewController {
     private var sliderGestureActive = false
     @objc private func widthChanged(_ sender: NSSlider) {
         let w = CGFloat(sender.doubleValue)
-        if canvas.tool == .select {
+        let effective = (canvas.tool == .select ? canvas.selectedLayer?.tool : canvas.tool) ?? canvas.tool
+        if effective.isRedaction {
+            if !canvas.reintensifySelected(w, recordUndo: !sliderGestureActive) { canvas.intensity = w }
+        } else if canvas.tool == .select {
             canvas.rewidthSelected(w, recordUndo: !sliderGestureActive)
         } else {
             canvas.strokeWidth = w
@@ -371,6 +386,8 @@ final class CanvasView: NSView, NSTextFieldDelegate {
     var strokeWidth: CGFloat = 6
     var textSize: CGFloat = Annotation.defaultFontSize
     var fillShapes = false
+    /// Blur radius / pixelate block size for new redactions, image-space.
+    var intensity: CGFloat = Tool.blur.defaultIntensity
     var onSelectionChanged: (() -> Void)?
     var selectedLayer: Annotation? {
         guard let sel = selected else { return nil }
@@ -412,8 +429,91 @@ final class CanvasView: NSView, NSTextFieldDelegate {
         let r = layers[i].rect.intersection(imageBounds)
         return (r.width >= 1 && r.height >= 1) ? r : imageBounds
     }
-    private var imageRect: CGRect {
-        Tokens.aspectFit(viewport.size, in: bounds)
+    // MARK: zoom — 1 means "fit the window", which is the floor; above that the canvas
+    // magnifies about the pointer and can be panned. All annotation geometry still lives in
+    // image space, because every conversion goes through imageRect.
+    private(set) var zoom: CGFloat = 1
+    private(set) var pan: CGPoint = .zero
+    private let maxZoom: CGFloat = 8
+
+    var fittedRect: CGRect { Tokens.aspectFit(viewport.size, in: bounds) }
+
+    var imageRect: CGRect {
+        let fitted = fittedRect
+        guard zoom > 1.001 else { return fitted }
+        let size = CGSize(width: fitted.width * zoom, height: fitted.height * zoom)
+        let origin = CGPoint(x: fitted.midX - size.width / 2 + pan.x,
+                             y: fitted.midY - size.height / 2 + pan.y)
+        return clampToView(CGRect(origin: origin, size: size))
+    }
+
+    /// Keep the magnified image covering the view: panning must never strand the canvas against
+    /// an empty background.
+    private func clampToView(_ rect: CGRect) -> CGRect {
+        var r = rect
+        if r.width <= bounds.width {
+            r.origin.x = bounds.midX - r.width / 2
+        } else {
+            r.origin.x = min(bounds.minX, max(bounds.maxX - r.width, r.origin.x))
+        }
+        if r.height <= bounds.height {
+            r.origin.y = bounds.midY - r.height / 2
+        } else {
+            r.origin.y = min(bounds.minY, max(bounds.maxY - r.height, r.origin.y))
+        }
+        return r
+    }
+
+    /// Zoom, keeping whatever is under `anchor` (view space) pinned there.
+    func setZoom(_ requested: CGFloat, anchor: CGPoint? = nil) {
+        let target = max(1, min(maxZoom, requested))
+        guard abs(target - zoom) > 0.0001 else { return }
+        let before = imageRect
+        let a = anchor ?? CGPoint(x: bounds.midX, y: bounds.midY)
+        let u = before.width > 0 ? (a.x - before.minX) / before.width : 0.5
+        let v = before.height > 0 ? (a.y - before.minY) / before.height : 0.5
+        zoom = target
+        if target <= 1.0001 {
+            pan = .zero
+        } else {
+            let fitted = fittedRect
+            let w = fitted.width * zoom, h = fitted.height * zoom
+            pan = CGPoint(x: a.x - u * w - (fitted.midX - w / 2),
+                          y: a.y - v * h - (fitted.midY - h / 2))
+        }
+        needsDisplay = true
+    }
+
+    /// One image pixel per point.
+    func zoomToActualSize() {
+        let fitted = fittedRect
+        guard fitted.width > 0 else { return }
+        setZoom(viewport.width / fitted.width)
+    }
+
+    override func magnify(with event: NSEvent) {
+        setZoom(zoom * (1 + event.magnification), anchor: convert(event.locationInWindow, from: nil))
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        guard zoom > 1.001 else { return }
+        // the image follows the fingers, same mapping the overlay cards use
+        pan.x -= event.scrollingDeltaX
+        pan.y += event.scrollingDeltaY
+        needsDisplay = true
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        guard event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command else {
+            return super.performKeyEquivalent(with: event)
+        }
+        switch event.charactersIgnoringModifiers {
+        case "+", "=": setZoom(zoom * 1.25); return true
+        case "-": setZoom(zoom / 1.25); return true
+        case "0": setZoom(1); return true
+        case "1": zoomToActualSize(); return true
+        default: return super.performKeyEquivalent(with: event)
+        }
     }
     private func toImage(_ p: CGPoint) -> CGPoint {
         let r = imageRect, vp = viewport
@@ -526,6 +626,18 @@ final class CanvasView: NSView, NSTextFieldDelegate {
         needsDisplay = true
     }
 
+    /// Change the selected redaction's amount (undoable). False if the selection isn't one.
+    @discardableResult
+    func reintensifySelected(_ amount: CGFloat, recordUndo: Bool) -> Bool {
+        intensity = amount
+        guard let sel = selected, let i = layers.firstIndex(where: { $0.id == sel }),
+              layers[i].tool.isRedaction else { return false }
+        if recordUndo { pushUndo() }
+        layers[i].intensity = amount
+        needsDisplay = true
+        return true
+    }
+
     /// Recolor the selected layer (undoable). Returns false if nothing is selected.
     @discardableResult
     func recolorSelected(_ hex: String) -> Bool {
@@ -604,6 +716,7 @@ final class CanvasView: NSView, NSTextFieldDelegate {
                                colorHex: tool == .highlight ? highlightHex : colorHex,
                                strokeWidth: strokeWidth)
             if tool == .rect || tool == .ellipse { d.filled = fillShapes }
+            if tool.isRedaction { d.intensity = intensity }
             draft = d
         }
         needsDisplay = true
@@ -923,7 +1036,17 @@ final class CanvasView: NSView, NSTextFieldDelegate {
         let r = imageRect
         let vp = viewport
         // checkerboard-free neutral surround already via layer background
-        if let composite = baseComposite(for: r.size, viewport: vp) {
+        if zoom > 1.001 {
+            // Magnified, the drop shadow is off screen anyway and the cached composite would be
+            // a bitmap the size of the zoomed canvas — 8x of a 5K capture is over a gigabyte.
+            // Draw the source directly and let CoreGraphics do the scaling.
+            ctx.saveGState()
+            ctx.clip(to: bounds)
+            let source = vp == imageBounds ? image : (image.cropping(to: vp) ?? image)
+            ctx.interpolationQuality = zoom > 2 ? .none : .high   // pixels, not mush, up close
+            ctx.draw(source, in: r)
+            ctx.restoreGState()
+        } else if let composite = baseComposite(for: r.size, viewport: vp) {
             ctx.draw(composite, in: r.insetBy(dx: -shadowPad, dy: -shadowPad))
         }
 
@@ -932,8 +1055,8 @@ final class CanvasView: NSView, NSTextFieldDelegate {
         ctx.saveGState()
         ctx.translateBy(x: r.minX - vp.minX * s, y: r.maxY + vp.minY * s)
         ctx.scaleBy(x: s, y: -s)
-        for l in layers { l.draw(in: ctx) }
-        if let d = draft { d.draw(in: ctx) }
+        for l in layers { l.draw(in: ctx, base: image) }
+        if let d = draft { d.draw(in: ctx, base: image) }
         // Crop preview: dim everything outside the crop rect, dashed border on it — shown while
         // the crop tool is active or the crop is still pending (applied crops re-base the view).
         chipApplyRect = nil

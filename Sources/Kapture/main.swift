@@ -28,6 +28,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             }
             EditorController.shared.onFlattened = { id in
                 OverlayController.shared.showCard(recordID: id)
+                // re-read the edited pixels: applyEdit dropped the old text, and what the
+                // capture says now may differ from what it said before it was annotated
+                Task { await IngestQueue.shared.enqueue(id, after: 0) }
             }
             EditorController.shared.onWindowOpened = { ActivationPolicy.acquire() }
             EditorController.shared.onWindowClosed = { ActivationPolicy.release() }

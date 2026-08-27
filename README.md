@@ -24,9 +24,12 @@ a flick toward the screen edge). Discarding is one gesture, not a dialog, becaus
 case is three shots of the same thing and only the best one is worth keeping. Anything
 discarded sits in a trash for seven days.
 
-**Annotate** — arrows, boxes, ellipses, lines, freehand, text, step counters and a highlighter.
-Crop with the usual aspect ratios. No redaction yet: if a capture has something in it you don't
-want to keep, crop it out rather than covering it.
+**Annotate** — arrows, boxes, ellipses, lines, freehand, text, step counters, a highlighter, and
+blur or pixelate for the parts that shouldn't leave your machine. Crop with the usual aspect
+ratios. Pinch or ⌘+/⌘− to zoom, ⌘0 to fit, ⌘1 for actual size.
+
+A redaction covers what is under it and takes it out of the search index too — blur a password
+and it stops being findable in your library, not just in the file.
 Every layer stays editable and every edit is undoable; the untouched original is always kept
 aside, so a crop is never permanent.
 

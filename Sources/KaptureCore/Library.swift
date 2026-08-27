@@ -281,6 +281,12 @@ public final class Library: @unchecked Sendable {
                         shareStale = (shareURL IS NOT NULL) WHERE id = ?
                     """, arguments: [flattenedPNG.count, width, height,
                                      Library.fastID(of: fileURL), id])
+                // The recognized text described the pixels that were just replaced. Blurring a
+                // password out of a capture has to take it out of the search index too, or
+                // "I redacted that" is only true of the file. The caller re-runs OCR on the
+                // new pixels; until it does, this capture simply has no indexed text.
+                try d.execute(sql: "UPDATE fts_source SET ocr = '', summary = '' WHERE captureId = ?",
+                              arguments: [id])
             })
         Log.store.info("flattened edit onto \(record.relPath, privacy: .public)")
     }
