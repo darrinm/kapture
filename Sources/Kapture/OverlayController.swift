@@ -281,6 +281,14 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
     }
 
     func discard() {
+        guard commitDiscard() else { fadeOut(); return }   // no false discard feedback
+        slideOff()
+    }
+
+    /// Moves the capture to the trash and gives the feedback for it. Returns false if the record
+    /// was already gone, in which case nothing should animate as though it worked.
+    @discardableResult
+    func commitDiscard() -> Bool {
         var discarded = false
         if let library = OverlayController.shared.library,
            let fresh = try? library.db.queue.read({ try CaptureRecord.fetchOne($0, key: record.id) }) {
@@ -289,10 +297,17 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
                 discarded = true
             } catch { Log.store.error("discard failed: \(error)") }
         }
-        guard discarded else { fadeOut(); return }   // no false discard feedback
+        guard discarded else { return false }
         Task { await IngestQueue.shared.cancel(record.id) }     // discarded: don't spend OCR on it
         Sounds.play("Bottle")
-        slideOff()
+        return true
+    }
+
+    /// Take the card off screen and out of the stack. The caller has already animated it to
+    /// wherever it should end up.
+    func finishClose() {
+        orderOut(nil)
+        onClose(self)
     }
 
     func copyToClipboard() {
@@ -418,8 +433,7 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
             self.animator().setFrame(self.frame.offsetBy(dx: dx, dy: 0), display: true)
             self.animator().alphaValue = 0
         }) {
-            self.orderOut(nil)
-            self.onClose(self)
+            self.finishClose()
         }
     }
 }
@@ -437,8 +451,23 @@ final class OverlayView: NSView, NSDraggingSource {
     }
     let chrome = NSStackView()
     private var trashButton: NSButton!
+    // Swipe-to-dismiss, modelled on a macOS notification banner: the card tracks the finger,
+    // resists when dragged the wrong way, and on release either carries on off the edge or
+    // springs back. The old version only measured the gesture and acted at the end, so the card
+    // sat still under your finger and dismissal felt like a command rather than a movement.
+    private enum SwipeAxis { case undecided, horizontal, vertical }
+    private var swipeAxis: SwipeAxis = .undecided
+    private var swipeStart: NSRect?
     private var swipeX: CGFloat = 0
     private var swipeY: CGFloat = 0
+    /// Toward-edge points per second, smoothed so one jittery frame can't fling the card.
+    private var swipeVelocity: CGFloat = 0
+    private var swipeTime: TimeInterval = 0
+
+    /// Sign of accumulated deltaX that means "toward the edge the cards live on".
+    private var towardEdgeSign: CGFloat { Settings.shared.overlayOnLeftEdge ? 1 : -1 }
+    /// Which way that edge lies on screen.
+    private var edgeScreenSign: CGFloat { Settings.shared.overlayOnLeftEdge ? -1 : 1 }
 
     private func button(_ symbol: String, _ tip: String, _ action: Selector) -> NSButton {
         let image = NSImage(systemSymbolName: symbol, accessibilityDescription: tip)!
@@ -549,18 +578,75 @@ final class OverlayView: NSView, NSDraggingSource {
     // MARK: two-finger swipes — toward edge = discard, down = hide all
     override func scrollWheel(with event: NSEvent) {
         switch event.phase {
-        case .began: swipeX = 0; swipeY = 0
+        case .began:
+            swipeAxis = .undecided
+            swipeX = 0
+            swipeY = 0
+            swipeVelocity = 0
+            swipeTime = event.timestamp
+            swipeStart = panel.frame
         case .changed:
+            guard let start = swipeStart else { return }
             swipeX += event.scrollingDeltaX
             swipeY += event.scrollingDeltaY
-        case .ended:
-            let towardEdge = Settings.shared.overlayOnLeftEdge ? swipeX > 60 : swipeX < -60
-            // natural scrolling: swiping content left gives positive deltaX; check both signs safely
-            let horizontal = abs(swipeX) > 60 && abs(swipeX) > abs(swipeY)
-            let down = swipeY < -40 && abs(swipeY) > abs(swipeX)
-            if horizontal && (towardEdge || abs(swipeX) > 100) { panel.discard() }
-            else if down { OverlayController.shared.hideAll() }
+            // lock the axis once the gesture commits to one, so a slightly diagonal swipe
+            // doesn't drag the card sideways while the user is scrolling the stack down
+            if swipeAxis == .undecided, max(abs(swipeX), abs(swipeY)) > 8 {
+                swipeAxis = abs(swipeX) > abs(swipeY) ? .horizontal : .vertical
+            }
+            guard swipeAxis == .horizontal else { return }
+            let elapsed = max(event.timestamp - swipeTime, 1.0 / 240)
+            swipeTime = event.timestamp
+            swipeVelocity = swipeVelocity * 0.6 + (event.scrollingDeltaX * towardEdgeSign / elapsed) * 0.4
+            panel.setFrameOrigin(NSPoint(x: start.minX + swipeOffset(), y: start.minY))
+        case .ended, .cancelled:
+            let start = swipeStart
+            let axis = swipeAxis
+            swipeStart = nil
+            swipeAxis = .undecided
+            guard let start else { return }
+            switch axis {
+            case .vertical:
+                if swipeY < -40 { OverlayController.shared.hideAll() }
+            case .horizontal:
+                let dismiss = SwipePhysics.shouldDismiss(progress: swipeX * towardEdgeSign,
+                                                         velocity: swipeVelocity,
+                                                         width: bounds.width)
+                if event.phase != .cancelled, dismiss {
+                    flyOff(from: start)
+                } else {
+                    springBack(to: start)
+                }
+            case .undecided:
+                break
+            }
         default: break
+        }
+    }
+
+    /// How far the card has moved with the finger, in screen terms.
+    private func swipeOffset() -> CGFloat {
+        SwipePhysics.offset(progress: swipeX * towardEdgeSign, width: bounds.width) * edgeScreenSign
+    }
+
+    private func flyOff(from start: NSRect) {
+        // commit first: if the record is already gone there is nothing to fly away, and the card
+        // should settle back rather than pretend it discarded something
+        guard panel.commitDiscard() else { springBack(to: start); return }
+        let target = start.minX + edgeScreenSign * (bounds.width + 60)
+        let remaining = max(abs(target - panel.frame.minX), 40)
+        let duration = SwipePhysics.flyOffDuration(remaining: remaining, velocity: swipeVelocity)
+        Tokens.animate(duration, {
+            self.panel.animator().setFrameOrigin(NSPoint(x: target, y: start.minY))
+            self.panel.animator().alphaValue = 0
+        }) { [weak self] in
+            self?.panel.finishClose()
+        }
+    }
+
+    private func springBack(to start: NSRect) {
+        Tokens.animate(0.32, timing: Tokens.springBack) {
+            self.panel.animator().setFrameOrigin(start.origin)
         }
     }
 

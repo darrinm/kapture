@@ -56,13 +56,19 @@ public enum Tokens {
         NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
     }
 
-    public static func animate(_ duration: TimeInterval, _ body: () -> Void, completion: (() -> Void)? = nil) {
+    /// Overshoots slightly at the end — what a settling spring looks like. Used where something
+    /// snaps back to a resting position rather than travelling to a new one.
+    public static let springBack = CAMediaTimingFunction(controlPoints: 0.22, 1.35, 0.36, 1)
+
+    public static func animate(_ duration: TimeInterval,
+                               timing: CAMediaTimingFunction = CAMediaTimingFunction(name: .easeOut),
+                               _ body: () -> Void, completion: (() -> Void)? = nil) {
         if reduceMotion {
             body(); completion?()
         } else {
             NSAnimationContext.runAnimationGroup({ ctx in
                 ctx.duration = duration
-                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                ctx.timingFunction = timing
                 ctx.allowsImplicitAnimation = true
                 body()
             }, completionHandler: completion)
