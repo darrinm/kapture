@@ -6,6 +6,8 @@ import XCTest
 
 final class SwipePhysicsTests: XCTestCase {
     private let width: CGFloat = 260
+    /// A card, for the tests that need both dimensions.
+    private let card = CGSize(width: 320, height: 200)
 
     func testTrackingTowardTheEdgeIsExact() {
         // any lag here reads as the card not keeping up with the finger
@@ -138,12 +140,15 @@ final class SwipePhysicsTests: XCTestCase {
         XCTAssertGreaterThan(gentle, 0, "even a slow dismissal turns — square is 'on rails'")
         XCTAssertGreaterThan(hard, gentle)
 
+    }
+
+    func testTheTurnSaturatesRatherThanRunningAway() {
+        let directions = [(CGFloat(100), CGFloat(0)), (100, 400), (100, -400), (-100, 90)]
+            .map { SwipePhysics.flyOffDirection(dx: $0.0, dy: $0.1, towardEdge: $0.0 < 0 ? -1 : 1) }
         for velocity in stride(from: CGFloat(0), through: 8000, by: 250) {
-            for (dx, dy) in [(CGFloat(100), CGFloat(0)), (100, 400), (100, -400), (-100, 90)] {
-                let v = SwipePhysics.flyOffDirection(dx: dx, dy: dy, towardEdge: dx < 0 ? -1 : 1)
-                XCTAssertLessThanOrEqual(abs(SwipePhysics.spin(velocity: velocity, direction: v)),
-                                         SwipePhysics.maxFlingSpin,
-                                         "saturates rather than running away")
+            for direction in directions {
+                XCTAssertLessThanOrEqual(abs(SwipePhysics.spin(velocity: velocity, direction: direction)),
+                                         SwipePhysics.maxFlingSpin)
             }
         }
     }
@@ -173,31 +178,42 @@ final class SwipePhysicsTests: XCTestCase {
     /// The one that bites visually: too little clearance and the window shears the card's corners
     /// off at exactly the moment the rotation becomes visible.
     func testClearanceCoversTheRotatedCard() {
-        let w: CGFloat = 320, h: CGFloat = 200
-        XCTAssertEqual(SwipePhysics.verticalClearance(width: w, height: h, degrees: 0), 0,
-                       accuracy: 0.001, "an upright card needs no room")
+        XCTAssertEqual(SwipePhysics.verticalClearance(width: card.width, height: card.height, degrees: 0),
+                       0, accuracy: 0.001, "an upright card needs no room")
+
+        // Checked by rotating the card's four actual corners, not by re-deriving the formula: an
+        // assertion that recomputes the implementation compares it to itself and cannot fail.
         for degrees in stride(from: CGFloat(1), through: 30, by: 1) {
-            let pad = SwipePhysics.verticalClearance(width: w, height: h, degrees: degrees)
-            let radians = degrees * .pi / 180
-            let needed = (w * sin(radians) + h * cos(radians) - h) / 2
-            XCTAssertGreaterThanOrEqual(pad + 0.001, needed, "\(degrees)deg would be clipped")
+            let pad = SwipePhysics.verticalClearance(width: card.width, height: card.height,
+                                                     degrees: degrees)
+            let rotation = CGAffineTransform(rotationAngle: degrees * .pi / 180)
+            let corners = [CGPoint(x: -card.width / 2, y: -card.height / 2),
+                           CGPoint(x: card.width / 2, y: -card.height / 2),
+                           CGPoint(x: card.width / 2, y: card.height / 2),
+                           CGPoint(x: -card.width / 2, y: card.height / 2)]
+            let highest = corners.map { abs($0.applying(rotation).y) }.max()!
+            XCTAssertEqual(pad, highest - card.height / 2, accuracy: 0.001,
+                           "\(degrees)deg: the padding must reach the corner that sticks out")
         }
-        XCTAssertEqual(SwipePhysics.verticalClearance(width: w, height: h, degrees: -12),
-                       SwipePhysics.verticalClearance(width: w, height: h, degrees: 12),
+
+        XCTAssertEqual(SwipePhysics.verticalClearance(width: card.width, height: card.height, degrees: -12),
+                       SwipePhysics.verticalClearance(width: card.width, height: card.height, degrees: 12),
                        accuracy: 0.001, "leaning either way needs the same room")
     }
 
-    func testTheWindowIsPaddedForEverythingTheCardCanDo() {
-        // what OverlayPanel.beginSwipe asks for: the worst case is a fully leaned card that is
-        // then flung, so the two rotations add
-        let w: CGFloat = 320, h: CGFloat = 200
-        let worst = SwipePhysics.maxDragTilt + SwipePhysics.maxFlingSpin
-        let pad = SwipePhysics.verticalClearance(width: w, height: h, degrees: worst)
-        let direction = SwipePhysics.flyOffDirection(dx: 200, dy: 200, towardEdge: 1)
-        let spun = SwipePhysics.tilt(offset: w, width: w)
-            + SwipePhysics.spin(velocity: 10_000, direction: direction)
-        XCTAssertGreaterThanOrEqual(pad + 0.001,
-                                    SwipePhysics.verticalClearance(width: w, height: h, degrees: spun),
-                                    "a hard flick from full lean must still fit inside the window")
+    /// `maxRotation` is what the panel reserves window space for, so nothing the card can do may
+    /// exceed it — otherwise the corners are clipped at the moment the rotation becomes visible.
+    func testNothingTheCardCanDoExceedsTheReservedRotation() {
+        for dy in stride(from: CGFloat(-400), through: 400, by: 50) {
+            for velocity in stride(from: CGFloat(0), through: 10_000, by: 500) {
+                for edge in [CGFloat(-1), 1] {
+                    let direction = SwipePhysics.flyOffDirection(dx: 200 * edge, dy: dy, towardEdge: edge)
+                    let total = SwipePhysics.tilt(offset: card.width * edge, width: card.width)
+                        + SwipePhysics.spin(velocity: velocity, direction: direction)
+                    XCTAssertLessThanOrEqual(abs(total), SwipePhysics.maxRotation + 0.001,
+                                             "dy \(dy) at \(velocity) turns further than the window allows")
+                }
+            }
+        }
     }
 }

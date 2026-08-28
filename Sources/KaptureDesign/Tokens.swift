@@ -66,22 +66,16 @@ public enum Tokens {
     public static func animate(_ duration: TimeInterval,
                                timing: CAMediaTimingFunction = CAMediaTimingFunction(name: .easeOut),
                                _ body: () -> Void, completion: (() -> Void)? = nil) {
-        if reduceMotion {
-            // Not simply `body()`. Every caller here drives an `animator()` proxy, and outside a
-            // group that animates against the ambient NSAnimationContext — 0.25s by default — so
-            // running the body bare honoured Reduce Motion in none of them. A zero-duration group
-            // is what actually makes the change instant.
-            NSAnimationContext.runAnimationGroup({ ctx in
-                ctx.duration = 0
-                body()
-            }, completionHandler: completion)
-        } else {
-            NSAnimationContext.runAnimationGroup({ ctx in
-                ctx.duration = duration
-                ctx.timingFunction = timing
-                ctx.allowsImplicitAnimation = true
-                body()
-            }, completionHandler: completion)
-        }
+        // Reduce Motion is a duration of zero, not a different code path. Every caller drives an
+        // `animator()` proxy, which animates against the ambient NSAnimationContext — 0.25s by
+        // default — so running the body outside a group honoured the setting in none of them.
+        // One group either way also keeps the mechanism identical: a body relying on implicit
+        // layer animation must not quietly take a different route when the setting is on.
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = reduceMotion ? 0 : duration
+            ctx.timingFunction = timing
+            ctx.allowsImplicitAnimation = true
+            body()
+        }, completionHandler: completion)
     }
 }

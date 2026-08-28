@@ -49,6 +49,17 @@ public enum SwipePhysics {
     public static let maxFlingSpin: CGFloat = 14
     /// Past this speed a flick spins no harder — beyond it the card is leaving either way.
     public static let spinSaturationVelocity: CGFloat = 2200
+    /// The most a card can ever be turned: leaned as far as a drag goes, then flung on top of it.
+    /// Whatever holds the card has to have room for this much rotation.
+    public static let maxRotation = maxDragTilt + maxFlingSpin
+    /// How far past the edge a dismissed card travels before it is out of sight.
+    public static let flyOffMargin: CGFloat = 60
+
+    /// Symmetric clamp. Written out three times below otherwise, and `max(-x, min(x, v))` is easy
+    /// to read past when it is backwards.
+    private static func clamped(_ value: CGFloat, to limit: CGFloat) -> CGFloat {
+        max(-limit, min(limit, value))
+    }
 
     /// How far the card leans for a given displacement, in degrees; sign follows the push.
     ///
@@ -57,7 +68,7 @@ public enum SwipePhysics {
     /// past the edge does not wind it up into a pinwheel.
     public static func tilt(offset: CGFloat, width: CGFloat) -> CGFloat {
         let width = max(width, 1)
-        let fraction = max(-1, min(1, offset / width))
+        let fraction = clamped(offset / width, to: 1)
         return fraction * maxDragTilt
     }
 
@@ -75,7 +86,7 @@ public enum SwipePhysics {
     /// `dy` is in gesture terms, where negative is downward, matching `scrollingDeltaY`.
     public static func flyOffDirection(dx: CGFloat, dy: CGFloat, towardEdge: CGFloat) -> CGVector {
         let horizontal = max(abs(dx), 0.001)
-        let slope = max(-maxFlyOffSlope, min(maxFlyOffSlope, dy / horizontal))
+        let slope = clamped(dy / horizontal, to: maxFlyOffSlope)
         let length = (1 + slope * slope).squareRoot()
         return CGVector(dx: (towardEdge < 0 ? -1 : 1) / length, dy: slope / length)
     }
@@ -84,25 +95,24 @@ public enum SwipePhysics {
     ///
     /// Never zero: a card dismissed by a slow push still turns as it goes, because one that slides
     /// out perfectly square looks like it is on rails. The sense of the turn is the trailing edge
-    /// lagging behind the push, and a diagonal toss turns more than a flat one — the shove is
-    /// further off the card's centre.
+    /// lagging behind the push. A diagonal toss turns a little more than a flat one — the shove is
+    /// further off the card's centre — but only by up to 12%, and not at all once the clamp bites.
     public static func spin(velocity: CGFloat, direction: CGVector) -> CGFloat {
         let speed = min(abs(velocity), spinSaturationVelocity)
         let share = 0.35 + 0.65 * (speed / spinSaturationVelocity)
-        // the sense of the turn comes from the edge alone; how much of it comes from the size of
-        // the shove. Taking |dy| rather than dy keeps the two diagonals symmetric and keeps a
-        // diagonal ahead of a flat throw — signed, it cancelled the turn on one diagonal and
-        // doubled it on the other.
+        // Sense from the edge alone, size from the shove. |dy| rather than dy so the two
+        // diagonals are mirror images; signed, one of them cancelled the turn instead.
         let sense: CGFloat = direction.dx < 0 ? 1 : -1
         let lag = sense * (abs(direction.dx) + abs(direction.dy) * 0.5)
-        return max(-maxFlingSpin, min(maxFlingSpin, lag * maxFlingSpin * share))
+        return clamped(lag * maxFlingSpin * share, to: maxFlingSpin)
     }
 
     /// Half the extra height a rotated card needs beyond its upright box.
     ///
-    /// The card is rotated inside its window, and a window clips whatever leaves its bounds — so
-    /// the window has to be grown by this much above and below first, or the corners are sheared
-    /// off exactly when the rotation becomes visible.
+    /// This is where the clipping constraint lives, and callers refer to it rather than restating
+    /// it: a card is rotated inside a window, and a window clips whatever leaves its bounds, so
+    /// the window must be grown by this much above and below *before* anything turns — otherwise
+    /// the corners shear off at exactly the moment the rotation becomes visible.
     public static func verticalClearance(width: CGFloat, height: CGFloat, degrees: CGFloat) -> CGFloat {
         let radians = abs(degrees) * .pi / 180
         let rotatedHeight = width * sin(radians) + height * cos(radians)
