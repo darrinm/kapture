@@ -67,7 +67,14 @@ public enum Tokens {
                                timing: CAMediaTimingFunction = CAMediaTimingFunction(name: .easeOut),
                                _ body: () -> Void, completion: (() -> Void)? = nil) {
         if reduceMotion {
-            body(); completion?()
+            // Not simply `body()`. Every caller here drives an `animator()` proxy, and outside a
+            // group that animates against the ambient NSAnimationContext — 0.25s by default — so
+            // running the body bare honoured Reduce Motion in none of them. A zero-duration group
+            // is what actually makes the change instant.
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = 0
+                body()
+            }, completionHandler: completion)
         } else {
             NSAnimationContext.runAnimationGroup({ ctx in
                 ctx.duration = duration

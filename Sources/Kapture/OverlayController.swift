@@ -351,6 +351,10 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
         setFrame(NSRect(x: rest.minX - swipePad, y: rest.minY - swipeVPad,
                         width: rest.width + swipePad * 2, height: rest.height + swipeVPad * 2),
                  display: false)
+        // a settle-in spring still in flight would keep driving the card back to the slot's
+        // origin — inside the grown window that is the far left edge, so the card would lurch
+        // sideways under a swipe started in the first fraction of a second
+        card.layer?.removeAllAnimations()
         card.frame = NSRect(x: swipePad, y: swipeVPad, width: rest.width, height: rest.height)
         invalidateShadow()
     }
@@ -382,7 +386,10 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
     /// stays where it is throughout; only the card inside it moves.
     func flyOffAndClose(direction: CGVector, velocity: CGFloat, over duration: TimeInterval) {
         guard swiping else { return }
-        let travel = card.frame.width + 60
+        // Distance along the throw's own line, not across: dismissal is defined by clearing the
+        // edge, so the *horizontal* component still has to cover a full card plus margin. Taken
+        // flat, a 45° exit would fall a third short sideways and be finished off by the fade.
+        let travel = (card.frame.width + 60) / max(abs(direction.dx), 0.001)
         // keeps turning on the way out, harder the harder it was flicked
         let spin = card.frameCenterRotation + SwipePhysics.spin(velocity: velocity, direction: direction)
         // A diagonal exit leaves the window's bounds vertically, and a window clips what leaves
@@ -441,14 +448,18 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
     /// so a capture drops onto the stack instead of materialising there.
     ///
     /// Inset rather than scaled up, because a card that overshoots *larger* is clipped by its own
-    /// window — the window is exactly the slot. `Tokens.animate` honours Reduce Motion, in which
-    /// case the card simply appears at full size.
+    /// window — the window is exactly the slot. Skipped outright under Reduce Motion: the animator
+    /// proxy animates against the ambient context even when `Tokens.animate` runs the body without
+    /// a group of its own, so leaving it to `Tokens.animate` would still bounce the card.
     func settleIn() {
-        guard !swiping, restingFrame != .zero else { return }
+        guard !swiping, restingFrame != .zero, !Tokens.reduceMotion else { return }
         let full = NSRect(origin: .zero, size: restingFrame.size)
         card.frame = full.insetBy(dx: full.width * 0.03, dy: full.height * 0.03)
-        Tokens.animate(0.22, timing: Tokens.springBack) {
+        invalidateShadow()   // or the window's shadow stays drawn around the full-size card
+        Tokens.animate(0.22, timing: Tokens.springBack, {
             self.card.animator().frame = full
+        }) { [weak self] in
+            self?.invalidateShadow()
         }
     }
 

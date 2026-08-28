@@ -89,7 +89,12 @@ public enum SwipePhysics {
     public static func spin(velocity: CGFloat, direction: CGVector) -> CGFloat {
         let speed = min(abs(velocity), spinSaturationVelocity)
         let share = 0.35 + 0.65 * (speed / spinSaturationVelocity)
-        let lag = -direction.dx + direction.dy * 0.5
+        // the sense of the turn comes from the edge alone; how much of it comes from the size of
+        // the shove. Taking |dy| rather than dy keeps the two diagonals symmetric and keeps a
+        // diagonal ahead of a flat throw — signed, it cancelled the turn on one diagonal and
+        // doubled it on the other.
+        let sense: CGFloat = direction.dx < 0 ? 1 : -1
+        let lag = sense * (abs(direction.dx) + abs(direction.dy) * 0.5)
         return max(-maxFlingSpin, min(maxFlingSpin, lag * maxFlingSpin * share))
     }
 

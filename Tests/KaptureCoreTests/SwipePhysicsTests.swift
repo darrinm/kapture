@@ -158,9 +158,16 @@ final class SwipePhysicsTests: XCTestCase {
     func testADiagonalThrowTurnsMoreThanAFlatOne() {
         // the shove is further off the card's centre, so it should tumble more, not the same
         let flat = SwipePhysics.flyOffDirection(dx: 200, dy: 0, towardEdge: 1)
-        let diagonal = SwipePhysics.flyOffDirection(dx: 200, dy: 200, towardEdge: 1)
-        XCTAssertNotEqual(SwipePhysics.spin(velocity: 900, direction: flat),
-                          SwipePhysics.spin(velocity: 900, direction: diagonal), accuracy: 0.5)
+        let up = SwipePhysics.flyOffDirection(dx: 200, dy: 200, towardEdge: 1)
+        let down = SwipePhysics.flyOffDirection(dx: 200, dy: -200, towardEdge: 1)
+        for diagonal in [up, down] {
+            XCTAssertGreaterThan(abs(SwipePhysics.spin(velocity: 900, direction: diagonal)),
+                                 abs(SwipePhysics.spin(velocity: 900, direction: flat)),
+                                 "a diagonal toss is further off centre, so it must turn more")
+        }
+        // and either diagonal turns the same amount: up and down are mirror images of one throw
+        XCTAssertEqual(SwipePhysics.spin(velocity: 900, direction: up),
+                       SwipePhysics.spin(velocity: 900, direction: down), accuracy: 0.001)
     }
 
     /// The one that bites visually: too little clearance and the window shears the card's corners
