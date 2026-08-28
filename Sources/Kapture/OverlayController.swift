@@ -62,6 +62,7 @@ final class OverlayController {
                 // re-derive the slot at landing time — the stack may have moved mid-flight
                 self?.layout(animated: false)
                 panel.orderFrontRegardless()
+                panel.settleIn()   // the flight arrives; this is it coming to rest
                 panel.scheduleAutoClose()
                 flight.orderOut(nil)
             }
@@ -232,6 +233,8 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
     /// How far the window is grown on each side while a swipe is in flight, so the card has room
     /// to travel without the window having to move.
     private var swipePad: CGFloat = 0
+    /// The same, above and below, so the card has room to lean without the window clipping it.
+    private var swipeVPad: CGFloat = 0
     private var swiping = false
     private var autoCloseTimer: Timer?
 
@@ -264,6 +267,7 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
         alphaValue = 0
         orderFrontRegardless()
         Tokens.animate(0.25) { self.animator().alphaValue = 1 }
+        settleIn()
         scheduleAutoClose()
     }
 
@@ -339,10 +343,15 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
         let rest = restingFrame == .zero ? frame : restingFrame
         restingFrame = rest
         swipePad = rest.width + 60
-        setFrame(NSRect(x: rest.minX - swipePad, y: rest.minY,
-                        width: rest.width + swipePad * 2, height: rest.height),
+        // Vertical room as well, for the lean: a window clips what leaves its bounds, so without
+        // this the card's corners are sheared off the moment it starts to turn.
+        swipeVPad = ceil(SwipePhysics.verticalClearance(
+            width: rest.width, height: rest.height,
+            degrees: SwipePhysics.maxDragTilt + SwipePhysics.maxFlingSpin))
+        setFrame(NSRect(x: rest.minX - swipePad, y: rest.minY - swipeVPad,
+                        width: rest.width + swipePad * 2, height: rest.height + swipeVPad * 2),
                  display: false)
-        card.frame = NSRect(x: swipePad, y: 0, width: rest.width, height: rest.height)
+        card.frame = NSRect(x: swipePad, y: swipeVPad, width: rest.width, height: rest.height)
         invalidateShadow()
     }
 
@@ -350,6 +359,7 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
     func swipe(to offset: CGFloat) {
         guard swiping else { return }
         card.frame.origin.x = swipePad + offset
+        card.frameCenterRotation = SwipePhysics.tilt(offset: offset, width: card.frame.width)
         invalidateShadow()
     }
 
@@ -358,21 +368,35 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
         guard swiping else { return }
         // a whole frame, not frame.origin.x: through the animator proxy a sub-property is a
         // read-modify-write against an in-flight presentation value
-        let target = NSRect(x: swipePad, y: 0, width: card.frame.width, height: card.frame.height)
+        let target = NSRect(x: swipePad, y: swipeVPad,
+                            width: card.frame.width, height: card.frame.height)
         Tokens.animate(duration, timing: Tokens.springBack, {
             self.card.animator().frame = target
+            self.card.animator().frameCenterRotation = 0   // unwinds as it comes back to square
         }) { [weak self] in
             self?.settleAfterSwipe()
         }
     }
 
-    /// Animate the card off the edge, then close. The window stays where it is throughout.
-    func flyOffAndClose(direction: CGFloat, over duration: TimeInterval) {
+    /// Animate the card off along the direction it was actually flung, then close. The window
+    /// stays where it is throughout; only the card inside it moves.
+    func flyOffAndClose(direction: CGVector, velocity: CGFloat, over duration: TimeInterval) {
         guard swiping else { return }
-        let target = NSRect(x: swipePad + direction * (card.frame.width + 60), y: 0,
+        let travel = card.frame.width + 60
+        // keeps turning on the way out, harder the harder it was flicked
+        let spin = card.frameCenterRotation + SwipePhysics.spin(velocity: velocity, direction: direction)
+        // A diagonal exit leaves the window's bounds vertically, and a window clips what leaves
+        // it — so make room for the whole path before starting, not just for the rotation.
+        let needed = abs(direction.dy) * travel
+            + SwipePhysics.verticalClearance(width: card.frame.width, height: card.frame.height,
+                                             degrees: spin)
+        growVertically(by: needed - swipeVPad)
+        let target = NSRect(x: swipePad + direction.dx * travel,
+                            y: swipeVPad + direction.dy * travel,
                             width: card.frame.width, height: card.frame.height)
         Tokens.animate(duration, {
             self.card.animator().frame = target
+            self.card.animator().frameCenterRotation = spin
             self.card.animator().alphaValue = 0
         }) { [weak self] in
             // out of sight before anything is put back, or the card reappears at rest for a frame
@@ -388,15 +412,44 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
     /// window and it vanishes.
 
 
+    /// Grow the window above and below without the card appearing to move: the window's origin
+    /// drops by as much as its height gains, and the card's offset inside it rises to match.
+    private func growVertically(by extra: CGFloat) {
+        guard extra > 0 else { return }
+        let current = frame
+        setFrame(NSRect(x: current.minX, y: current.minY - extra,
+                        width: current.width, height: current.height + extra * 2),
+                 display: false)
+        card.frame.origin.y += extra
+        swipeVPad += extra
+    }
+
     /// Put the window back around the card once a gesture is over.
     func settleAfterSwipe() {
         guard swiping else { return }
         swiping = false
         setFrame(restingFrame, display: true)
+        card.frameCenterRotation = 0   // before the frame: rotation is about the frame's centre
         card.frame = NSRect(origin: .zero, size: restingFrame.size)
         card.alphaValue = 1
         swipePad = 0
+        swipeVPad = 0
         invalidateShadow()
+    }
+
+    /// Land in the slot with a little weight: arrive fractionally small and spring to full size,
+    /// so a capture drops onto the stack instead of materialising there.
+    ///
+    /// Inset rather than scaled up, because a card that overshoots *larger* is clipped by its own
+    /// window — the window is exactly the slot. `Tokens.animate` honours Reduce Motion, in which
+    /// case the card simply appears at full size.
+    func settleIn() {
+        guard !swiping, restingFrame != .zero else { return }
+        let full = NSRect(origin: .zero, size: restingFrame.size)
+        card.frame = full.insetBy(dx: full.width * 0.03, dy: full.height * 0.03)
+        Tokens.animate(0.22, timing: Tokens.springBack) {
+            self.card.animator().frame = full
+        }
     }
 
     func copyToClipboard() {
@@ -771,7 +824,10 @@ final class OverlayView: NSView, NSDraggingSource {
         guard panel.commitDiscard() else { springBack(); return }
         let remaining = max(bounds.width + 60 - abs(swipeOffset()), 40)
         let duration = SwipePhysics.flyOffDuration(remaining: remaining, velocity: swipeVelocity)
-        panel.flyOffAndClose(direction: edgeScreenSign, over: duration)
+        // the whole gesture, not just its committed axis: a swipe is rarely flat, and the card
+        // should leave along the line it was actually thrown
+        let direction = SwipePhysics.flyOffDirection(dx: swipeX, dy: swipeY, towardEdge: edgeScreenSign)
+        panel.flyOffAndClose(direction: direction, velocity: swipeVelocity, over: duration)
     }
 
     /// The card animates back to its slot, which also shrinks the window around it again.
