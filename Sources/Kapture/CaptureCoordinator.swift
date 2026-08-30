@@ -11,6 +11,11 @@ final class CaptureCoordinator {
     var library: Library?
 
     func captureArea(startInWindowMode: Bool = false) {
+        // Before anything of ours is on screen. The selection overlay is a key window, so by the
+        // time the capture is stored *we* are the frontmost application — every area capture was
+        // being filed under Kapture itself, which is why the library's app filter offered one
+        // entry. `RecordingCoordinator` takes the same reading for the same reason.
+        let frontApp = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
         Task {
             guard ScreenshotService.hasPermission else { Onboarding.shared.show(); return }
             do {
@@ -24,6 +29,7 @@ final class CaptureCoordinator {
                     rememberArea(sel)
                     guard let cropped = ScreenshotService.crop(sel.frame, rectInPoints: sel.rectInPoints) else { return }
                     store(cropped, screenID: Int(sel.frame.display.displayID), windowTitle: nil,
+                          sourceApp: frontApp,
                           sourceRect: ScreenshotService.nsRect(displayLocal: sel.rectInPoints, on: sel.frame.screen))
                 case .window(let win):
                     let image = try await ScreenshotService.captureWindow(win)
@@ -65,25 +71,30 @@ final class CaptureCoordinator {
     }
 
     func captureFullscreen(allDisplays: Bool = false) {
+        // read now rather than after the freeze: nothing of ours takes focus on this path, but
+        // "who was in front when the shutter was pressed" is the question, not "who is in front
+        // by the time the file is written"
+        let frontApp = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
         Task {
             guard ScreenshotService.hasPermission else { Onboarding.shared.show(); return }
             do {
                 let frames = try await ScreenshotService.freezeAllDisplays()
                 if allDisplays {
                     guard let image = ScreenshotService.compositeAllDisplays(frames) else { return }
-                    store(image, screenID: nil, windowTitle: nil)
+                    store(image, screenID: nil, windowTitle: nil, sourceApp: frontApp)
                 } else {
                     let mouse = NSEvent.mouseLocation
                     let frame = frames.first { $0.screen.frame.contains(mouse) } ?? frames.first
                     guard let frame else { return }
                     store(frame.image, screenID: Int(frame.display.displayID), windowTitle: nil,
-                          sourceRect: frame.screen.frame)
+                          sourceApp: frontApp, sourceRect: frame.screen.frame)
                 }
             } catch { Log.capture.error("fullscreen capture failed: \(error)") }
         }
     }
 
     func capturePreviousArea() {
+        let frontApp = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
         Task {
             guard ScreenshotService.hasPermission else { Onboarding.shared.show(); return }
             guard let (displayID, rect) = recallArea() else { captureArea(); return }
@@ -92,6 +103,7 @@ final class CaptureCoordinator {
                 guard let frame = frames.first(where: { $0.display.displayID == displayID }) ?? frames.first,
                       let cropped = ScreenshotService.crop(frame, rectInPoints: rect) else { return }
                 store(cropped, screenID: Int(frame.display.displayID), windowTitle: nil,
+                      sourceApp: frontApp,
                       sourceRect: ScreenshotService.nsRect(displayLocal: rect, on: frame.screen))
             } catch { Log.capture.error("previous-area capture failed: \(error)") }
         }

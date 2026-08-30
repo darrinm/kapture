@@ -234,8 +234,7 @@ final class LibraryContentView: NSView, NSSearchFieldDelegate {
         appFilter.removeAllItems()
         appFilter.addItem(withTitle: "Any app")
         for app in apps {
-            let short = app.split(separator: ".").last.map(String.init) ?? app
-            let item = NSMenuItem(title: short.capitalized, action: nil, keyEquivalent: "")
+            let item = NSMenuItem(title: Self.displayName(forBundleID: app), action: nil, keyEquivalent: "")
             item.representedObject = app
             appFilter.menu?.addItem(item)
         }
@@ -246,6 +245,35 @@ final class LibraryContentView: NSView, NSSearchFieldDelegate {
         } else if selected != nil {
             grid.app = nil   // the filtered app is gone from the library; fall back to "Any app"
         }
+    }
+
+    /// What to call an app in the filter. Ask the system, which knows it as "Ghostty" or "Safari";
+    /// the last component of a bundle id is a guess that reads fine for `com.apple.Safari` and
+    /// turns `sh.kapture.app` into "App". Cached — the menu is rebuilt on every refresh, and
+    /// resolving a bundle id touches the launch services database.
+    private static var appNames: [String: String] = [:]
+
+    private static func displayName(forBundleID id: String) -> String {
+        if let known = appNames[id] { return known }
+        let resolved = resolveName(id)
+        appNames[id] = resolved
+        return resolved
+    }
+
+    /// The bundle's own name, localized where the app provides one. Not `FileManager`'s display
+    /// name, which is the filename and carries the ".app" for anyone who has Finder set to show
+    /// extensions; and not the last component of the id, which is only ever a guess.
+    private static func resolveName(_ id: String) -> String {
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id) else {
+            // uninstalled since the capture was taken — the id is all there is to go on
+            return id.split(separator: ".").last.map(String.init)?.capitalized ?? id
+        }
+        let bundle = Bundle(url: url)
+        for key in ["CFBundleDisplayName", "CFBundleName"] {
+            if let name = bundle?.localizedInfoDictionary?[key] as? String { return name }
+            if let name = bundle?.object(forInfoDictionaryKey: key) as? String { return name }
+        }
+        return url.deletingPathExtension().lastPathComponent
     }
 
     @objc private func appFilterChanged() {
