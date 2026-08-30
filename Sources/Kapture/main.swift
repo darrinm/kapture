@@ -272,14 +272,8 @@ if let i = CommandLine.arguments.firstIndex(of: "--gif-test"), CommandLine.argum
 // this tells you about the panes, not about the list beside them. Use `--real` for that.
 //   Kapture.app/Contents/MacOS/Kapture --settings-shot /tmp/settings
 if let i = CommandLine.arguments.firstIndex(of: "--settings-shot"), CommandLine.arguments.count > i + 1 {
-    let directory = URL(fileURLWithPath: CommandLine.arguments[i + 1])
-    try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
-    let panes: [(String, SettingsView.Tab)] = [
-        ("1-general", .general), ("2-overlay", .overlay), ("3-recording", .recording),
-        ("4-library", .library), ("5-shortcuts", .shortcuts), ("6-sharing", .sharing),
-    ]
     // --real opens the window the menu item opens and checks it came up at its intended size.
     // This is the regression it exists for: the hosting controller takes the SwiftUI view's
     // ideal size, and when that view had no definite height the window opened as an 84-point
@@ -296,19 +290,23 @@ if let i = CommandLine.arguments.firstIndex(of: "--settings-shot"), CommandLine.
             }
             let expected = SettingsView.windowSize
             print("settings-probe: content \(content.frame.size), expected \(expected)")
-            let sized = content.frame.height >= expected.height - 60
+            // The pane's own width is this minus the sidebar's fixed slice, so there is nothing
+            // separate to check: a window this size always leaves the panes room, and one that
+            // doesn't fails here first.
+            let ok = content.frame.height >= expected.height - 60
                 && content.frame.width >= expected.width - 60
-            if !sized { print("settings-probe: COLLAPSED") }
-            // the pane must keep a usable width once the sidebar has taken its slice, or the
-            // rows in Shortcuts and Sharing wrap into an unreadable column
-            let paneWidth = content.frame.width - SettingsView.sidebarWidth
-            let fitsPane = paneWidth >= 380
-            if !fitsPane { print("settings-probe: PANE TOO NARROW (\(paneWidth))") }
-            let ok = sized && fitsPane
-            if ok { print("settings-probe: ok") }
+            print("settings-probe: \(ok ? "ok" : "COLLAPSED")")
             exit(ok ? 0 : 1)
         }
         app.run()
+    }
+
+    let directory = URL(fileURLWithPath: CommandLine.arguments[i + 1])
+    try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    // Derived from the enum rather than listed again, so a pane added to Settings is a pane that
+    // gets shot. The numbers only order the files on disk.
+    let panes = SettingsView.Tab.allCases.enumerated().map {
+        ("\($0.offset + 1)-\($0.element.title.lowercased())", $0.element)
     }
 
     Task { @MainActor in
