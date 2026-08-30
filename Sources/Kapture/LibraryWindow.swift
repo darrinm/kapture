@@ -26,21 +26,38 @@ final class LibraryWindowController: NSObject, NSWindowDelegate {
         }
         guard let library else { return }
         let content = LibraryContentView(library: library)
-        // No .fullSizeContentView: it runs the content view up under the title bar, and this
-        // window draws an ordinary opaque title bar with a real title on top of it. The search
-        // field is anchored 12pt below the content view's top, so the two landed on each other.
+        // The controls live in the toolbar, so the content view runs the full height of the window
+        // and the grid scrolls under a translucent title bar — one band of chrome rather than a
+        // title bar with a second row of widgets stacked beneath it.
         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 640),
-                         styleMask: [.titled, .closable, .resizable, .miniaturizable],
+                         styleMask: [.titled, .closable, .resizable, .miniaturizable,
+                                     .fullSizeContentView],
                          backing: .buffered, defer: false)
         w.title = "Kapture Library"
         w.contentView = content
         w.center()
         w.isReleasedWhenClosed = false
         w.delegate = self
-        w.minSize = NSSize(width: 620, height: 420)
+        w.minSize = NSSize(width: 720, height: 420)
+
+        // before the toolbar: setting it asks the delegate for every item straight away, and the
+        // delegate builds them out of the content view's controls
+        self.content = content
+
+        let toolbar = NSToolbar(identifier: "library")
+        toolbar.delegate = self
+        toolbar.displayMode = .iconOnly
+        toolbar.allowsUserCustomization = false
+        w.toolbar = toolbar
+        w.toolbarStyle = .unified
+        // the count reads as a subtitle under the title, where Photos puts its date range
+        content.onCountChanged = { [weak w] count in
+            w?.subtitle = count == 1 ? "1 capture" : "\(count) captures"
+        }
+
         window = w
         grid = content.grid
-        self.content = content
+        content.updateZoomAvailability()
         ActivationPolicy.acquire()
         w.makeKeyAndOrderFront(nil)
         content.focusSearch()
@@ -58,15 +75,62 @@ final class LibraryWindowController: NSObject, NSWindowDelegate {
     }
 }
 
-/// Toolbar (search + scopes) above the grid.
+// MARK: - Toolbar
+//
+// Zoom on the left, the scope in the middle, the narrowing controls and search on the right —
+// the shape Photos uses, and the reason the window needs no second row of chrome.
+private extension NSToolbarItem.Identifier {
+    static let zoom = NSToolbarItem.Identifier("zoom")
+    static let scope = NSToolbarItem.Identifier("scope")
+    static let appFilter = NSToolbarItem.Identifier("appFilter")
+    static let dateFilter = NSToolbarItem.Identifier("dateFilter")
+    static let search = NSToolbarItem.Identifier("search")
+}
+
+extension LibraryWindowController: NSToolbarDelegate {
+    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        [.zoom, .flexibleSpace, .scope, .flexibleSpace, .appFilter, .dateFilter, .search]
+    }
+
+    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        toolbarDefaultItemIdentifiers(toolbar)
+    }
+
+    func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier id: NSToolbarItem.Identifier,
+                 willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
+        guard let content else { return nil }
+        // A search field gets the system item, which is what gives it the collapse-to-a-magnifier
+        // behaviour in a narrow window; the rest are the controls the content view already wires.
+        if id == .search {
+            let item = NSSearchToolbarItem(itemIdentifier: id)
+            item.searchField = content.searchField
+            return item
+        }
+        let item = NSToolbarItem(itemIdentifier: id)
+        switch id {
+        case .zoom:       item.view = content.zoomControl;  item.label = "Size"
+        case .scope:      item.view = content.scopeControl; item.label = "Show"
+        case .appFilter:  item.view = content.appFilter;    item.label = "App"
+        case .dateFilter: item.view = content.dateFilter;   item.label = "Date"
+        default: return nil
+        }
+        item.toolTip = item.label
+        return item
+    }
+}
+
+/// The grid and its empty state. The controls that drive it live in the window's toolbar — this
+/// view owns and wires them, and hands them over to be placed there.
 final class LibraryContentView: NSView, NSSearchFieldDelegate {
     let library: Library
     let grid: LibraryGridView
-    private let searchField = NSSearchField()
-    private let scopeControl: NSSegmentedControl
-    private let appFilter = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let dateFilter = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let countLabel = NSTextField(labelWithString: "")
+    let searchField = NSSearchField()
+    let scopeControl: NSSegmentedControl
+    let appFilter = NSPopUpButton(frame: .zero, pullsDown: false)
+    let dateFilter = NSPopUpButton(frame: .zero, pullsDown: false)
+    let zoomControl: NSSegmentedControl
+    /// How the window titles itself — the count belongs in the title bar, not in a band below it.
+    var onCountChanged: ((Int) -> Void)?
     private let emptyLabel = NSTextField(labelWithString: "")
     private var searchDebounce: Task<Void, Never>?
 
@@ -76,6 +140,10 @@ final class LibraryContentView: NSView, NSSearchFieldDelegate {
         let scopes = Library.SearchScope.allCases
         scopeControl = NSSegmentedControl(labels: scopes.map(\.title), trackingMode: .selectOne,
                                           target: nil, action: nil)
+        zoomControl = NSSegmentedControl(images: [
+            NSImage(systemSymbolName: "minus", accessibilityDescription: "Smaller")!,
+            NSImage(systemSymbolName: "plus", accessibilityDescription: "Larger")!,
+        ], trackingMode: .momentary, target: nil, action: nil)
         super.init(frame: .zero)
         wantsLayer = true
         layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
@@ -103,10 +171,13 @@ final class LibraryContentView: NSView, NSSearchFieldDelegate {
         // it owns the search field and both filter popups
         grid.onCountChanged = { [weak self] count in
             guard let self else { return }
-            countLabel.stringValue = count == 1 ? "1 capture" : "\(count) captures"
+            onCountChanged?(count)
             emptyLabel.isHidden = count > 0
             emptyLabel.stringValue = emptyMessage
         }
+
+        zoomControl.target = self
+        zoomControl.action = #selector(zoomChanged)
 
         appFilter.target = self
         appFilter.action = #selector(appFilterChanged)
@@ -116,28 +187,15 @@ final class LibraryContentView: NSView, NSSearchFieldDelegate {
         dateFilter.target = self
         dateFilter.action = #selector(dateFilterChanged)
 
-        countLabel.font = .systemFont(ofSize: 11)
-        countLabel.textColor = .secondaryLabelColor
-
-        for v in [searchField, scopeControl, appFilter, dateFilter, countLabel, scroll, emptyLabel] {
+        // The scroll view fills the window, title bar included: the toolbar is translucent and the
+        // grid is meant to pass under it, which is what makes the chrome one band instead of two.
+        scroll.automaticallyAdjustsContentInsets = true
+        for v in [scroll, emptyLabel] {
             addSubview(v)
             v.translatesAutoresizingMaskIntoConstraints = false
         }
         NSLayoutConstraint.activate([
-            searchField.topAnchor.constraint(equalTo: topAnchor, constant: 12),
-            searchField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
-            searchField.widthAnchor.constraint(greaterThanOrEqualToConstant: 240),
-            scopeControl.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
-            scopeControl.leadingAnchor.constraint(equalTo: searchField.trailingAnchor, constant: 12),
-            appFilter.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
-            appFilter.leadingAnchor.constraint(equalTo: scopeControl.trailingAnchor, constant: 12),
-            appFilter.widthAnchor.constraint(lessThanOrEqualToConstant: 160),
-            dateFilter.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
-            dateFilter.leadingAnchor.constraint(equalTo: appFilter.trailingAnchor, constant: 8),
-            dateFilter.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -16),
-            countLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 18),
-            countLabel.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 6),
-            scroll.topAnchor.constraint(equalTo: countLabel.bottomAnchor, constant: 6),
+            scroll.topAnchor.constraint(equalTo: topAnchor),
             scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
             scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
@@ -200,6 +258,17 @@ final class LibraryContentView: NSView, NSSearchFieldDelegate {
         grid.reload()
     }
 
+    @objc private func zoomChanged() {
+        grid.zoom(by: zoomControl.selectedSegment == 0 ? -1 : 1)
+        updateZoomAvailability()
+    }
+
+    /// The ends of the range are dimmed rather than silently doing nothing.
+    func updateZoomAvailability() {
+        zoomControl.setEnabled(grid.canZoomOut, forSegment: 0)
+        zoomControl.setEnabled(grid.canZoomIn, forSegment: 1)
+    }
+
     @objc private func scopeChanged() {
         grid.scope = Library.SearchScope.allCases[max(0, scopeControl.selectedSegment)]
         grid.reload()
@@ -248,11 +317,22 @@ final class LibraryGridView: NSView {
     var range: Library.DateRange = .any
     var onCountChanged: ((Int) -> Void)?
 
+    /// A day's worth of captures. The grid is a stream of moments before it is a grid of files, so
+    /// the day is the unit the eye is given to navigate by — the same reason Photos groups.
+    private struct Section {
+        let title: String
+        var headerY: CGFloat = 0
+        var bottom: CGFloat = 0
+    }
+
     private var items: [Item] = []
+    private var sections: [Section] = []
     private var hovered: Int?
     private var selected: String?
-    private let rowHeight: CGFloat = 168
-    private let gutter: CGFloat = 4
+    /// Driven by the zoom control and remembered between openings.
+    private var rowHeight: CGFloat { Tokens.gridRowHeights[Settings.shared.librarySizeIndex] }
+    private let gutter = Tokens.gridGutter
+    private let headerHeight: CGFloat = 34
     /// QuickLook is happy to work in parallel; four at a time fills a screen fast without
     /// starving the rest of the machine.
     private let thumbsInFlight = 4
@@ -297,6 +377,11 @@ final class LibraryGridView: NSView {
     /// Scrolling brings new rows into view; generate those next. Coalesced so a flick doesn't
     /// restart the pass on every frame, and nearly free when the cache already has them.
     @objc private func visibleAreaChanged() {
+        // The pinned header is positioned from the visible rect, so it is the one thing on screen
+        // that scrolling moves *relative to* the document and therefore does not repaint itself.
+        // The band covers where it pins, and where the next day's header pushes it out of.
+        setNeedsDisplay(CGRect(x: 0, y: stickyTop - headerHeight,
+                               width: bounds.width, height: headerHeight * 3))
         scrollSettle?.cancel()
         scrollSettle = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(120))
@@ -338,9 +423,11 @@ final class LibraryGridView: NSView {
     /// half-point epsilon happened to stop them.
     private func layoutItems() -> CGFloat {
         let width = max(320, bounds.width)
+        let rowHeight = self.rowHeight
         var y: CGFloat = gutter
         var row: [Int] = []
         var natural: CGFloat = 0   // the row's items at their unstretched widths
+        sections = []
 
         func flush(scale: CGFloat) {
             guard !row.isEmpty else { return }
@@ -355,8 +442,18 @@ final class LibraryGridView: NSView {
             natural = 0
         }
 
+        var day: Date?
         for i in items.indices {
             let r = items[i].record
+            let itemDay = Calendar.current.startOfDay(for: r.createdAt)
+            if itemDay != day {
+                // a day never continues a row from the day before it
+                flush(scale: 1)
+                if !sections.isEmpty { sections[sections.count - 1].bottom = y }
+                sections.append(Section(title: Self.sectionTitle(itemDay), headerY: y))
+                y += headerHeight
+                day = itemDay
+            }
             let aspect = r.height > 0 ? CGFloat(r.width) / CGFloat(r.height) : 1.6
             let w = min(max(rowHeight * aspect, 60), width - gutter * 2)
             // gutters for the row this item would join: one on each side plus one per item
@@ -367,8 +464,23 @@ final class LibraryGridView: NSView {
             row.append(i)
             natural += w
         }
-        flush(scale: 1)   // last row keeps natural size
+        flush(scale: 1)   // a day's last row keeps natural size rather than stretching to fill
+        if !sections.isEmpty { sections[sections.count - 1].bottom = y }
         return max(y + gutter, 200)
+    }
+
+    /// "Today" and "Yesterday" where they apply, the date otherwise — the reading a person does
+    /// of their own recent captures, which is most of what this window is for.
+    private static let sectionFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .long
+        f.timeStyle = .none
+        f.doesRelativeDateFormatting = true
+        return f
+    }()
+
+    private static func sectionTitle(_ day: Date) -> String {
+        sectionFormatter.string(from: day)
     }
 
     private func relayout() {
@@ -380,6 +492,30 @@ final class LibraryGridView: NSView {
         }
         needsDisplay = true
     }
+
+    /// Step the thumbnail size. Returns false at the ends so the caller can dim the control.
+    @discardableResult
+    func zoom(by step: Int) -> Bool {
+        let next = Settings.shared.librarySizeIndex + step
+        guard Tokens.gridRowHeights.indices.contains(next) else { return false }
+        Settings.shared.librarySizeIndex = next
+        // Anchor on what is in view: without this a zoom keeps the scroll *offset* and the grid
+        // jumps to an unrelated day, since every row above has just changed height.
+        let anchor = items.firstIndex { $0.frame.intersects(enclosingScrollView?.documentVisibleRect ?? bounds) }
+        relayout()
+        if let anchor, items.indices.contains(anchor) {
+            // lifted by the inset as well, or the row it anchors on lands under the toolbar
+            var target = items[anchor].frame
+            let lift = (enclosingScrollView?.contentInsets.top ?? 0) + headerHeight
+            target.origin.y -= lift
+            target.size.height += lift
+            scrollToVisible(target)
+        }
+        return true
+    }
+
+    var canZoomIn: Bool { Tokens.gridRowHeights.indices.contains(Settings.shared.librarySizeIndex + 1) }
+    var canZoomOut: Bool { Tokens.gridRowHeights.indices.contains(Settings.shared.librarySizeIndex - 1) }
 
     override func setFrameSize(_ newSize: NSSize) {
         let widthChanged = abs(newSize.width - frame.width) > 0.5
@@ -571,7 +707,7 @@ final class LibraryGridView: NSView {
             let r = item.frame
             if let thumb = item.thumb {
                 ctx.saveGState()
-                ctx.clip(to: r)   // set before the flip, so it is in the view's own coordinates
+                ctx.addPath(Self.tile(r)); ctx.clip()   // before the flip: the view's own coordinates
                 // This view is flipped and `CGContext.draw` is not, so drawn straight the whole
                 // library came out upside down. Flipped about the destination box rather than
                 // going through `NSImage.draw` as the share badge does: the grid repaints on
@@ -584,15 +720,63 @@ final class LibraryGridView: NSView {
                 ctx.restoreGState()
             } else {
                 ctx.setFillColor(NSColor.quaternaryLabelColor.cgColor)
-                ctx.fill(r)
+                ctx.addPath(Self.tile(r)); ctx.fillPath()
             }
             if item.record.id == selected {
                 ctx.setStrokeColor(Tokens.accent.cgColor)
                 ctx.setLineWidth(3)
-                ctx.stroke(r.insetBy(dx: 1.5, dy: 1.5))
+                ctx.addPath(Self.tile(r.insetBy(dx: 1.5, dy: 1.5))); ctx.strokePath()
             }
             if item.record.shareURL != nil { drawShareBadge(item, in: r, ctx: ctx) }
             if hovered == i { drawHoverMetadata(item, in: r, ctx: ctx) }
+        }
+
+        // after the items: the header of the day you are inside stays with you, and it has to be
+        // drawn over the thumbnails passing beneath it
+        drawSectionHeaders(dirty, ctx: ctx)
+    }
+
+    /// A thumbnail's outline. Rounded, so the grid reads as a set of things rather than a sheet.
+    private static func tile(_ r: CGRect) -> CGPath {
+        CGPath(roundedRect: r, cornerWidth: Tokens.radiusThumb, cornerHeight: Tokens.radiusThumb,
+               transform: nil)
+    }
+
+    /// Where a section's header is drawn right now: at its own place in the document, or pinned to
+    /// the top of the view while that day is the one on screen — and pushed back off the top by
+    /// the next day's header as it arrives, so the two never overlap.
+    private func headerFrame(_ index: Int, visibleTop: CGFloat) -> CGRect {
+        let section = sections[index]
+        var y = section.headerY
+        if section.headerY < visibleTop, section.bottom > visibleTop {
+            let next = index + 1 < sections.count ? sections[index + 1].headerY : .greatestFiniteMagnitude
+            y = min(visibleTop, next - headerHeight)
+        }
+        return CGRect(x: 0, y: y, width: bounds.width, height: headerHeight)
+    }
+
+    /// Where a pinned header sits: below the toolbar, not under it. The grid runs the full height
+    /// of the window so it can scroll beneath a translucent title bar, which means the top of
+    /// `documentVisibleRect` is behind the toolbar — the content inset is the rest of the answer.
+    private var stickyTop: CGFloat {
+        guard let scroll = enclosingScrollView else { return 0 }
+        return scroll.documentVisibleRect.minY + scroll.contentInsets.top
+    }
+
+    private func drawSectionHeaders(_ dirty: NSRect, ctx: CGContext) {
+        let visibleTop = stickyTop
+        for i in sections.indices {
+            let frame = headerFrame(i, visibleTop: visibleTop)
+            guard frame.intersects(dirty) else { continue }
+            // an opaque band, because thumbnails scroll underneath a pinned one
+            ctx.setFillColor(NSColor.windowBackgroundColor.cgColor)
+            ctx.fill(frame)
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
+                .foregroundColor: NSColor.labelColor,
+            ]
+            (sections[i].title as NSString).draw(at: CGPoint(x: gutter, y: frame.minY + 9),
+                                                 withAttributes: attrs)
         }
     }
 
@@ -624,7 +808,7 @@ final class LibraryGridView: NSView {
     private func drawHoverMetadata(_ item: Item, in r: CGRect, ctx: CGContext) {
         let band = CGRect(x: r.minX, y: r.maxY - 34, width: r.width, height: 34)
         ctx.saveGState()
-        ctx.clip(to: r)
+        ctx.addPath(Self.tile(r)); ctx.clip()   // so the band takes the tile's bottom corners
         ctx.setFillColor(NSColor.black.withAlphaComponent(0.55).cgColor)
         ctx.fill(band)
         var name = (item.record.relPath as NSString).lastPathComponent
