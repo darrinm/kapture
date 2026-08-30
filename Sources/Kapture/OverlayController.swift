@@ -238,6 +238,7 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
     /// second copy of that is a second thing to keep in step. (`swipePad` is not derivable the
     /// same way — the card's x genuinely leaves the pad during a drag.)
     private var swipeVPad: CGFloat { card.frame.origin.y }
+    private var container: OverlayContainerView? { contentView as? OverlayContainerView }
     private var swiping = false
     private var autoCloseTimer: Timer?
 
@@ -350,6 +351,9 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
         let vpad = ceil(SwipePhysics.verticalClearance(width: rest.width, height: rest.height,
                                                        degrees: SwipePhysics.maxRotation))
         setFrame(rest.insetBy(dx: -swipePad, dy: -vpad), display: false)
+        // the margins have to catch events for as long as they exist, or the gesture dies the
+        // moment the card clears the pointer — see `catchesEventsAcrossTheWindow`
+        container?.catchesEventsAcrossTheWindow = true
         // a settle-in spring still in flight would keep driving the card back to the slot's
         // origin — inside the grown window that is the far left edge, so the card would lurch
         // sideways under a swipe started in the first fraction of a second
@@ -421,6 +425,7 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
     func settleAfterSwipe() {
         guard swiping else { return }
         swiping = false
+        container?.catchesEventsAcrossTheWindow = false   // the margins are gone again
         setFrame(restingFrame, display: true)
         card.frameCenterRotation = 0   // before the frame: rotation is about the frame's centre
         card.frame = NSRect(origin: .zero, size: restingFrame.size)
@@ -578,14 +583,46 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
 final class OverlayContainerView: NSView {
     weak var card: OverlayView?
 
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true   // the swipe needs somewhere to put the fill below
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    /// Whether the grown margins exist as far as the *window server* is concerned.
+    ///
+    /// It decides which window a scroll belongs to from the alpha in the window's backing store,
+    /// and passes straight through fully transparent pixels to whatever is behind. The margins a
+    /// swipe grows are unpainted, so the instant the card slid out from under the pointer the rest
+    /// of the gesture was delivered to another window entirely: the card froze, `.ended` never
+    /// came, and the watchdog resolved it a quarter-second later — often on too little travel to
+    /// count as a dismissal, which is why it sometimes sprang back instead.
+    ///
+    /// That is also why it depended on where you grabbed the card. The card leaves the pointer
+    /// after travelling the distance from its leading edge to the cursor, so a swipe started near
+    /// that edge died almost at once and one started near the trailing edge outlived the gesture.
+    ///
+    /// One part in 255 is invisible and is enough to make the window claim the events.
+    var catchesEventsAcrossTheWindow = false {
+        didSet {
+            guard catchesEventsAcrossTheWindow != oldValue else { return }
+            layer?.backgroundColor = catchesEventsAcrossTheWindow
+                ? NSColor.black.withAlphaComponent(1.0 / 255).cgColor
+                : nil
+        }
+    }
+
     override func hitTest(_ point: NSPoint) -> NSView? {
         guard let card else { return nil }
         // For the length of a gesture the swipe owns the whole window. A trackpad swipe leaves the
         // pointer where it started while the card slides out from under it, and scroll events are
-        // hit-tested afresh every one — so testing them against the card's *moved* frame cut the
-        // gesture off the moment the card cleared the pointer. The card froze there and only the
-        // watchdog resolved it a quarter-second later: that pause, halfway through the swipe, was
-        // the whole of the stall.
+        // hit-tested afresh every one — so testing them against the card's *moved* frame would cut
+        // the gesture off the moment the card cleared the pointer.
+        //
+        // This is only half of keeping the stream alive, and on its own it changes nothing: the
+        // window server drops the event before AppKit ever gets to hit-test it. See
+        // `catchesEventsAcrossTheWindow` for the half that makes the window claim the event, and
+        // this one for routing it to the card once it arrives.
         if card.swiping { return card }
         guard card.frame.contains(convert(point, from: superview)) else { return nil }
         return super.hitTest(point)
