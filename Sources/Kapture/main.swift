@@ -266,6 +266,10 @@ if let i = CommandLine.arguments.firstIndex(of: "--gif-test"), CommandLine.argum
 // as it actually lays out. Renders offscreen through NSHostingView rather than capturing the
 // screen: no Screen Recording round trip, nothing appears on the user's display, and it still
 // works while the screen is locked (ScreenCaptureKit blocks there).
+//
+// The sidebar comes out as a blank white block here. `cacheDisplay` draws the view tree without
+// the window server, and the sidebar is a vibrant material that only the compositor can paint —
+// this tells you about the panes, not about the list beside them. Use `--real` for that.
 //   Kapture.app/Contents/MacOS/Kapture --settings-shot /tmp/settings
 if let i = CommandLine.arguments.firstIndex(of: "--settings-shot"), CommandLine.arguments.count > i + 1 {
     let directory = URL(fileURLWithPath: CommandLine.arguments[i + 1])
@@ -284,7 +288,9 @@ if let i = CommandLine.arguments.firstIndex(of: "--settings-shot"), CommandLine.
         Task { @MainActor in
             SettingsWindowController.shared.show()
             try? await Task.sleep(for: .milliseconds(1200))
-            guard let window = NSApp.windows.first(where: { $0.title == "Kapture Settings" }),
+            guard let window = NSApp.windows.first(where: {
+                      $0.identifier == SettingsWindowController.windowIdentifier
+                  }),
                   let content = window.contentView else {
                 print("settings-probe: no window"); exit(1)
             }
@@ -293,13 +299,12 @@ if let i = CommandLine.arguments.firstIndex(of: "--settings-shot"), CommandLine.
             let sized = content.frame.height >= expected.height - 60
                 && content.frame.width >= expected.width - 60
             if !sized { print("settings-probe: COLLAPSED") }
-            // too narrow and AppKit hides every tab behind an overflow chevron, which looks like
-            // a settings window with no tabs at all
-            let fitsTabs = content.frame.width >= SettingsView.minimumTabBarWidth
-            if !fitsTabs {
-                print("settings-probe: TABS OVERFLOW (needs \(SettingsView.minimumTabBarWidth))")
-            }
-            let ok = sized && fitsTabs
+            // the pane must keep a usable width once the sidebar has taken its slice, or the
+            // rows in Shortcuts and Sharing wrap into an unreadable column
+            let paneWidth = content.frame.width - SettingsView.sidebarWidth
+            let fitsPane = paneWidth >= 380
+            if !fitsPane { print("settings-probe: PANE TOO NARROW (\(paneWidth))") }
+            let ok = sized && fitsPane
             if ok { print("settings-probe: ok") }
             exit(ok ? 0 : 1)
         }
@@ -309,7 +314,9 @@ if let i = CommandLine.arguments.firstIndex(of: "--settings-shot"), CommandLine.
     Task { @MainActor in
         let selection = SettingsSelection()
         let host = NSHostingView(rootView: SettingsView(selection: selection))
-        host.frame = NSRect(x: 0, y: 0, width: 520, height: 560)
+        // the size the window actually opens at, sidebar included, so what is rendered here is
+        // what a person sees rather than a differently-proportioned rehearsal of it
+        host.frame = NSRect(origin: .zero, size: SettingsView.windowSize)
         // a window parked off the side of every display: SwiftUI needs one to lay out properly,
         // and nobody ever sees this one
         let window = NSWindow(contentRect: host.frame, styleMask: [.titled],

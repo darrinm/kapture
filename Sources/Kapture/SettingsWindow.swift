@@ -15,6 +15,7 @@ final class SettingsSelection: ObservableObject {
 @MainActor
 final class SettingsWindowController {
     static let shared = SettingsWindowController()
+    static let windowIdentifier = NSUserInterfaceItemIdentifier("kapture.settings")
     let selection = SettingsSelection()
     private var window: NSWindow?
     private var axPollTimer: Timer?
@@ -53,6 +54,10 @@ final class SettingsWindowController {
         let w = NSWindow(contentRect: NSRect(origin: .zero, size: SettingsView.windowSize),
                          styleMask: [.titled, .closable], backing: .buffered, defer: false)
         w.title = "Kapture Settings"
+        // The split view's `navigationTitle` renames the window to the pane, which is what System
+        // Settings does and what we want — but it means the title is no longer a stable way to
+        // find this window, and `--settings-shot --real` has to. Hence a fixed identifier.
+        w.identifier = SettingsWindowController.windowIdentifier
         let host = NSHostingController(rootView: SettingsView(selection: selection))
         // A hosting controller hands the window its view's *ideal* size, and a TabView full of
         // scrollable Forms has no definite height to offer — it reported 84 points and the
@@ -117,17 +122,41 @@ struct SecretField: View {
 }
 
 struct SettingsView: View {
-    enum Tab: Hashable { case general, overlay, recording, library, shortcuts, sharing }
+    enum Tab: Hashable, CaseIterable, Identifiable {
+        case general, overlay, recording, library, shortcuts, sharing
+        var id: Self { self }
 
-    /// Fixed. Wide enough that the six tab items fit the bar — below roughly 600 points AppKit
-    /// collapses them into a "navigation tab bar" overflow chevron, which hides the whole of
-    /// Settings behind a menu. The six labels measure ~554 points plus window margins.
-    /// Tall enough for the longest pane (Shortcuts) without scrolling.
-    static let windowSize = NSSize(width: 640, height: 600)
+        var title: String {
+            switch self {
+            case .general: "General"
+            case .overlay: "Overlay"
+            case .recording: "Recording"
+            case .library: "Library"
+            case .shortcuts: "Shortcuts"
+            case .sharing: "Sharing"
+            }
+        }
 
-    /// Measured: icon + label + padding across the six tabs, plus window margins. Narrower than
-    /// this and the tab bar becomes an overflow menu instead of a row of tabs.
-    static let minimumTabBarWidth: CGFloat = 594
+        var symbol: String {
+            switch self {
+            case .general: "gearshape"
+            case .overlay: "rectangle.bottomright.filled.and.rectangle"
+            case .recording: "record.circle"
+            case .library: "sparkles"
+            case .shortcuts: "command"
+            case .sharing: "link"
+            }
+        }
+    }
+
+    /// Fixed. The sidebar takes a fixed slice, so the width is that plus a pane wide enough for
+    /// the widest row (Shortcuts' recorders, Sharing's token field). Tall enough for the longest
+    /// pane without scrolling; the short panes are why the list is beside the pane rather than
+    /// above it, since a tab bar over a two-row pane leaves most of the window empty.
+    static let windowSize = NSSize(width: 760, height: 580)
+
+    /// How much of that is the list.
+    static let sidebarWidth: CGFloat = 190
 
     @ObservedObject var selection: SettingsSelection
 
@@ -169,19 +198,33 @@ struct SettingsView: View {
     @State private var checkingShare = false
 
     var body: some View {
-        TabView(selection: $selection.tab) {
-            general.tabItem { Label("General", systemImage: "gearshape") }.tag(Tab.general)
-            overlay.tabItem { Label("Overlay", systemImage: "rectangle.bottomright.filled.and.rectangle") }
-                .tag(Tab.overlay)
-            recording.tabItem { Label("Recording", systemImage: "record.circle") }.tag(Tab.recording)
-            intelligence.tabItem { Label("Library", systemImage: "sparkles") }.tag(Tab.library)
-            shortcuts.tabItem { Label("Shortcuts", systemImage: "command") }.tag(Tab.shortcuts)
-            sharing.tabItem { Label("Sharing", systemImage: "link") }.tag(Tab.sharing)
+        NavigationSplitView {
+            List(Tab.allCases, selection: Binding(
+                get: { Optional(selection.tab) },
+                set: { if let tab = $0 { selection.tab = tab } })) { tab in
+                Label(tab.title, systemImage: tab.symbol).tag(tab)
+            }
+            .navigationSplitViewColumnWidth(SettingsView.sidebarWidth)
+        } detail: {
+            pane(for: selection.tab)
+                .navigationTitle(selection.tab.title)
         }
-        .frame(width: SettingsView.windowSize.width - 20,
-               height: SettingsView.windowSize.height - 24)
-        .padding(.bottom, 12)
+        // the split view has no opinion about its own size, and the hosting controller takes
+        // whatever it says — see the note on the window's preferredContentSize
+        .frame(width: SettingsView.windowSize.width, height: SettingsView.windowSize.height)
         .task { await refreshKeychainState() }
+    }
+
+    @ViewBuilder
+    private func pane(for tab: Tab) -> some View {
+        switch tab {
+        case .general: general
+        case .overlay: overlay
+        case .recording: recording
+        case .library: intelligence
+        case .shortcuts: shortcuts
+        case .sharing: sharing
+        }
     }
 
     /// Reads what the Keychain holds off the main thread, then reflects it in the UI. Only
