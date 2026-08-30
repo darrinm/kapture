@@ -4,6 +4,20 @@
 import Foundation
 import GRDB
 
+/// A running observation of the library. Cancelled explicitly, or when it is let go.
+///
+/// A wrapper so a caller can hold one without importing GRDB: the app target depends on this
+/// module, not on the database library underneath it, and a live subscription should not be the
+/// one thing that changes that.
+public final class LibraryObservation {
+    private let cancellable: AnyDatabaseCancellable
+
+    init(_ cancellable: AnyDatabaseCancellable) { self.cancellable = cancellable }
+    deinit { cancellable.cancel() }
+
+    public func cancel() { cancellable.cancel() }
+}
+
 extension Library {
     /// Upsert searchable text for a capture. Fields left nil keep their stored value, so ingest
     /// can add ocr/summary/tags later without clobbering the name.
@@ -39,8 +53,25 @@ extension Library {
         }
     }
 
-    /// Optional full-text match plus a scope filter, newest first. Ranking weights name over
-    /// tags over summary over OCR.
+    /// Calls back whenever anything in the captures table changes, whoever changed it.
+    ///
+    /// The library window was told to reload by hand, and only `ShareCoordinator` ever remembered
+    /// — so a capture taken while the window was open never appeared in it, and neither did a
+    /// discard, a restore, an edit, or a name arriving late from the ingest queue. Every one of
+    /// those is a separate writer that has to remember a call it gets no reminder about, which is
+    /// a bug per writer waiting to happen and had already happened five times over.
+    ///
+    /// Watching the table is the version that cannot be forgotten: a writer added tomorrow shows
+    /// up in an open window without knowing this exists. The callback arrives on the database's
+    /// own queue after the transaction commits — hop to wherever you need to be.
+    public func observeCaptures(onChange: @escaping @Sendable () -> Void) -> LibraryObservation {
+        LibraryObservation(DatabaseRegionObservation(tracking: Table("captures"))
+            .start(in: db.queue,
+                   onError: { Log.store.error("captures observation failed: \($0)") },
+                   onChange: { _ in onChange() }))
+    }
+
+    /// Every app the library holds a capture from, for the window's app filter.
     public func sourceApps() -> [String] {
         (try? db.queue.read { d in
             try String.fetchAll(d, sql: """
@@ -123,6 +154,9 @@ extension Library {
             """, arguments: StatementArguments([pattern] + args + [limit]))
     }
 
+    /// Optional full-text match plus a scope filter, newest first. Ranking weights name over
+    /// tags over summary over OCR. (This is what that comment was describing; it had drifted up
+    /// the file onto `sourceApps`, which does none of it.)
     public func search(_ query: String = "", scope: SearchScope = .all, app: String? = nil,
                        range: DateRange = .any, limit: Int = 500) -> [CaptureRecord] {
         let q = searchQuery(query, scope: scope, app: app, range: range, limit: limit)
