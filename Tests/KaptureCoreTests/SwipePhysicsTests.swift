@@ -11,9 +11,21 @@ final class SwipePhysicsTests: XCTestCase {
 
     func testTrackingTowardTheEdgeIsExact() {
         // any lag here reads as the card not keeping up with the finger
-        for distance in stride(from: CGFloat(0), through: 400, by: 40) {
+        for distance in stride(from: CGFloat(0), through: width + SwipePhysics.flyOffMargin, by: 40) {
             XCTAssertEqual(SwipePhysics.offset(progress: distance, width: width), distance,
                            accuracy: 0.001)
+        }
+    }
+
+    /// The panel grows by one card width plus the fly-off margin on the side the card leaves by,
+    /// and clips whatever goes past that. A gesture is not bounded by anything, so tracking has to
+    /// be: by that distance the card is already clear of the edge, and following the finger any
+    /// further would only slide it under the window's own clip.
+    func testTrackingStopsAtTheRoomThePanelReserves() {
+        let room = width + SwipePhysics.flyOffMargin
+        for distance in stride(from: room, through: room * 4, by: 20) {
+            XCTAssertEqual(SwipePhysics.offset(progress: distance, width: width), room,
+                           accuracy: 0.001, "a finger \(distance) out still leaves the card in view")
         }
     }
 
