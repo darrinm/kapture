@@ -368,10 +368,21 @@ final class LibraryGridView: NSView {
         super.viewDidMoveToSuperview()
         guard let clip = enclosingScrollView?.contentView else { return }
         clip.postsBoundsChangedNotifications = true
+        clip.postsFrameChangedNotifications = true
         NotificationCenter.default.removeObserver(self, name: NSView.boundsDidChangeNotification,
+                                                  object: nil)
+        NotificationCenter.default.removeObserver(self, name: NSView.frameDidChangeNotification,
                                                   object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(visibleAreaChanged),
                                                name: NSView.boundsDidChangeNotification, object: clip)
+        // bounds change is scrolling; frame change is the window being resized, which is the only
+        // way the grid hears that it has more width to justify into
+        NotificationCenter.default.addObserver(self, selector: #selector(visibleAreaResized),
+                                               name: NSView.frameDidChangeNotification, object: clip)
+    }
+
+    @objc private func visibleAreaResized() {
+        relayout()
     }
 
     /// Scrolling brings new rows into view; generate those next. Coalesced so a flick doesn't
@@ -380,8 +391,9 @@ final class LibraryGridView: NSView {
         // The pinned header is positioned from the visible rect, so it is the one thing on screen
         // that scrolling moves *relative to* the document and therefore does not repaint itself.
         // The band covers where it pins, and where the next day's header pushes it out of.
-        setNeedsDisplay(CGRect(x: 0, y: stickyTop - headerHeight,
-                               width: bounds.width, height: headerHeight * 3))
+        setNeedsDisplay(paintedStickyHeader)   // where it is, so it gets cleared
+        setNeedsDisplay(CGRect(x: 0, y: stickyTop - headerHeight,   // and where it is going
+                               width: bounds.width, height: headerHeight * 2))
         scrollSettle?.cancel()
         scrollSettle = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(120))
@@ -421,8 +433,16 @@ final class LibraryGridView: NSView {
     /// Lay the rows out and return the height they need. It doesn't resize the view itself:
     /// setFrameSize calls back into layout, and the two used to bounce off each other until a
     /// half-point epsilon happened to stop them.
+    /// The width to justify rows against: what the scroll view is showing, not this view's own
+    /// width. Its own is circular — the grid sets its frame from the layout it just computed
+    /// against that same number, so it could never find out the window had been made wider, and
+    /// the grid stayed at whatever width it happened to start at with empty space beside it.
+    private var layoutWidth: CGFloat {
+        max(320, enclosingScrollView?.contentSize.width ?? bounds.width)
+    }
+
     private func layoutItems() -> CGFloat {
-        let width = max(320, bounds.width)
+        let width = layoutWidth
         let rowHeight = self.rowHeight
         var y: CGFloat = gutter
         var row: [Int] = []
@@ -485,7 +505,7 @@ final class LibraryGridView: NSView {
 
     private func relayout() {
         let height = layoutItems()
-        let width = max(320, bounds.width)   // the width layoutItems just justified against
+        let width = layoutWidth   // the width layoutItems just justified against
         if abs(height - frame.height) > 0.5 || abs(width - frame.width) > 0.5 {
             // super, not self: the override below would re-enter layout
             super.setFrameSize(NSSize(width: width, height: height))
@@ -763,10 +783,24 @@ final class LibraryGridView: NSView {
         return scroll.documentVisibleRect.minY + scroll.contentInsets.top
     }
 
+    /// Where a held header was last painted. A header pinned to the top of the view is positioned
+    /// from the visible rect, so scrolling does not move it the way it moves everything else, and
+    /// nothing else will invalidate where it used to be — and it paints an opaque band, so a copy
+    /// left behind simply stays on screen. A flick moves further in one event than the header is
+    /// tall, so the old "invalidate a band around the top" left a trail of day headers down the
+    /// grid. Recorded against the painting, like the selection view's chrome.
+    private var paintedStickyHeader: CGRect = .zero
+
     private func drawSectionHeaders(_ dirty: NSRect, ctx: CGContext) {
         let visibleTop = stickyTop
+        var held = CGRect.zero
+        defer { paintedStickyHeader = held }
         for i in sections.indices {
             let frame = headerFrame(i, visibleTop: visibleTop)
+            // recorded whatever the dirty rect lets us paint: it is where the header *is*
+            if frame.minY != sections[i].headerY {
+                held = held.isEmpty ? frame : held.union(frame)
+            }
             guard frame.intersects(dirty) else { continue }
             // an opaque band, because thumbnails scroll underneath a pinned one
             ctx.setFillColor(NSColor.windowBackgroundColor.cgColor)
