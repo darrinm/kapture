@@ -22,6 +22,14 @@ public enum Tokens {
     public static let cornerMargin: CGFloat = 16
     public static let stackGap: CGFloat = 8
     public static let radiusOverlay: CGFloat = 10
+    /// Library thumbnails. Smaller than the overlay's: these sit at a dozen sizes in a grid, and
+    /// a radius that reads as "rounded" on a full-size card reads as "lozenge" on a small tile.
+    public static let radiusThumb: CGFloat = 6
+    /// Space between library thumbnails, and around the grid. Wide enough that the images read as
+    /// separate things rather than one sheet — the gap is what makes a grid look like a library.
+    public static let gridGutter: CGFloat = 16
+    /// Row heights the library zoom steps through.
+    public static let gridRowHeights: [CGFloat] = [116, 168, 240, 332]
     /// How far a bottom-center pill sits above the bottom of the screen.
     public static let pillBottomInset: CGFloat = 90
 

@@ -39,6 +39,13 @@ public struct Settings {
         set { d.set(newValue, forKey: "overlaySizeIndex") }
     }
 
+    /// Which library thumbnail size the zoom control is on. Index into `Tokens.gridRowHeights`;
+    /// clamped on read so a stale or hand-edited value can't land the grid on nothing.
+    public var librarySizeIndex: Int {
+        get { min(max(d.object(forKey: "librarySizeIndex") as? Int ?? 1, 0), 3) }
+        set { d.set(newValue, forKey: "librarySizeIndex") }
+    }
+
     public var overlayOnLeftEdge: Bool {
         get { d.bool(forKey: "overlayOnLeftEdge") }
         set { d.set(newValue, forKey: "overlayOnLeftEdge") }
