@@ -198,7 +198,11 @@ struct SettingsView: View {
     @State private var checkingShare = false
 
     var body: some View {
-        NavigationSplitView {
+        // Pinned open. A split view offers to collapse its sidebar, which is right for a document
+        // window with a browsable source list and wrong here: the list is the only way to reach
+        // five of the six panes, so hiding it strands you on whichever one you were looking at.
+        // System Settings does not offer it either.
+        NavigationSplitView(columnVisibility: .constant(.all)) {
             // The list can deselect (a ⌘-click on the selected row) but a pane is always showing,
             // so nil means "keep the one we have" — and it has to be written back rather than
             // ignored, or the row loses its highlight with nothing to redraw it.
@@ -208,6 +212,7 @@ struct SettingsView: View {
                 Label(tab.title, systemImage: tab.symbol).tag(tab)
             }
             .navigationSplitViewColumnWidth(SettingsView.sidebarWidth)
+            .toolbar(removing: .sidebarToggle)   // and no button offering to do it
         } detail: {
             pane(for: selection.tab)
                 .navigationTitle(selection.tab.title)
