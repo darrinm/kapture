@@ -16,10 +16,17 @@ final class LibraryWindowController: NSObject, NSWindowDelegate {
     private var window: NSWindow?
     private var grid: LibraryGridView?
     private var content: LibraryContentView?
+    /// Live while the window is open — see `Library.observeCaptures`.
+    private var captures: LibraryObservation?
+    /// A single capture is several writes (the row, then the ingest queue's name a moment later),
+    /// and a discard is three. Coalesce them into one reload rather than re-running the search
+    /// once per write.
+    private var reloadDebounce: Task<Void, Never>?
 
     func show() {
         if let window {
             content?.refresh()
+            observeLibrary()   // closing cancelled the last one
             window.makeKeyAndOrderFront(nil)
             ActivationPolicy.acquire()
             return
@@ -61,16 +68,33 @@ final class LibraryWindowController: NSObject, NSWindowDelegate {
         ActivationPolicy.acquire()
         w.makeKeyAndOrderFront(nil)
         content.focusSearch()
+        observeLibrary()
     }
 
-    /// The window is kept alive after it closes (isReleasedWhenClosed = false), so without this
-    /// every share and unshare re-ran a full FTS query and grid rebuild for nothing.
-    func reload() {
-        guard window?.isVisible == true else { return }
-        grid?.reload()
+    /// Keep an open window in step with the library, whatever changed it.
+    private func observeLibrary() {
+        guard captures == nil, let library else { return }
+        captures = library.observeCaptures { [weak self] in
+            Task { @MainActor in self?.scheduleReload() }
+        }
+    }
+
+    private func scheduleReload() {
+        reloadDebounce?.cancel()
+        reloadDebounce = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(120))
+            guard !Task.isCancelled else { return }
+            // the app menu too: a capture from a new app belongs in the filter
+            content?.refresh()
+        }
     }
 
     func windowWillClose(_ notification: Notification) {
+        // nothing to keep in step once it is closed; `show` starts a fresh one
+        captures?.cancel()
+        captures = nil
+        reloadDebounce?.cancel()
+        reloadDebounce = nil
         ActivationPolicy.release()
     }
 }

@@ -45,9 +45,10 @@ final class ShareCoordinator {
             }
             do {
                 let link = try await ShareService.upload(fileURL: fileURL)
+                // an open library picks the new link up from the write itself — see
+                // `Library.observeCaptures`; it used to have to be told from here
                 try? library.setShareLink(id, url: link.url.absoluteString)
                 self?.copy(link.url)
-                LibraryWindowController.shared.reload()
                 onFinish?(link.url)
             } catch let failure as ShareFailure {
                 Toast.show(failure.description)
@@ -71,7 +72,6 @@ final class ShareCoordinator {
             do {
                 try await ShareService.delete(id: shareID)
                 try? library.setShareLink(id, url: nil)
-                LibraryWindowController.shared.reload()
                 Toast.show("Link deleted")
             } catch let failure as ShareFailure {
                 Toast.show(failure.description)
