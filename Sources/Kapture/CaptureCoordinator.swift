@@ -33,8 +33,11 @@ final class CaptureCoordinator {
                           sourceRect: ScreenshotService.nsRect(displayLocal: sel.rectInPoints, on: sel.frame.screen))
                 case .window(let win):
                     let image = try await ScreenshotService.captureWindow(win)
+                    // the window's own owner where ScreenCaptureKit knows it, and the reading
+                    // taken before our overlay went up where it doesn't — never "whoever is in
+                    // front now", which on this path is always us
                     store(image, screenID: nil, windowTitle: win.title,
-                          sourceApp: win.owningApplication?.bundleIdentifier,
+                          sourceApp: win.owningApplication?.bundleIdentifier ?? frontApp,
                           sourceRect: ScreenshotService.nsRect(cgGlobal: win.frame))
                 case nil:
                     break
@@ -128,10 +131,12 @@ final class CaptureCoordinator {
         return (CGDirectDisplayID(p[0]), CGRect(x: p[1], y: p[2], width: p[3], height: p[4]))
     }
 
-    private func store(_ image: CGImage, screenID: Int?, windowTitle: String?, sourceApp: String? = nil,
+    /// `sourceApp` has no default and no fallback on purpose: by the time this runs the capture
+    /// is over, and reading the frontmost application here is what filed every area capture under
+    /// Kapture. Callers take that reading before anything of ours is on screen.
+    private func store(_ image: CGImage, screenID: Int?, windowTitle: String?, sourceApp: String?,
                        sourceRect: NSRect? = nil) {
         guard let library else { return }
-        let app = sourceApp ?? NSWorkspace.shared.frontmostApplication?.bundleIdentifier
         let width = image.width, height = image.height
         // PNG encode + file/DB writes are hundreds of ms for a 5K frame — keep them off
         // the main actor; hop back for clipboard + overlay once the record exists.
@@ -140,7 +145,7 @@ final class CaptureCoordinator {
             do {
                 let (record, url) = try library.storePNG(
                     data, width: width, height: height,
-                    sourceApp: app, windowTitle: windowTitle, screenID: screenID)
+                    sourceApp: sourceApp, windowTitle: windowTitle, screenID: screenID)
                 await MainActor.run {
                     let showCard = AfterCapture.run(record: record, url: url, image: image)
                     if showCard {

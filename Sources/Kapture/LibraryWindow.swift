@@ -157,6 +157,10 @@ final class LibraryContentView: NSView, NSSearchFieldDelegate {
     var onCountChanged: ((Int) -> Void)?
     private let emptyLabel = NSTextField(labelWithString: "")
     private var searchDebounce: Task<Void, Never>?
+    private var appFilterTask: Task<Void, Never>?
+    /// What the app menu was last built from. A write that doesn't change the list leaves the
+    /// menu — and anything the user has open on it — alone.
+    private var knownApps: [String]?
 
     init(library: Library) {
         self.library = library
@@ -205,7 +209,9 @@ final class LibraryContentView: NSView, NSSearchFieldDelegate {
 
         appFilter.target = self
         appFilter.action = #selector(appFilterChanged)
-        reloadAppFilter()
+        // the real list arrives from `refresh` a database read later; until then the popup should
+        // say what it filters by rather than being blank
+        appFilter.addItem(withTitle: "Any app")
 
         dateFilter.addItems(withTitles: Library.DateRange.allCases.map(\.title))
         dateFilter.target = self
@@ -226,7 +232,7 @@ final class LibraryContentView: NSView, NSSearchFieldDelegate {
             emptyLabel.centerXAnchor.constraint(equalTo: centerXAnchor),
             emptyLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
-        grid.reload()
+        refresh()
     }
     required init?(coder: NSCoder) { fatalError() }
 
@@ -245,16 +251,26 @@ final class LibraryContentView: NSView, NSSearchFieldDelegate {
 
     /// Re-read the library: the grid's contents and the source-app menu, which otherwise keeps
     /// the app list from whenever the window was first opened.
+    ///
+    /// Both halves go off the main thread. This runs on every write to the table now that the
+    /// window observes them, and the app has one serialized connection — see `searchAsync`.
     func refresh() {
-        reloadAppFilter()
+        appFilterTask?.cancel()
+        appFilterTask = Task { [weak self] in
+            guard let library = self?.library else { return }
+            let apps = await library.sourceAppsAsync()
+            guard !Task.isCancelled else { return }
+            self?.reloadAppFilter(apps)
+        }
         grid.reload()
     }
 
     /// Source-app menu, built from what the library actually holds. The current selection is
     /// preserved across a rebuild so a refresh can't silently drop an active filter.
-    private func reloadAppFilter() {
+    private func reloadAppFilter(_ apps: [String]) {
+        guard apps != knownApps else { return }   // nothing to rebuild, and the menu may be open
+        knownApps = apps
         let selected = appFilter.selectedItem?.representedObject as? String
-        let apps = library.sourceApps()
         appFilter.removeAllItems()
         appFilter.addItem(withTitle: "Any app")
         for app in apps {
@@ -267,7 +283,11 @@ final class LibraryContentView: NSView, NSSearchFieldDelegate {
         }) {
             appFilter.select(item)
         } else if selected != nil {
-            grid.app = nil   // the filtered app is gone from the library; fall back to "Any app"
+            // the filtered app is gone from the library; fall back to "Any app". The menu is
+            // rebuilt after the grid's own reload was kicked off, so ask for another one — the
+            // rows on screen are still the ones that filter chose.
+            grid.app = nil
+            grid.reload()
         }
     }
 
@@ -381,8 +401,12 @@ final class LibraryGridView: NSView {
     private var sections: [Section] = []
     private var hovered: Int?
     private var selected: String?
-    /// Driven by the zoom control and remembered between openings.
-    private var rowHeight: CGFloat { Tokens.gridRowHeights[Settings.shared.librarySizeIndex] }
+    /// Driven by the zoom control and remembered between openings. Clamped here, where the range
+    /// is: a stale or hand-edited default can't land the grid on nothing.
+    private var sizeIndex: Int {
+        min(max(Settings.shared.librarySizeIndex, 0), Tokens.gridRowHeights.count - 1)
+    }
+    private var rowHeight: CGFloat { Tokens.gridRowHeights[sizeIndex] }
     private let gutter = Tokens.gridGutter
     private let headerHeight: CGFloat = 34
     /// QuickLook is happy to work in parallel; four at a time fills a screen fast without
@@ -568,7 +592,7 @@ final class LibraryGridView: NSView {
     /// Step the thumbnail size. Returns false at the ends so the caller can dim the control.
     @discardableResult
     func zoom(by step: Int) -> Bool {
-        let next = Settings.shared.librarySizeIndex + step
+        let next = sizeIndex + step
         guard Tokens.gridRowHeights.indices.contains(next) else { return false }
         Settings.shared.librarySizeIndex = next
         // Anchor on what is in view: without this a zoom keeps the scroll *offset* and the grid
@@ -586,8 +610,8 @@ final class LibraryGridView: NSView {
         return true
     }
 
-    var canZoomIn: Bool { Tokens.gridRowHeights.indices.contains(Settings.shared.librarySizeIndex + 1) }
-    var canZoomOut: Bool { Tokens.gridRowHeights.indices.contains(Settings.shared.librarySizeIndex - 1) }
+    var canZoomIn: Bool { Tokens.gridRowHeights.indices.contains(sizeIndex + 1) }
+    var canZoomOut: Bool { Tokens.gridRowHeights.indices.contains(sizeIndex - 1) }
 
     override func setFrameSize(_ newSize: NSSize) {
         let widthChanged = abs(newSize.width - frame.width) > 0.5
