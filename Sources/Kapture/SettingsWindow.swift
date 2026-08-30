@@ -199,9 +199,12 @@ struct SettingsView: View {
 
     var body: some View {
         NavigationSplitView {
+            // The list can deselect (a ⌘-click on the selected row) but a pane is always showing,
+            // so nil means "keep the one we have" — and it has to be written back rather than
+            // ignored, or the row loses its highlight with nothing to redraw it.
             List(Tab.allCases, selection: Binding(
                 get: { Optional(selection.tab) },
-                set: { if let tab = $0 { selection.tab = tab } })) { tab in
+                set: { selection.tab = $0 ?? selection.tab })) { tab in
                 Label(tab.title, systemImage: tab.symbol).tag(tab)
             }
             .navigationSplitViewColumnWidth(SettingsView.sidebarWidth)
