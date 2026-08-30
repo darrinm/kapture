@@ -134,9 +134,34 @@ public struct Settings {
 }
 
 /// One place that plays UI sounds, honoring the master toggle.
+///
+/// Starting the sound off the calling thread is the point of this type, not a detail of it.
+/// `NSSound.play()` does not return until CoreAudio has the output device running: 137ms on the
+/// first play of a run, and 27-30ms again any time the device has been quiet for a few seconds —
+/// which is every sound here, because they all mark occasional events rather than a stream.
+///
+/// Every one of them is played at a moment that must not stutter: a card released mid-swipe, a
+/// capture landing in the corner, a recording starting. On the calling thread that cost lands as
+/// a freeze between the gesture and the animation it set off, which is precisely the gap you saw
+/// halfway through a swipe.
 public enum Sounds {
+    /// Serial, so two sounds starting at once can't have their device setup fight; and there is
+    /// nothing to wait for afterwards, because `play()` returns once playback is under way.
+    private static let queue = DispatchQueue(label: "sh.kapture.sounds", qos: .userInitiated)
+
+    /// The player itself, behind a seam only so a test can prove `play` returns without waiting on
+    /// it. Nothing else can show that from the outside: on a machine with no audio device — a CI
+    /// runner — `NSSound.play()` is quick whichever thread it is called on, so a stopwatch around
+    /// the real one would pass whether or not the work had been moved off the caller.
+    ///
+    /// A fresh sound each time, as before: named sounds are kept alive by AppKit, and sharing one
+    /// instance would make a second discard in quick succession fall silent on a sound still
+    /// playing from the first.
+    static var player: (String) -> Void = { NSSound(named: NSSound.Name($0))?.play() }
+
     public static func play(_ name: String) {
+        // read on the caller's thread: it is the caller's setting, and it is only a defaults read
         guard Settings.shared.soundsEnabled else { return }
-        NSSound(named: NSSound.Name(name))?.play()
+        queue.async { player(name) }
     }
 }
