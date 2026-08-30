@@ -15,12 +15,17 @@ public enum SwipePhysics {
 
     /// Where the card sits for a given gesture distance. `progress` is positive toward the edge.
     ///
-    /// Toward the edge it tracks 1:1 — anything else feels like lag. Away from it the movement
-    /// is rubber-banded: it never blocks the gesture outright, but it asymptotes, so pulling a
-    /// card away from its edge can't be mistaken for dismissing it.
+    /// Toward the edge it tracks 1:1 — anything else feels like lag — and stops at the distance a
+    /// dismissal itself carries the card, which is also exactly the room the panel grows for it to
+    /// travel in. By then the card is already clear of the edge, so there is nothing left to show
+    /// for pushing further, and tracking on would only slide it under the window's own clip.
+    ///
+    /// Away from the edge the movement is rubber-banded instead: it never blocks the gesture
+    /// outright, but it asymptotes, so pulling a card away from its edge can't be mistaken for
+    /// dismissing it.
     public static func offset(progress: CGFloat, width: CGFloat) -> CGFloat {
-        guard progress < 0 else { return progress }
         let width = max(width, 1)
+        guard progress < 0 else { return min(progress, width + flyOffMargin) }
         return -(1 - 1 / (-progress / width * 0.55 + 1)) * width
     }
 

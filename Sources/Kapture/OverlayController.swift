@@ -579,7 +579,15 @@ final class OverlayContainerView: NSView {
     weak var card: OverlayView?
 
     override func hitTest(_ point: NSPoint) -> NSView? {
-        guard let card, card.frame.contains(convert(point, from: superview)) else { return nil }
+        guard let card else { return nil }
+        // For the length of a gesture the swipe owns the whole window. A trackpad swipe leaves the
+        // pointer where it started while the card slides out from under it, and scroll events are
+        // hit-tested afresh every one — so testing them against the card's *moved* frame cut the
+        // gesture off the moment the card cleared the pointer. The card froze there and only the
+        // watchdog resolved it a quarter-second later: that pause, halfway through the swipe, was
+        // the whole of the stall.
+        if card.swiping { return card }
+        guard card.frame.contains(convert(point, from: superview)) else { return nil }
         return super.hitTest(point)
     }
 }
@@ -603,7 +611,9 @@ final class OverlayView: NSView, NSDraggingSource {
     // sat still under your finger and dismissal felt like a command rather than a movement.
     private enum SwipeAxis { case undecided, horizontal, vertical }
     private var swipeAxis: SwipeAxis = .undecided
-    private var swiping = false
+    /// Read by the container, which widens its hit test to the whole window for the length of a
+    /// gesture — otherwise the card moving away from the pointer ends its own event stream.
+    private(set) var swiping = false
     private var swipeX: CGFloat = 0
     private var swipeY: CGFloat = 0
     /// Toward-edge points per second, smoothed so one jittery frame can't fling the card.
@@ -824,7 +834,9 @@ final class OverlayView: NSView, NSDraggingSource {
         // commit first: if the record is already gone there is nothing to fly away, and the card
         // should settle back rather than pretend it discarded something
         guard panel.commitDiscard() else { springBack(); return }
-        let remaining = max(bounds.width + 60 - abs(swipeOffset()), 40)
+        // the same full-card-plus-margin the exit travels and tracking stops at, so a card the
+        // finger already carried the whole way has only the floor left to cover
+        let remaining = max(bounds.width + SwipePhysics.flyOffMargin - abs(swipeOffset()), 40)
         let duration = SwipePhysics.flyOffDuration(remaining: remaining, velocity: swipeVelocity)
         // the whole gesture, not just its committed axis: a swipe is rarely flat, and the card
         // should leave along the line it was actually thrown
