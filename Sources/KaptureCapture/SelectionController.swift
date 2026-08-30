@@ -160,7 +160,11 @@ final class SelectionView: NSView {
     // MARK: mouse
     /// Targeted invalidation: the frozen frame is static, so only the chrome (crosshair, loupe,
     /// rubber band) needs repainting as the mouse moves. Invalidate old + new chrome rects.
-    private var lastInvalidRects: [NSRect] = []
+    ///
+    /// Where the chrome is *painted*, set by `draw` and read by `invalidateChrome` — one fact with
+    /// one writer. Recording it at the point of invalidation instead used to miss the very first
+    /// paint, which happens before any mouse has moved and so before anything invalidates.
+    private var paintedChromeRects: [NSRect] = []
     private let strokePad: CGFloat = 60   // covers the selection stroke + the dimensions badge
 
     private func chromeRects() -> [NSRect] {
@@ -181,10 +185,8 @@ final class SelectionView: NSView {
 
     private func invalidateChrome() {
         guard !windowMode else { needsDisplay = true; return }   // window highlight: keep it simple
-        let rects = chromeRects()
-        for r in lastInvalidRects { setNeedsDisplay(r) }
-        for r in rects { setNeedsDisplay(r) }
-        lastInvalidRects = rects
+        for r in paintedChromeRects { setNeedsDisplay(r) }   // where it is, so it gets cleared
+        for r in chromeRects() { setNeedsDisplay(r) }        // and where it is going
     }
 
     override func mouseMoved(with event: NSEvent) {
@@ -260,6 +262,15 @@ final class SelectionView: NSView {
                                              CGPoint(x: 0, y: mouse.y), CGPoint(x: bounds.width, y: mouse.y)])
             drawLoupe(ctx)
         }
+
+        // Where the chrome just landed, recorded against the painting rather than the events that
+        // usually cause it. `invalidateChrome` clears the previous position using this, and the
+        // first paint never goes through it: the view seeds `mouse` from the real cursor in
+        // `viewDidMoveToWindow` and paints there before anything has moved. With nothing recorded,
+        // that first crosshair and loupe were never invalidated again — they stayed on screen as
+        // an after-image, and moving the pointer only rubbed out the parts the live chrome
+        // happened to cross.
+        paintedChromeRects = chromeRects()
     }
 
     /// Frozen pixels for a view-coords rect (undims the selection).
