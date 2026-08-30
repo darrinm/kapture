@@ -26,11 +26,13 @@ final class LibraryWindowController: NSObject, NSWindowDelegate {
         }
         guard let library else { return }
         let content = LibraryContentView(library: library)
+        // No .fullSizeContentView: it runs the content view up under the title bar, and this
+        // window draws an ordinary opaque title bar with a real title on top of it. The search
+        // field is anchored 12pt below the content view's top, so the two landed on each other.
         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 640),
-                         styleMask: [.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView],
+                         styleMask: [.titled, .closable, .resizable, .miniaturizable],
                          backing: .buffered, defer: false)
         w.title = "Kapture Library"
-        w.titlebarAppearsTransparent = false
         w.contentView = content
         w.center()
         w.isReleasedWhenClosed = false
@@ -569,8 +571,16 @@ final class LibraryGridView: NSView {
             let r = item.frame
             if let thumb = item.thumb {
                 ctx.saveGState()
-                ctx.clip(to: r)
-                ctx.draw(thumb, in: Tokens.aspectFill(CGSize(width: thumb.width, height: thumb.height), in: r))
+                ctx.clip(to: r)   // set before the flip, so it is in the view's own coordinates
+                // This view is flipped and `CGContext.draw` is not, so drawn straight the whole
+                // library came out upside down. Flipped about the destination box rather than
+                // going through `NSImage.draw` as the share badge does: the grid repaints on
+                // every scroll frame, and that path would allocate an image per thumbnail per
+                // frame for something this does with two transforms.
+                let box = Tokens.aspectFill(CGSize(width: thumb.width, height: thumb.height), in: r)
+                ctx.translateBy(x: 0, y: box.maxY)
+                ctx.scaleBy(x: 1, y: -1)
+                ctx.draw(thumb, in: CGRect(x: box.minX, y: 0, width: box.width, height: box.height))
                 ctx.restoreGState()
             } else {
                 ctx.setFillColor(NSColor.quaternaryLabelColor.cgColor)
