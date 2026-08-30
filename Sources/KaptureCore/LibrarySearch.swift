@@ -71,14 +71,21 @@ extension Library {
                    onChange: { _ in onChange() }))
     }
 
+    private static let sourceAppsSQL = """
+        SELECT DISTINCT sourceApp FROM captures
+        WHERE sourceApp IS NOT NULL AND status IN ('staged','kept') ORDER BY sourceApp
+        """
+
     /// Every app the library holds a capture from, for the window's app filter.
     public func sourceApps() -> [String] {
-        (try? db.queue.read { d in
-            try String.fetchAll(d, sql: """
-                SELECT DISTINCT sourceApp FROM captures
-                WHERE sourceApp IS NOT NULL AND status IN ('staged','kept') ORDER BY sourceApp
-                """)
-        }) ?? []
+        (try? db.queue.read { try String.fetchAll($0, sql: Self.sourceAppsSQL) }) ?? []
+    }
+
+    /// The same list off the main thread, for the same reason `searchAsync` exists: an open
+    /// library re-reads this on every write to the table now that it observes them, and the one
+    /// serialized connection means a main-thread read waits on whatever ingest is writing.
+    public func sourceAppsAsync() async -> [String] {
+        (try? await db.queue.read { try String.fetchAll($0, sql: Self.sourceAppsSQL) }) ?? []
     }
 
     public enum DateRange: String, CaseIterable, Sendable {

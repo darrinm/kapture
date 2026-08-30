@@ -39,10 +39,11 @@ public struct Settings {
         set { d.set(newValue, forKey: "overlaySizeIndex") }
     }
 
-    /// Which library thumbnail size the zoom control is on. Index into `Tokens.gridRowHeights`;
-    /// clamped on read so a stale or hand-edited value can't land the grid on nothing.
+    /// Which library thumbnail size the zoom control is on. An index into `Tokens.gridRowHeights`,
+    /// which lives in the design module — so the range is clamped at the point of use, where that
+    /// array actually is, rather than restated as a number here that would silently go stale.
     public var librarySizeIndex: Int {
-        get { min(max(d.object(forKey: "librarySizeIndex") as? Int ?? 1, 0), 3) }
+        get { d.object(forKey: "librarySizeIndex") as? Int ?? 1 }
         set { d.set(newValue, forKey: "librarySizeIndex") }
     }
 
