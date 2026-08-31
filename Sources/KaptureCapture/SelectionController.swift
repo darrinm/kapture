@@ -214,7 +214,11 @@ final class SelectionView: NSView {
             rect = CGRect(x: start.x - rect.width, y: start.y - rect.height,
                           width: rect.width * 2, height: rect.height * 2)
         }
-        dragRect = rect
+        // The drag can leave the screen; the selection can't. Clamp here so the preview,
+        // the px badge, the capture, the recording scope and the previous-area memory all
+        // agree (an unclamped rect drew the edge-cropped pixels stretched into the full rect).
+        let clamped = rect.intersection(bounds)
+        dragRect = clamped.isNull ? nil : clamped
         invalidateChrome()
     }
     override func mouseUp(with event: NSEvent) {
