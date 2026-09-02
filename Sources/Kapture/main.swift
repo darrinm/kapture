@@ -199,6 +199,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             item.title = RecordingCoordinator.shared.isPaused ? "Resume Recording" : "Pause Recording"
             return RecordingCoordinator.shared.isRecording
         }
+        if item.action == #selector(menuShowOverlays) {
+            return OverlayController.shared.tucked   // the tab is the usual way back; this is the other
+        }
         if item.action == #selector(menuCheckForUpdates) {
             return UpdaterController.shared.canCheckNow
         }
@@ -216,7 +219,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             Task { await IngestQueue.shared.enqueue(restored.id, after: 0) }
         }
     }
-    @objc private func menuShowOverlays() { OverlayController.shared.showAll() }
+    @objc private func menuShowOverlays() { OverlayController.shared.untuck() }
     @objc private func menuCloseOverlays() { OverlayController.shared.closeAllKeeping() }
     @objc private func menuClosePins() { PinController.shared.closeAll() }
 
