@@ -520,22 +520,32 @@ final class LibraryGridView: NSView {
     private func layoutItems() -> CGFloat {
         let width = layoutWidth
         let rowHeight = self.rowHeight
+        // record dimensions are pixels; native on screen is that over the backing scale
+        let backing = window?.backingScaleFactor ?? 2
         var y: CGFloat = gutter
         var row: [Int] = []
         var natural: CGFloat = 0   // the row's items at their unstretched widths
+        var headroom: CGFloat = .infinity   // how far the row can stretch before an item exceeds native
         sections = []
 
         func flush(scale: CGFloat) {
             guard !row.isEmpty else { return }
+            // Justifying stretches the row; nothing is ever drawn larger than it was captured, so
+            // a row holding an item already at native size stays ragged rather than blow it up.
+            let scale = min(scale, headroom)
             var cursor = gutter
+            let lineHeight = rowHeight * scale
             for i in row {
                 let w = items[i].frame.width * scale
-                items[i].frame = CGRect(x: cursor, y: y, width: w, height: rowHeight * scale)
+                let h = items[i].frame.height * scale
+                // a capture shorter than the row sits centred on the row's line
+                items[i].frame = CGRect(x: cursor, y: y + (lineHeight - h) / 2, width: w, height: h)
                 cursor += w + gutter
             }
-            y += rowHeight * scale + gutter
+            y += lineHeight + gutter
             row = []
             natural = 0
+            headroom = .infinity
         }
 
         var day: Date?
@@ -551,14 +561,18 @@ final class LibraryGridView: NSView {
                 day = itemDay
             }
             let aspect = r.height > 0 ? CGFloat(r.width) / CGFloat(r.height) : 1.6
-            let w = min(max(rowHeight * aspect, 60), width - gutter * 2)
+            // a capture shorter than the row keeps its native height rather than being scaled up
+            let nativeHeight = r.height > 0 ? CGFloat(r.height) / backing : rowHeight
+            let h = min(rowHeight, nativeHeight)
+            let w = min(max(h * aspect, 60), width - gutter * 2)
             // gutters for the row this item would join: one on each side plus one per item
             if natural + w + CGFloat(row.count + 2) * gutter > width, !row.isEmpty {
                 flush(scale: (width - CGFloat(row.count + 1) * gutter) / natural)
             }
-            items[i].frame = CGRect(x: 0, y: y, width: w, height: rowHeight)
+            items[i].frame = CGRect(x: 0, y: y, width: w, height: h)
             row.append(i)
             natural += w
+            headroom = min(headroom, nativeHeight / h)
         }
         flush(scale: 1)   // a day's last row keeps natural size rather than stretching to fill
         if !sections.isEmpty { sections[sections.count - 1].bottom = y }
