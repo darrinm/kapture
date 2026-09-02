@@ -1,7 +1,8 @@
 // Quick Access Overlay (M1): stacked capture panels in the bottom corner with hover chrome.
 // Keep and discard are distinct one-gesture actions (product spec §2.0): × / ⌘W keeps,
 // trash / ⌘⌫ / swipe-toward-edge discards into the 7-day trash. space = Quick Look.
-// Beyond 5 the pile collapses into a "+n" card. Right-click menu on every card.
+// Beyond 5 the pile collapses into a "+n" card. Right-click menu on every card. Swipe down
+// tucks the whole stack off the bottom edge behind a small tab that brings it back.
 import AppKit
 import AVFoundation
 import Quartz
@@ -16,7 +17,10 @@ final class OverlayController {
     static let shared = OverlayController()
     private var panels: [OverlayPanel] = []
     private var collapseChip: CollapseChip?
+    private var tuckTab: TuckTab?
     private var fannedOut = false
+    /// The stack has been swiped down out of the way; only the tab is on screen.
+    private(set) var tucked = false
     var library: Library?
     weak var hoveredPanel: OverlayPanel?   // consulted by the event-tap tier
 
@@ -24,6 +28,7 @@ final class OverlayController {
         let panel = OverlayPanel(record: record, fileURL: fileURL, image: image) { [weak self] panel in
             self?.remove(panel)
         }
+        untuck()   // a new capture is something to look at; the stack comes back with it
         panels.append(panel)
         fannedOut = false
 
@@ -95,19 +100,47 @@ final class OverlayController {
         return try? generator.copyCGImage(at: .zero, actualTime: nil)
     }
 
-    func hideAll() {
-        // order the panels out — an alpha-0 panel left ordered in still owns tracking areas,
-        // which would keep feeding hoveredPanel and let the event tap swallow keys invisibly
-        for panel in panels {
-            Tokens.animate(0.2, { panel.animator().alphaValue = 0 }) { panel.orderOut(nil) }
-        }
+    // MARK: tuck — swipe down puts the stack out of the way without closing anything
+
+    /// Slide the whole stack down off the screen and leave a tab at the edge to bring it back.
+    /// The cards are out of the way of whatever is under them, not gone: nothing closes, and
+    /// auto-close waits until they are back in sight.
+    func tuck() {
+        guard !tucked, !panels.isEmpty, let screen = NSScreen.main else { return }
+        tucked = true
         hoveredPanel = nil
         collapseChip?.orderOut(nil)
+        // the stack drops as one piece, by however much its top needs to clear the bottom of
+        // the display — the display, not the visible area: passing under the Dock is part of it
+        let top = panels.filter(\.isVisible).map(\.frame.maxY).max() ?? screen.frame.minY
+        let dy = screen.frame.minY - top - Tokens.cornerMargin
+        for panel in panels {
+            // the swiped card is under the pointer, and no mouseExited reaches a window that
+            // has left; its chrome would otherwise still be up when the stack came back
+            if panel.card.hovering { panel.card.hovering = false }
+            panel.pauseAutoClose()
+            Tokens.animate(0.25, timing: CAMediaTimingFunction(name: .easeIn), {
+                panel.animator().setFrame(panel.frame.offsetBy(dx: 0, dy: dy), display: true)
+            }) { [weak self] in
+                // ordered out rather than parked below the screen: an ordered-in panel still
+                // owns tracking areas, which would keep feeding hoveredPanel and let the event
+                // tap swallow keys invisibly
+                if self?.tucked == true { panel.orderOut(nil) }
+            }
+        }
+        layout()   // tucked: lays out the tab
     }
 
-    func showAll() {
+    /// Bring a tucked stack back up into its slots.
+    func untuck() {
+        guard tucked else { return }
+        tucked = false
+        tuckTab?.orderOut(nil)
+        // the cards are still parked below the screen (and ordered out once the tuck finished);
+        // put them back on before the relayout so it slides them up from there
+        panels.forEach { $0.orderFrontRegardless() }
         layout()
-        for panel in panels { Tokens.animate(0.2) { panel.animator().alphaValue = 1 } }
+        panels.forEach { $0.scheduleAutoClose() }
     }
 
     func fanOut() { fannedOut = true; layout() }
@@ -135,6 +168,7 @@ final class OverlayController {
     private func layout(animated: Bool = true) {
         guard let screen = NSScreen.main else { return }
         let slot = cornerSlotFrame(on: screen)
+        if tucked { layoutTab(on: screen, slot: slot); return }
         let size = slot.size
         let x = slot.minX
         var y = slot.minY
@@ -175,6 +209,119 @@ final class OverlayController {
             chip.setFrame(NSRect(x: x, y: y, width: size.width, height: 36), display: true)
             chip.orderFrontRegardless()
         }
+    }
+
+    /// The stack is off screen; only its tab is placed. An emptied stack has nothing to bring
+    /// back, so it stops being tucked — the next capture must not appear from below the screen.
+    private func layoutTab(on screen: NSScreen, slot: NSRect) {
+        guard !panels.isEmpty else {
+            tucked = false
+            tuckTab?.orderOut(nil)
+            return
+        }
+        let tab = tuckTab ?? TuckTab { [weak self] in self?.untuck() }
+        tuckTab = tab
+        tab.update(count: panels.count)
+        // flush with the bottom of the visible area, so it rides on top of a bottom Dock rather
+        // than disappearing behind it, at the corner the stack lives in
+        let size = TuckTab.size
+        let x = Settings.shared.overlayOnLeftEdge ? slot.minX : slot.maxX - size.width
+        tab.setFrame(NSRect(x: x, y: screen.visibleFrame.minY, width: size.width, height: size.height),
+                     display: true)
+        if !tab.isVisible {
+            tab.alphaValue = 0
+            tab.orderFrontRegardless()
+            Tokens.animate(0.2) { tab.animator().alphaValue = 1 }
+        }
+    }
+}
+
+/// The handle a tucked stack leaves at the bottom edge: click it, or swipe up on it, and the
+/// stack comes back. Sized as a tab rather than a card — it exists to stay out of the way.
+final class TuckTab: NSPanel {
+    static let size = CGSize(width: 64, height: 22)
+
+    init(onOpen: @escaping () -> Void) {
+        super.init(contentRect: .zero, styleMask: [.nonactivatingPanel, .borderless], backing: .buffered, defer: false)
+        isOpaque = false; backgroundColor = .clear
+        level = .statusBar; hasShadow = true
+        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        contentView = TuckTabView(onOpen: onOpen)
+    }
+
+    func update(count: Int) {
+        (contentView as? TuckTabView)?.count = count
+    }
+}
+
+final class TuckTabView: NSView {
+    var count = 0 { didSet { needsDisplay = true } }
+    let onOpen: () -> Void
+    private var swipeY: CGFloat = 0
+
+    init(onOpen: @escaping () -> Void) {
+        self.onOpen = onOpen
+        super.init(frame: .zero)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
+    override func mouseDown(with event: NSEvent) { onOpen() }
+
+    /// The reverse of the swipe that tucked the stack.
+    override func scrollWheel(with event: NSEvent) {
+        switch event.phase {
+        case .began:
+            swipeY = 0
+        case .changed:
+            swipeY += event.scrollingDeltaY
+            if swipeY > 40 {
+                swipeY = -.infinity   // once per gesture: the rest of the stream is ignored
+                onOpen()
+            }
+        default: break
+        }
+    }
+
+    override func draw(_ dirty: NSRect) {
+        // rounded at the top only: the tab grows out of the screen edge
+        let r: CGFloat = 8
+        let shape = NSBezierPath()
+        shape.move(to: NSPoint(x: 0, y: 0))
+        shape.line(to: NSPoint(x: 0, y: bounds.height - r))
+        shape.appendArc(withCenter: NSPoint(x: r, y: bounds.height - r), radius: r,
+                        startAngle: 180, endAngle: 90, clockwise: true)
+        shape.line(to: NSPoint(x: bounds.width - r, y: bounds.height))
+        shape.appendArc(withCenter: NSPoint(x: bounds.width - r, y: bounds.height - r), radius: r,
+                        startAngle: 90, endAngle: 0, clockwise: true)
+        shape.line(to: NSPoint(x: bounds.width, y: 0))
+        shape.close()
+        NSColor.windowBackgroundColor.withAlphaComponent(0.92).setFill()
+        shape.fill()
+
+        // an up chevron and the count, centered as one unit
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
+            .foregroundColor: NSColor.labelColor,
+        ]
+        let label = "\(count)" as NSString
+        let labelSize = label.size(withAttributes: attrs)
+        let chevronWidth: CGFloat = 9, gap: CGFloat = 5
+        let left = (bounds.width - (chevronWidth + gap + labelSize.width)) / 2
+        let midY = bounds.midY
+
+        let chevron = NSBezierPath()
+        chevron.move(to: NSPoint(x: left, y: midY - 2))
+        chevron.line(to: NSPoint(x: left + chevronWidth / 2, y: midY + 2.5))
+        chevron.line(to: NSPoint(x: left + chevronWidth, y: midY - 2))
+        chevron.lineWidth = 1.5
+        chevron.lineCapStyle = .round
+        chevron.lineJoinStyle = .round
+        NSColor.labelColor.setStroke()
+        chevron.stroke()
+
+        label.draw(at: NSPoint(x: left + chevronWidth + gap, y: midY - labelSize.height / 2), withAttributes: attrs)
     }
 }
 
@@ -277,7 +424,8 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
 
     // MARK: auto-close (paused while hovered)
     func scheduleAutoClose() {
-        guard Settings.shared.autoCloseEnabled else { return }
+        // a tucked card is out of sight; it must not quietly close (or save) while it is
+        guard Settings.shared.autoCloseEnabled, !OverlayController.shared.tucked else { return }
         autoCloseTimer?.invalidate()
         autoCloseTimer = Timer.scheduledTimer(withTimeInterval: Double(Settings.shared.autoCloseInterval),
                                               repeats: false) { [weak self] _ in
@@ -286,6 +434,10 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
                 Settings.shared.autoCloseSaves ? self.saveToExportLocation() : self.keepAndClose()
             }
         }
+    }
+
+    func pauseAutoClose() {
+        autoCloseTimer?.invalidate(); autoCloseTimer = nil
     }
 
     func hoverChanged(_ hovering: Bool) {
@@ -803,7 +955,7 @@ final class OverlayView: NSView, NSDraggingSource {
             }
             guard swipeAxis == .horizontal else { return }
             // the window only has to grow once the gesture is known to be horizontal: a swipe
-            // down to hide the stack was paying for a resize it never used
+            // down to tuck the stack was paying for a resize it never used
             panel.beginSwipe()
             armSwipeWatchdog()
             let elapsed = max(event.timestamp - swipeTime, 1.0 / 240)
@@ -829,7 +981,7 @@ final class OverlayView: NSView, NSDraggingSource {
         case .vertical:
             // the window is only grown once a gesture turns horizontal, so there is nothing
             // to put back here
-            if swipeY < -40 { OverlayController.shared.hideAll() }
+            if swipeY < -40 { OverlayController.shared.tuck() }
         case .horizontal:
             let dismiss = SwipePhysics.shouldDismiss(progress: swipeX * towardEdgeSign,
                                                      velocity: swipeVelocity,

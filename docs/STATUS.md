@@ -19,7 +19,7 @@ M0: complete (verify-by-fire ships as ShortcutConflictWatch — notices the apps
 ## M1 status (It triages)
 
 Done: journaled trash (.trash/ + tombstones, 7-day sweep every 6h, sweep-safe restore) ·
-discard gestures (hover trash, ⌘⌫, swipe-toward-edge; swipe-down hides all) · Restore Last
+discard gestures (hover trash, ⌘⌫, swipe-toward-edge; swipe-down tucks the stack off the bottom edge behind a tab) · Restore Last
 Discarded · +n stack collapse past 5 · Quick Look (space) · right-click menu · pins (drag,
 opacity scroll, nudge, lock/click-through, hover ×, ⌘⇧1 from clipboard) · capture→corner
 flight animation · Settings window (General/Overlay: clipboard, sounds, launch-at-login,
