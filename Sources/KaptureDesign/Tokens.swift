@@ -62,6 +62,39 @@ public enum Tokens {
     /// Circular scrim behind a small glyph badge — the share badge and the pin's close button.
     public static let badgeScrim = NSColor.black.withAlphaComponent(0.45)
 
+    // MARK: Glyph controls (see HoverButton)
+    /// Corner radius of the fill behind a 22pt glyph button. Small enough to read as a squircle
+    /// under the symbol rather than a pill around it.
+    public static let radiusControl: CGFloat = 5
+    /// How much white a glyph control's fill picks up under the pointer, and while held. Both are
+    /// read against the card's own scrim, which is what the buttons sit on.
+    public static let controlHoverAlpha: CGFloat = 0.22
+    public static let controlPressAlpha: CGFloat = 0.36
+    /// Hover fade. Long enough not to strobe as the pointer crosses a row of seven buttons,
+    /// short enough that the fill arrives with the pointer rather than after it.
+    public static let controlFade: TimeInterval = 0.12
+
+    /// A glyph control's fill, brightened by `alpha` over the fill it rests on.
+    ///
+    /// Composites rather than replaces, because the two card surfaces disagree about what a
+    /// resting control looks like: the overlay's chrome is invisible until hovered and wants
+    /// plain white, while the pin's close button rests on a scrim that is the only reason its
+    /// glyph is legible over arbitrary pinned content — replacing that with translucent white
+    /// would brighten the button by erasing the thing that made it readable.
+    public static func controlFill(over resting: NSColor?, brightenedBy alpha: CGFloat) -> NSColor {
+        let plain = NSColor.white.withAlphaComponent(alpha)
+        // A pattern color has no components to lift; a control that is merely less subtle beats
+        // one with no hover state at all.
+        guard let resting, let base = resting.usingColorSpace(.sRGB) else { return plain }
+        // White at `alpha` composited over the base — but only across the color channels.
+        // NSColor.blended mixes alpha too, which would have made the pin's scrim steadily more
+        // opaque as it lit up. How much the scrim weighs is a deliberate token; only its color
+        // should answer the pointer.
+        func lift(_ c: CGFloat) -> CGFloat { c + (1 - c) * alpha }
+        return NSColor(srgbRed: lift(base.redComponent), green: lift(base.greenComponent),
+                       blue: lift(base.blueComponent), alpha: base.alphaComponent)
+    }
+
     // MARK: Motion; honor Reduce Motion
     public static var reduceMotion: Bool {
         NSWorkspace.shared.accessibilityDisplayShouldReduceMotion

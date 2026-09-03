@@ -844,11 +844,8 @@ final class OverlayView: NSView, NSDraggingSource {
     private func button(_ symbol: String, _ tip: String, _ action: Selector) -> NSButton {
         let image = NSImage(systemSymbolName: symbol, accessibilityDescription: tip)!
             .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))!
-        let b = NSButton(image: image, target: self, action: action)
-        b.isBordered = false
+        let b = HoverButton(image: image, tip: tip, target: self, action: action)
         b.contentTintColor = .white
-        b.toolTip = tip
-        b.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
             b.widthAnchor.constraint(equalToConstant: 22),
             b.heightAnchor.constraint(equalToConstant: 22),
