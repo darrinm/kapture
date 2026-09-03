@@ -535,7 +535,6 @@ final class LibraryGridView: NSView {
         var row: [Int] = []
         var natural: CGFloat = 0   // the row's items at their unstretched widths
         var headroom: CGFloat = .infinity   // how far the row can stretch before an item exceeds native
-        var tallest: CGFloat = 0   // the row's line: full height, or less when every item is short
         sections = []
 
         func flush(scale requested: CGFloat) {
@@ -544,7 +543,8 @@ final class LibraryGridView: NSView {
             // a row holding an item already at native size stays ragged rather than blow it up.
             let scale = min(requested, headroom)
             var cursor = gutter
-            let lineHeight = tallest * scale
+            // the row's line: full height, or less when every item in it is short
+            let lineHeight = row.map { items[$0].frame.height }.max()! * scale
             for i in row {
                 let w = items[i].frame.width * scale
                 let h = items[i].frame.height * scale
@@ -556,7 +556,6 @@ final class LibraryGridView: NSView {
             row = []
             natural = 0
             headroom = .infinity
-            tallest = 0
         }
 
         var day: Date?
@@ -571,16 +570,13 @@ final class LibraryGridView: NSView {
                 y += headerHeight
                 day = itemDay
             }
-            // Record dimensions are pixels; native on screen is that over the backing scale. A
-            // record without dimensions has no native size to stay under.
-            let (aspect, native) = r.height > 0
-                ? (CGFloat(r.width) / CGFloat(r.height),
-                   CGSize(width: CGFloat(r.width) / backing, height: CGFloat(r.height) / backing))
-                : (1.6, CGSize(width: CGFloat.infinity, height: CGFloat.infinity))
+            let aspect = r.height > 0 ? CGFloat(r.width) / CGFloat(r.height) : 1.6
+            // record dimensions are pixels; native on screen is that over the backing scale
+            let nativeHeight = r.height > 0 ? CGFloat(r.height) / backing : .infinity
             // a capture shorter than the row keeps its native height rather than being scaled up
-            let h = min(rowHeight, native.height)
+            let h = min(rowHeight, nativeHeight)
             // the floor keeps a sliver clickable, but never wider than it was captured either
-            let w = min(max(h * aspect, min(60, native.width)), width - gutter * 2)
+            let w = min(max(h * aspect, min(60, nativeHeight * aspect)), width - gutter * 2)
             // gutters for the row this item would join: one on each side plus one per item
             if natural + w + CGFloat(row.count + 2) * gutter > width, !row.isEmpty {
                 flush(scale: (width - CGFloat(row.count + 1) * gutter) / natural)
@@ -588,8 +584,7 @@ final class LibraryGridView: NSView {
             items[i].frame = CGRect(x: 0, y: y, width: w, height: h)
             row.append(i)
             natural += w
-            headroom = min(headroom, native.height / h)
-            tallest = max(tallest, h)
+            headroom = min(headroom, nativeHeight / h)
         }
         flush(scale: 1)   // a day's last row keeps natural size rather than stretching to fill
         if !sections.isEmpty { sections[sections.count - 1].bottom = y }
