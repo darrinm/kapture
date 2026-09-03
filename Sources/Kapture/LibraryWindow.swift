@@ -461,6 +461,16 @@ final class LibraryGridView: NSView {
         relayout()
     }
 
+    /// Before the view has a window, the Retina answer: every layout that matters runs after.
+    private var backingScale: CGFloat { window?.backingScaleFactor ?? 2 }
+
+    /// Native size is in points, so it changes when the window lands on a differently scaled
+    /// display; nothing else the grid listens for moves in that case.
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        relayout()
+    }
+
     /// Scrolling brings new rows into view; generate those next. Coalesced so a flick doesn't
     /// restart the pass on every frame, and nearly free when the cache already has them.
     @objc private func visibleAreaChanged() {
@@ -520,21 +530,21 @@ final class LibraryGridView: NSView {
     private func layoutItems() -> CGFloat {
         let width = layoutWidth
         let rowHeight = self.rowHeight
-        // record dimensions are pixels; native on screen is that over the backing scale
-        let backing = window?.backingScaleFactor ?? 2
+        let backing = backingScale
         var y: CGFloat = gutter
         var row: [Int] = []
         var natural: CGFloat = 0   // the row's items at their unstretched widths
         var headroom: CGFloat = .infinity   // how far the row can stretch before an item exceeds native
+        var tallest: CGFloat = 0   // the row's line: full height, or less when every item is short
         sections = []
 
-        func flush(scale: CGFloat) {
+        func flush(scale requested: CGFloat) {
             guard !row.isEmpty else { return }
             // Justifying stretches the row; nothing is ever drawn larger than it was captured, so
             // a row holding an item already at native size stays ragged rather than blow it up.
-            let scale = min(scale, headroom)
+            let scale = min(requested, headroom)
             var cursor = gutter
-            let lineHeight = rowHeight * scale
+            let lineHeight = tallest * scale
             for i in row {
                 let w = items[i].frame.width * scale
                 let h = items[i].frame.height * scale
@@ -546,6 +556,7 @@ final class LibraryGridView: NSView {
             row = []
             natural = 0
             headroom = .infinity
+            tallest = 0
         }
 
         var day: Date?
@@ -560,11 +571,16 @@ final class LibraryGridView: NSView {
                 y += headerHeight
                 day = itemDay
             }
-            let aspect = r.height > 0 ? CGFloat(r.width) / CGFloat(r.height) : 1.6
+            // Record dimensions are pixels; native on screen is that over the backing scale. A
+            // record without dimensions has no native size to stay under.
+            let (aspect, native) = r.height > 0
+                ? (CGFloat(r.width) / CGFloat(r.height),
+                   CGSize(width: CGFloat(r.width) / backing, height: CGFloat(r.height) / backing))
+                : (1.6, CGSize(width: CGFloat.infinity, height: CGFloat.infinity))
             // a capture shorter than the row keeps its native height rather than being scaled up
-            let nativeHeight = r.height > 0 ? CGFloat(r.height) / backing : rowHeight
-            let h = min(rowHeight, nativeHeight)
-            let w = min(max(h * aspect, 60), width - gutter * 2)
+            let h = min(rowHeight, native.height)
+            // the floor keeps a sliver clickable, but never wider than it was captured either
+            let w = min(max(h * aspect, min(60, native.width)), width - gutter * 2)
             // gutters for the row this item would join: one on each side plus one per item
             if natural + w + CGFloat(row.count + 2) * gutter > width, !row.isEmpty {
                 flush(scale: (width - CGFloat(row.count + 1) * gutter) / natural)
@@ -572,7 +588,8 @@ final class LibraryGridView: NSView {
             items[i].frame = CGRect(x: 0, y: y, width: w, height: h)
             row.append(i)
             natural += w
-            headroom = min(headroom, nativeHeight / h)
+            headroom = min(headroom, native.height / h)
+            tallest = max(tallest, h)
         }
         flush(scale: 1)   // a day's last row keeps natural size rather than stretching to fill
         if !sections.isEmpty { sections[sections.count - 1].bottom = y }
@@ -646,7 +663,7 @@ final class LibraryGridView: NSView {
         let jobs = order.map { (index: $0, key: Self.thumbKey(items[$0].record),
                                 url: library.url(for: items[$0].record)) }
         let size = CGSize(width: 480, height: 480)
-        let scale = window?.backingScaleFactor ?? 2
+        let scale = backingScale
         let limit = thumbsInFlight
         thumbTask = Task.detached(priority: .userInitiated) { [weak self] in
             let view = self   // immutable: the nested group closure can't capture the weak var
