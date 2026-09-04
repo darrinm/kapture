@@ -89,10 +89,12 @@ final class PinPanel: NSPanel {
 
 final class PinView: NSImageView {
     unowned let panel: PinPanel
-    private let closeButton = NSButton()
+    private let closeButton: HoverButton
 
     init(panel: PinPanel, image: NSImage) {
         self.panel = panel
+        closeButton = HoverButton(symbol: "xmark.circle.fill", pointSize: 16, weight: .semibold,
+                                  tip: "Close pin (esc)")   // target/action once self exists
         super.init(frame: .zero)
         self.image = image
         imageScaling = .scaleProportionallyUpOrDown
@@ -102,28 +104,20 @@ final class PinView: NSImageView {
         layer?.borderWidth = 1
         layer?.borderColor = NSColor.white.withAlphaComponent(0.28).cgColor   // visible edge on any content
 
-        closeButton.image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Close pin")!
-            .withSymbolConfiguration(.init(pointSize: 16, weight: .semibold))
-        closeButton.isBordered = false
         closeButton.contentTintColor = .white
-        closeButton.wantsLayer = true
-        closeButton.layer?.backgroundColor = Tokens.badgeScrim.cgColor
-        closeButton.layer?.cornerRadius = 10
-        closeButton.toolTip = "Close pin (esc)"
+        closeButton.restingFill = Tokens.badgeScrim   // hover brightens it; see Tokens.controlFill
+        closeButton.layer?.cornerRadius = 10          // half of 20: a round badge
         closeButton.target = self
         closeButton.action = #selector(closeTapped)
         closeButton.isHidden = true
         addSubview(closeButton)
-        closeButton.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
             closeButton.topAnchor.constraint(equalTo: topAnchor, constant: 6),
             closeButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
             closeButton.widthAnchor.constraint(equalToConstant: 20),
             closeButton.heightAnchor.constraint(equalToConstant: 20),
         ])
-        let area = NSTrackingArea(rect: .zero, options: [.activeAlways, .mouseEnteredAndExited, .inVisibleRect],
-                                  owner: self)
-        addTrackingArea(area)
+        trackHover()
     }
     required init?(coder: NSCoder) { fatalError() }
 
