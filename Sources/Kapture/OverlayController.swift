@@ -816,7 +816,7 @@ final class OverlayView: NSView, NSDraggingSource {
         }
     }
     let chrome = NSStackView()
-    private var trashButton: NSButton!
+    private var trashButton: HoverButton!
     // Swipe-to-dismiss, modelled on a macOS notification banner: the card tracks the finger,
     // resists when dragged the wrong way, and on release either carries on off the edge or
     // springs back. The old version only measured the gesture and acted at the end, so the card
@@ -841,10 +841,8 @@ final class OverlayView: NSView, NSDraggingSource {
     /// Which way that edge lies on screen.
     private var edgeScreenSign: CGFloat { Settings.shared.overlayOnLeftEdge ? -1 : 1 }
 
-    private func button(_ symbol: String, _ tip: String, _ action: Selector) -> NSButton {
-        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: tip)!
-            .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))!
-        let b = HoverButton(image: image, tip: tip, target: self, action: action)
+    private func button(_ symbol: String, _ tip: String, _ action: Selector) -> HoverButton {
+        let b = HoverButton(symbol: symbol, pointSize: 11, tip: tip, target: self, action: action)
         b.contentTintColor = .white
         NSLayoutConstraint.activate([
             b.widthAnchor.constraint(equalToConstant: 22),
@@ -891,9 +889,7 @@ final class OverlayView: NSView, NSDraggingSource {
             trashButton.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -5),
             trashButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
         ])
-        let area = NSTrackingArea(rect: .zero, options: [.activeAlways, .mouseEnteredAndExited, .inVisibleRect],
-                                  owner: self)
-        addTrackingArea(area)
+        trackHover()
     }
     required init?(coder: NSCoder) { fatalError() }
 

@@ -1,6 +1,20 @@
 // KaptureDesign: the glyph control that answers the pointer.
 import AppKit
 
+public extension NSView {
+    /// Enter/exit tracking over the whole of the view, however it is later laid out or clipped.
+    ///
+    /// `.activeAlways` because every surface hovered from a nonactivating panel — the overlay
+    /// cards, their controls, a pin — is hovered while another app is frontmost; `.inVisibleRect`
+    /// because these views are placed by Auto Layout, so a fixed rect would be the wrong one from
+    /// the moment it was set.
+    func trackHover() {
+        addTrackingArea(NSTrackingArea(rect: .zero,
+                                       options: [.activeAlways, .mouseEnteredAndExited, .inVisibleRect],
+                                       owner: self))
+    }
+}
+
 /// A borderless glyph button that lights up under the pointer and deepens while held.
 ///
 /// Card chrome is a row of borderless SF Symbols sitting on a dark scrim. Borderless means no
@@ -9,8 +23,8 @@ import AppKit
 /// A control you have to aim at by memory reads as a picture of a control rather than one you
 /// can press.
 ///
-/// The fill is drawn on the button's own layer rather than a sublayer so it stays behind the
-/// glyph, and `Tokens.controlFill` composites it over `restingFill` instead of replacing it.
+/// The fill goes on the button's own layer rather than a sublayer so it stays behind the glyph,
+/// and `Tokens.controlFill` composites it over `restingFill` instead of replacing it.
 public final class HoverButton: NSButton {
     /// Fill when the pointer is elsewhere. `nil` for chrome that should stay invisible until
     /// hovered — the overlay card's buttons, which already sit on the card's own scrim band.
@@ -18,34 +32,35 @@ public final class HoverButton: NSButton {
         didSet { applyFill(animated: false) }
     }
 
-    public var cornerRadius: CGFloat = Tokens.radiusControl {
-        didSet { layer?.cornerRadius = cornerRadius }
-    }
-
+    /// Guarded because a redundant set would restart the fade half way through it. The unanimated
+    /// paths below only overwrite a layer colour, so they need no such guard.
     private var hovering = false {
-        didSet { applyFill(animated: true) }
+        didSet { if hovering != oldValue { applyFill(animated: true) } }
     }
     /// Instant, unlike the hover fade: a press is a confirmation, and a confirmation that eases
     /// in has already missed the moment it was confirming.
     private var pressed = false {
         didSet { applyFill(animated: false) }
     }
+    /// A control disabled while the pointer rests on it would otherwise stay lit until the next
+    /// hover transition, which is the one moment it must not look pressable.
+    public override var isEnabled: Bool {
+        didSet { applyFill(animated: false) }
+    }
 
-    public init(image: NSImage, tip: String, target: AnyObject? = nil, action: Selector? = nil) {
+    public init(symbol: String, pointSize: CGFloat, weight: NSFont.Weight = .medium,
+                tip: String, target: AnyObject? = nil, action: Selector? = nil) {
         super.init(frame: .zero)
-        self.image = image
+        image = NSImage(systemSymbolName: symbol, accessibilityDescription: tip)!
+            .withSymbolConfiguration(.init(pointSize: pointSize, weight: weight))!
         self.target = target
         self.action = action
         toolTip = tip
         isBordered = false
         wantsLayer = true
-        layer?.cornerRadius = cornerRadius
+        layer?.cornerRadius = Tokens.radiusControl
         translatesAutoresizingMaskIntoConstraints = false
-        addTrackingArea(NSTrackingArea(rect: .zero,
-                                       // .activeAlways: the overlay is a nonactivating panel, so
-                                       // its cards are hovered while another app is frontmost.
-                                       options: [.activeAlways, .mouseEnteredAndExited, .inVisibleRect],
-                                       owner: self))
+        trackHover()
     }
     required init?(coder: NSCoder) { fatalError() }
 
@@ -56,8 +71,8 @@ public final class HoverButton: NSButton {
     /// under the pointer is never sent `mouseExited` — without this the button would come back
     /// still lit the next time the chrome appeared.
     public override func viewDidHide() {
+        super.viewDidHide()
         hovering = false
-        pressed = false
     }
 
     public override func mouseDown(with event: NSEvent) {

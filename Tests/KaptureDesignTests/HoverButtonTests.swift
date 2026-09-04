@@ -22,8 +22,7 @@ final class HoverButtonTests: XCTestCase {
         XCTAssertEqual(brightness(fill), 1, accuracy: 0.001)
     }
 
-    /// The pin's close button rests on a scrim that is the only reason its glyph reads over
-    /// arbitrary pinned content. Hover must brighten it, not swap it for translucent white.
+    /// Hover must brighten the pin's scrim, not swap it for translucent white.
     func testHoverFillOverAScrimKeepsTheScrimAndBrightens() {
         let scrim = Tokens.badgeScrim
         let fill = Tokens.controlFill(over: scrim, brightenedBy: Tokens.controlHoverAlpha)
@@ -32,24 +31,23 @@ final class HoverButtonTests: XCTestCase {
                        "hover should lift the scrim's colour, not change how much it weighs")
     }
 
-    func testPressReadsHeavierThanHover() {
-        for resting: NSColor? in [nil, Tokens.badgeScrim] {
-            let hover = Tokens.controlFill(over: resting, brightenedBy: Tokens.controlHoverAlpha)
-            let press = Tokens.controlFill(over: resting, brightenedBy: Tokens.controlPressAlpha)
-            XCTAssertNotEqual(hover, press)
-            if resting == nil {
-                XCTAssertGreaterThan(alpha(press), alpha(hover))
-            } else {
-                XCTAssertGreaterThan(brightness(press), brightness(hover))
-            }
-        }
+    func testPressReadsHeavierThanHoverOnBareChrome() {
+        let hover = Tokens.controlFill(over: nil, brightenedBy: Tokens.controlHoverAlpha)
+        let press = Tokens.controlFill(over: nil, brightenedBy: Tokens.controlPressAlpha)
+        XCTAssertGreaterThan(alpha(press), alpha(hover))
+    }
+
+    func testPressReadsHeavierThanHoverOverAScrim() {
+        let scrim = Tokens.badgeScrim
+        let hover = Tokens.controlFill(over: scrim, brightenedBy: Tokens.controlHoverAlpha)
+        let press = Tokens.controlFill(over: scrim, brightenedBy: Tokens.controlPressAlpha)
+        XCTAssertGreaterThan(brightness(press), brightness(hover))
     }
 
     // MARK: button state
 
     private func button(restingFill: NSColor? = nil) -> HoverButton {
-        let b = HoverButton(image: NSImage(systemSymbolName: "trash", accessibilityDescription: "t")!,
-                            tip: "t")
+        let b = HoverButton(symbol: "trash", pointSize: 11, tip: "t")
         b.restingFill = restingFill
         b.frame = CGRect(x: 0, y: 0, width: 22, height: 22)
         return b
@@ -106,5 +104,18 @@ final class HoverButtonTests: XCTestCase {
         let resting = b.layer?.backgroundColor
         b.mouseEntered(with: enterExit())
         XCTAssertEqual(b.layer?.backgroundColor, resting)
+    }
+
+    /// Disabling is the one moment a lit control must not keep looking pressable, and it arrives
+    /// with no hover transition to redraw on.
+    func testDisablingAControlUnderThePointerDropsItsHoverFill() {
+        let b = button(restingFill: Tokens.badgeScrim)
+        let resting = b.layer?.backgroundColor
+        b.mouseEntered(with: enterExit())
+        XCTAssertNotEqual(b.layer?.backgroundColor, resting)
+        b.isEnabled = false
+        XCTAssertEqual(b.layer?.backgroundColor, resting)
+        b.isEnabled = true
+        XCTAssertNotEqual(b.layer?.backgroundColor, resting, "still hovered: the fill comes back")
     }
 }

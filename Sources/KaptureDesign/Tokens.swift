@@ -81,15 +81,15 @@ public enum Tokens {
     /// plain white, while the pin's close button rests on a scrim that is the only reason its
     /// glyph is legible over arbitrary pinned content — replacing that with translucent white
     /// would brighten the button by erasing the thing that made it readable.
+    ///
+    /// Only the colour lifts. `NSColor.blended` mixes alpha as well, which would have made that
+    /// scrim steadily more opaque as it lit up; how much it weighs is a deliberate token, and
+    /// only its colour should answer the pointer.
     public static func controlFill(over resting: NSColor?, brightenedBy alpha: CGFloat) -> NSColor {
-        let plain = NSColor.white.withAlphaComponent(alpha)
-        // A pattern color has no components to lift; a control that is merely less subtle beats
-        // one with no hover state at all.
-        guard let resting, let base = resting.usingColorSpace(.sRGB) else { return plain }
-        // White at `alpha` composited over the base — but only across the color channels.
-        // NSColor.blended mixes alpha too, which would have made the pin's scrim steadily more
-        // opaque as it lit up. How much the scrim weighs is a deliberate token; only its color
-        // should answer the pointer.
+        guard let resting else { return NSColor.white.withAlphaComponent(alpha) }
+        // Conversion only fails for a pattern colour, which nothing here uses. Keeping the scrim
+        // and losing the highlight is the safe way to fail: the reverse erases what it is for.
+        guard let base = resting.usingColorSpace(.sRGB) else { return resting }
         func lift(_ c: CGFloat) -> CGFloat { c + (1 - c) * alpha }
         return NSColor(srgbRed: lift(base.redComponent), green: lift(base.greenComponent),
                        blue: lift(base.blueComponent), alpha: base.alphaComponent)
