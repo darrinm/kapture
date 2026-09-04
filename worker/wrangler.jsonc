@@ -12,6 +12,10 @@
   "routes": [{ "pattern": "kapture.sh", "custom_domain": true }],
   "r2_buckets": [{ "binding": "BUCKET", "bucket_name": "kapture-shares" }],
   "kv_namespaces": [{ "binding": "QUOTAS", "id": "7b8c352113924566884294c22a72a659" }],
+  "durable_objects": {
+    "bindings": [{ "name": "QUOTA_COUNTERS", "class_name": "QuotaCounter" }]
+  },
+  "migrations": [{ "tag": "v1-quota-counter", "new_sqlite_classes": ["QuotaCounter"] }],
   "vars": {
     // the owner allowed to delete anyone's share
     "ADMIN_OWNER": "darrin",

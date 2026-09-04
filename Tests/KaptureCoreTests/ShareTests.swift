@@ -88,7 +88,7 @@ final class ShareTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: dir) }
         let (record, _) = try lib.storePNG(Data([1, 2, 3]), width: 1, height: 1,
                                            sourceApp: nil, windowTitle: nil, screenID: nil)
-        try lib.setShareLink(record.id, url: "https://kapture.sh/abc12345")
+        try lib.setShareLink(record.id, url: "https://kapture.sh/abc12345", revision: record.contentRevision)
         var stored = try lib.db.queue.read { try CaptureRecord.fetchOne($0, key: record.id) }
         XCTAssertEqual(stored?.shareURL, "https://kapture.sh/abc12345")
         XCTAssertFalse(stored?.shareStale ?? true)
@@ -99,7 +99,7 @@ final class ShareTests: XCTestCase {
         XCTAssertTrue(stored?.shareStale ?? false, "an edited capture's link is out of date")
 
         // re-sharing replaces the link and clears the flag again
-        try lib.setShareLink(record.id, url: "https://kapture.sh/def67890")
+        try lib.setShareLink(record.id, url: "https://kapture.sh/def67890", revision: stored?.contentRevision)
         stored = try lib.db.queue.read { try CaptureRecord.fetchOne($0, key: record.id) }
         XCTAssertFalse(stored?.shareStale ?? true)
 

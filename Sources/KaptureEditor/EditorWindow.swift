@@ -83,7 +83,7 @@ public final class EditorController {
                     try library.applyEdit(recordID, flattenedPNG: png,
                                           layersJSON: AnnotationCodec.encode(layers),
                                           width: out.width, height: out.height)
-                } catch { Log.store.error("apply edit failed: \(error)") }
+                } catch { Log.store.error("apply edit failed: \(error)"); return }
             }
             if reopenAsCard {
                 await MainActor.run { onFlattened?(recordID) }

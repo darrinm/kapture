@@ -14,6 +14,8 @@ import {
 } from "./common";
 import { accessTokenFrom, issuerFor, kidOf, loadJWKS, verifyAccessToken } from "./access";
 
+import { quotaFor } from "./quota";
+
 const COOKIE = "kapture_admin";
 const SESSION_SECONDS = 12 * 60 * 60;
 
@@ -177,10 +179,7 @@ async function allShares(env: Env): Promise<ShareRow[]> {
 }
 
 async function usageToday(env: Env, owner: string): Promise<{ bytes: number; objects: number }> {
-  const day = new Date().toISOString().slice(0, 10);
-  const used = (await env.QUOTAS.get(`quota:${owner}:${day}`, "json")) as
-    { bytes: number; objects: number } | null;
-  return { bytes: Number(used?.bytes) || 0, objects: Number(used?.objects) || 0 };
+  return quotaFor(env, owner).usage(owner);
 }
 
 interface DashboardView {

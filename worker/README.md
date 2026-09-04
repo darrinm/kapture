@@ -1,6 +1,6 @@
 # kapture.sh — share backend
 
-A single Cloudflare Worker plus an R2 bucket. It stores a capture, hands back a
+A Cloudflare Worker with an R2 bucket, KV for owner credentials, and a Durable Object per owner for atomic upload quotas. It stores a capture, hands back a
 permanent unguessable link, and serves a no-JavaScript viewer for it. There are
 no accounts: a share is authorized by a bearer token that the app holds, and the
 link itself is the only capability a recipient needs.
@@ -36,7 +36,7 @@ Your deployment is entirely separate: your own bucket, your own tokens, your own
 
 ```sh
 npm install
-npm test          # 12 vitest-pool-workers tests, no network
+npm test          # includes concurrent quota and authorization tests
 npm run typecheck
 npm run dev
 ```
@@ -65,8 +65,13 @@ npx wrangler secret put TOKENS               # {"darrin":"<hash>","friend":"<has
 npx wrangler deploy
 ```
 
-This is already done for kapture.sh. Adding a friend afterwards is the dashboard's job, below —
-`TOKENS` only seeds the first deployment.
+The `v1-quota-counter` migration in `wrangler.jsonc` creates the SQLite-backed
+`QuotaCounter` class during deployment; no separate namespace creation is needed. Existing
+installations must deploy this binding and class together. Each owner's current-day KV counter
+is carried forward on first use, then all quota reads and reservations use the Durable Object.
+The object retains one daily counter and resets it at the next UTC day.
+
+Adding a friend afterwards is the dashboard's job, below — `TOKENS` only seeds the first deployment.
 
 ## The dashboard
 
@@ -114,8 +119,10 @@ To check the whole path without touching the UI:
 Kapture.app/Contents/MacOS/Kapture --share-test some.png --delete
 ```
 
-Each owner gets their own daily quota (2 GB, 500 objects), so a leaked token costs a day rather
-than the account, and one person cannot exhaust another's.
+Each owner gets a daily upload quota (2 GB, 500 objects). The Durable Object reserves the
+actual received bytes and one object in a single transaction before writing to R2, so concurrent
+uploads cannot overwrite one another's charges. Failed R2 writes retain their reservation;
+deleting a share does not refund its upload quota. The dashboard reads the same counter.
 
 ## Design notes
 

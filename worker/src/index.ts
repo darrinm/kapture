@@ -15,10 +15,10 @@ import {
 import { handleAdmin } from "./admin";
 
 export type { Env };
+export { QuotaCounter } from "./quota";
+import { quotaFor } from "./quota";
 
 const MAX_SINGLE_UPLOAD = 95 * 1024 * 1024; // Workers' request body ceiling is 100MB
-const DAILY_BYTES_PER_OWNER = 2 * 1024 * 1024 * 1024;
-const DAILY_OBJECTS_PER_OWNER = 500;
 
 const ALLOWED_TYPES = new Map([
   ["image/png", "png"],
@@ -96,25 +96,6 @@ a { color:inherit; }
 </body></html>`;
 }
 
-/** Per-owner daily counters. A leaked token can cost a day's quota, not the account. */
-async function checkQuota(env: Env, owner: string, bytes: number): Promise<string | null> {
-  const day = new Date().toISOString().slice(0, 10);
-  const key = `quota:${owner}:${day}`;
-  const current = (await env.QUOTAS.get(key, "json")) as { bytes: number; objects: number } | null;
-  // a counter that ever went non-finite would otherwise compare false against every limit and
-  // silently disable the quota for the rest of the day
-  const finite = (n: unknown) => (typeof n === "number" && Number.isFinite(n) && n > 0 ? n : 0);
-  const used = { bytes: finite(current?.bytes), objects: finite(current?.objects) };
-  if (used.bytes + bytes > DAILY_BYTES_PER_OWNER) return "daily byte quota reached";
-  if (used.objects + 1 > DAILY_OBJECTS_PER_OWNER) return "daily object quota reached";
-  await env.QUOTAS.put(
-    key,
-    JSON.stringify({ bytes: used.bytes + bytes, objects: used.objects + 1 }),
-    { expirationTtl: 60 * 60 * 30 },
-  );
-  return null;
-}
-
 export default {
   async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
@@ -146,7 +127,7 @@ export default {
       if (body.byteLength > MAX_SINGLE_UPLOAD) {
         return json({ error: "too large for a single upload" }, 413);
       }
-      const quotaError = await checkQuota(env, owner, body.byteLength);
+      const quotaError = await quotaFor(env, owner).charge(owner, body.byteLength);
       if (quotaError) return json({ error: quotaError }, 429);
 
       // create-only put; regenerate on the (vanishingly unlikely) collision

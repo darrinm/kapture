@@ -4,6 +4,7 @@ import GRDB
 /// The index lives in Application Support, outside the watched library root (spec §2.1).
 public final class Database: Sendable {
     public let queue: DatabaseQueue
+    let operationLock = NSRecursiveLock()
 
     public init(directory: URL? = nil) throws {
         let dir = directory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -86,26 +87,20 @@ public final class Database: Sendable {
                                arguments: [id, name])
             }
         }
+        migrator.registerMigration("v4-revisions-and-recovery") { db in
+            try db.alter(table: "captures") { $0.add(column: "contentRevision", .integer).notNull().defaults(to: 0) }
+            try db.alter(table: "ingest_jobs") {
+                $0.add(column: "revision", .integer).notNull().defaults(to: 0)
+                $0.add(column: "generation", .text).notNull().defaults(to: "legacy")
+            }
+            try db.execute(sql: "UPDATE ingest_jobs SET generation = lower(hex(randomblob(16)))")
+            try db.alter(table: "op_journal") { $0.add(column: "plan", .blob) }
+        }
+        migrator.registerMigration("v5-quarantined-recovery") { db in
+            try db.alter(table: "op_journal") {
+                $0.add(column: "recoveryError", .text)
+            }
+        }
         try migrator.migrate(queue)
-    }
-}
-
-/// Intent journal (spec §2.2 F1): journal before the file op, clear with the state update.
-public struct OpJournal {
-    public static func run<T>(_ db: Database, op: String, captureId: String,
-                              src: String?, dst: String?,
-                              fileOp: () throws -> T,
-                              stateUpdate: @escaping (GRDB.Database, T) throws -> Void) throws -> T {
-        let journalId: Int64 = try db.queue.write { d in
-            try d.execute(sql: "INSERT INTO op_journal (op, captureId, src, dst, startedAt) VALUES (?,?,?,?,?)",
-                          arguments: [op, captureId, src, dst, Date()])
-            return d.lastInsertedRowID
-        }
-        let result = try fileOp()
-        try db.queue.write { d in
-            try stateUpdate(d, result)
-            try d.execute(sql: "DELETE FROM op_journal WHERE id = ?", arguments: [journalId])
-        }
-        return result
     }
 }

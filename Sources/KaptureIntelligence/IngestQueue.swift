@@ -16,33 +16,30 @@ public actor IngestQueue {
     public static let shared = IngestQueue()
     private var library: Library?
     private var running = false
+    private var observation: AnyDatabaseCancellable?
     /// Captures wait this long before OCR — a burst-triage discard shouldn't cost any work.
     private let debounce: TimeInterval = 30
     /// Resumed by enqueue/expedite so a job filed while the drain loop sleeps starts at once.
     private var waiter: CheckedContinuation<Void, Never>?
     /// Handoff from the OCR stage to the name stage, which runs moments later in the same drain
     /// pass: the encoded JPEG (~100 KB) rather than a second decode of the full-size capture.
-    private var pendingJPEG: (id: String, data: Data)?
-
-    private enum Stage: String {
-        case ocr, name
-    }
+    private var pendingJPEG: (generation: String, data: Data)?
 
     public func configure(library: Library) {
         self.library = library
+        // Edits and journal recovery enqueue transactionally in Core, including saves that
+        // leave the editor open. Observe the durable queue so every producer wakes the drain.
+        observation = DatabaseRegionObservation(tracking: Table("ingest_jobs"))
+            .start(in: library.db.queue,
+                   onError: { Log.store.error("ingest observation failed: \($0)") },
+                   onChange: { [weak self] _ in Task { await self?.kick() } })
     }
 
     /// Enqueue a capture for OCR. Safe to call repeatedly; the row is the queue.
     public func enqueue(_ id: String, after delay: TimeInterval? = nil) {
         guard let library else { return }
         let notBefore = Date().addingTimeInterval(delay ?? debounce)
-        try? library.db.queue.write { d in
-            try d.execute(sql: """
-                INSERT INTO ingest_jobs (captureId, stage, notBefore, attempts)
-                VALUES (?, 'ocr', ?, 0)
-                ON CONFLICT(captureId) DO UPDATE SET notBefore = MIN(notBefore, excluded.notBefore)
-                """, arguments: [id, notBefore])
-        }
+        try? library.enqueueIngest(id, notBefore: notBefore)
         kick()
     }
 
@@ -56,14 +53,16 @@ public actor IngestQueue {
         kick()
     }
 
-    public func cancel(_ id: String) { clearJob(id) }
-
-    private func clearJob(_ id: String) {
+    public func cancel(_ id: String) {
         guard let library else { return }
-        if pendingJPEG?.id == id { pendingJPEG = nil }
         try? library.db.queue.write { d in
             try d.execute(sql: "DELETE FROM ingest_jobs WHERE captureId = ?", arguments: [id])
         }
+    }
+
+    private func clearJob(_ job: IngestJob) {
+        if pendingJPEG?.generation == job.generation { pendingJPEG = nil }
+        try? library?.clearIngestJob(job)
     }
 
     /// Called at launch: pick up anything left over from a previous run.
@@ -130,62 +129,27 @@ public actor IngestQueue {
         }) ?? nil
     }
 
-    private struct Job {
-        let captureId: String
-        let stage: Stage
-        let attempts: Int
-    }
+    private func nextDueJob() -> IngestJob? { try? library?.nextIngestJob() }
 
-    private func nextDueJob() -> Job? {
-        guard let library else { return nil }
-        return try? library.db.queue.read { d -> Job? in
-            guard let row = try Row.fetchOne(d, sql: """
-                SELECT captureId, stage, attempts FROM ingest_jobs
-                WHERE notBefore <= ? ORDER BY notBefore LIMIT 1
-                """, arguments: [Date()]) else { return nil }
-            return Job(captureId: row["captureId"],
-                       stage: Stage(rawValue: row["stage"] ?? "") ?? .ocr,
-                       attempts: row["attempts"])
-        }
-    }
-
-    /// Defer this job and count the attempt against the current stage's budget.
-    private func retry(_ id: String, after delay: TimeInterval, error: String) async {
-        guard let library else { return }
-        try? await library.db.queue.write { d in
-            try d.execute(sql: """
-                UPDATE ingest_jobs SET attempts = attempts + 1, notBefore = ?, lastError = ?
-                WHERE captureId = ?
-                """, arguments: [Date().addingTimeInterval(delay), error, id])
-        }
-    }
-
-    /// The record this job is for, if it is still worth working on. Clears the job and returns
-    /// nil for anything discarded, sweeping, or of a kind ingest doesn't handle yet.
-    private func liveRecord(_ id: String) async -> CaptureRecord? {
-        guard let library,
-              let record = try? await library.db.queue.read({ d in
-                  try CaptureRecord.fetchOne(d, key: id)
-              }),
-              record.status != .trashed, record.status != .sweeping,
-              record.canAnnotate || record.kind == .gif else {   // stills and GIFs only for now
-            clearJob(id)
+    private func liveRecord(_ job: IngestJob) -> CaptureRecord? {
+        guard let record = try? library?.ingestRecord(job), record.canAnnotate || record.kind == .gif else {
+            clearJob(job)
             return nil
         }
         return record
     }
 
-    private func process(_ job: Job) async {
+    private func process(_ job: IngestJob) async {
         switch job.stage {
-        case .ocr: await ocrStage(job)
-        case .name: await nameStage(job)
+        case "name": await nameStage(job)
+        default: await ocrStage(job)
         }
     }
 
     // MARK: stage 1 — read the capture and index what it says
 
-    private func ocrStage(_ job: Job) async {
-        guard let library, let record = await liveRecord(job.captureId) else { return }
+    private func ocrStage(_ job: IngestJob) async {
+        guard let library, let record = liveRecord(job) else { return }
 
         // Decide up front whether the name stage will want pixels, so this one decode can
         // produce them too. The CGImage never leaves the detached task — only the JPEG does.
@@ -198,49 +162,36 @@ public actor IngestQueue {
         }.value
 
         // re-check status: the capture may have been discarded while OCR ran
-        guard await liveRecord(job.captureId) != nil else { return }
+        guard liveRecord(job) != nil else { return }
 
         if result.text.isEmpty, job.attempts < 2 {
             // transient failures (a file still being written) get one more go
-            await retry(job.captureId, after: 20, error: "empty")
+            try? library.retryIngestJob(job, after: 20, error: "empty")
             return
         }
 
-        try? library.updateSearchText(job.captureId, ocr: String(result.text.prefix(20_000)))
-        try? await library.db.queue.write { d in
-            try d.execute(sql: "UPDATE captures SET aiState = ? WHERE id = ?",
-                          arguments: [CaptureRecord.AIState.ocr.rawValue, job.captureId])
-        }
-        Log.store.info("ingest: indexed \(record.relPath, privacy: .public) (\(result.text.count) chars)")
-
-        // Stage 2 — name it from what we just read. Optional: with naming off, captures keep
-        // their timestamp names and everything else still works (spec §8).
-        guard naming else {
-            clearJob(job.captureId)
+        do {
+            guard try library.finishOCR(job, text: result.text, naming: naming) else { return }
+        } catch {
+            try? library.retryIngestJob(job, after: 20, error: "index write failed")
             return
         }
-        pendingJPEG = result.jpeg.map { (job.captureId, $0) }
-        try? await library.db.queue.write { d in
-            try d.execute(sql: """
-                UPDATE ingest_jobs SET stage = 'name', attempts = 0, lastError = NULL
-                WHERE captureId = ?
-                """, arguments: [job.captureId])
-        }
+        pendingJPEG = naming ? result.jpeg.map { (job.generation, $0) } : nil
     }
 
     // MARK: stage 2 — turn that text (and, with a key, the pixels) into a name
 
-    private func nameStage(_ job: Job) async {
-        guard let library, let record = await liveRecord(job.captureId) else { return }
+    private func nameStage(_ job: IngestJob) async {
+        guard let library, let record = liveRecord(job) else { return }
         guard Settings.shared.aiNamingEnabled else {   // turned off between the stages
-            clearJob(job.captureId)
+            clearJob(job)
             return
         }
 
         let key = Keychain.anthropicKey
         let wantsAPI = !(key ?? "").isEmpty
         let jpeg: Data?
-        if let pending = pendingJPEG, pending.id == job.captureId {
+        if let pending = pendingJPEG, pending.generation == job.generation {
             jpeg = pending.data
         } else if wantsAPI {
             // the handoff missed (a restart between the stages): encode once, off this actor
@@ -254,22 +205,23 @@ public actor IngestQueue {
         }
         pendingJPEG = nil
 
+        guard liveRecord(job) != nil else { return }
         let ocr = library.ocrText(job.captureId) ?? ""
         guard let (naming, engine) = await NamingService.best(jpeg: jpeg, ocr: ocr, record: record,
                                                              key: key) else {
-            clearJob(job.captureId)
+            clearJob(job)
             return
         }
         let applied = library.applyName(job.captureId, baseName: naming.filename, tags: naming.tags,
-                                        summary: naming.summary, aiState: engine.aiState)
+                                        summary: naming.summary, aiState: engine.aiState, job: job)
         // applyName refuses while a drag/save panel holds the path (it must not move a file out
         // from under one). Leave the job in place so a later pass renames it — bounded, so a
         // stuck in-use flag can't spin the queue forever.
         if !applied, Library.isInUse(job.captureId), job.attempts < 5 {
-            await retry(job.captureId, after: 30, error: "in use")
+            try? library.retryIngestJob(job, after: 30, error: "in use")
             return
         }
-        clearJob(job.captureId)
+        clearJob(job)
     }
 }
 

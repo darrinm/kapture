@@ -43,6 +43,7 @@ public struct CaptureRecord: Codable, Sendable, FetchableRecord, PersistableReco
     public var windowTitle: String?
     public var screenID: Int?
     public var fastID: String        // "size:mtimeNs:inode" — primary identity (spec §2.2 F11)
+    public var contentRevision: Int64 = 0
     public var contentHash: String?  // lazy SHA-256
     public var aiState: AIState
     public var summary: String?

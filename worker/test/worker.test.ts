@@ -1,3 +1,4 @@
+import { quotaFor } from "../src/quota";
 // The security-relevant behavior gets tests: auth, the filename injection path a reviewer
 // found in the first draft, the type allowlist, owner scoping, quotas, and header posture.
 import { env, createExecutionContext, waitOnExecutionContext, SELF } from "cloudflare:test";
@@ -75,9 +76,7 @@ describe("quotas", () => {
     expect((await worker.fetch(request, env, ctx)).status).toBe(200);
     await waitOnExecutionContext(ctx);
 
-    const day = new Date().toISOString().slice(0, 10);
-    const quota = (await env.QUOTAS.get(`quota:darrin:${day}`, "json")) as
-      { bytes: number; objects: number } | null;
+    const quota = await quotaFor(env, "darrin").usage("darrin");
     expect(quota).not.toBeNull();
     expect(quota!.bytes).toBeGreaterThanOrEqual(40_000);
   });
@@ -87,8 +86,7 @@ describe("quotas", () => {
     await env.QUOTAS.put(`quota:darrin:${day}`, JSON.stringify({ bytes: null, objects: "lots" }));
     const response = await upload();
     expect(response.status).toBe(200);
-    const quota = (await env.QUOTAS.get(`quota:darrin:${day}`, "json")) as
-      { bytes: number; objects: number };
+    const quota = await quotaFor(env, "darrin").usage("darrin");
     expect(Number.isFinite(quota.bytes)).toBe(true);
     expect(Number.isFinite(quota.objects)).toBe(true);
   });
