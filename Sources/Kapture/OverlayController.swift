@@ -28,15 +28,57 @@ final class OverlayController {
     var library: Library?
     weak var hoveredPanel: OverlayPanel?   // consulted by the event-tap tier
 
+    /// The display the stack lives on, held across layouts. `NSScreen.main` is the screen of the
+    /// *key window*, so it swings to whichever display was last clicked; re-reading it on every
+    /// layout let a dismissal, a tuck or a fan-out fling the surviving cards onto another monitor.
+    /// A new capture re-anchors the stack (it belongs where the shot was taken); nothing else does.
+    private var anchorDisplay: CGDirectDisplayID?
+
+    private init() {
+        // an unplugged anchor display strands the cards on coordinates no screen covers any
+        // more; relayout so they resolve onto a live one
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
+        ) { _ in MainActor.assumeIsolated { OverlayController.shared.layout() } }
+    }
+
+    /// The anchored display, or — with no anchor yet, or its display gone — the current one,
+    /// which then becomes the anchor.
+    private var stackScreen: NSScreen? {
+        if let id = anchorDisplay, let screen = NSScreen.screens.first(where: { $0.displayID == id }) {
+            return screen
+        }
+        let screen = NSScreen.main ?? NSScreen.screens.first
+        anchorDisplay = screen?.displayID
+        return screen
+    }
+
+    /// Move the stack to the display a capture came from: the record's own screen for a display
+    /// or area shot, the screen under the source rect for a window one, else wherever we are.
+    private func anchor(to record: CaptureRecord, sourceRect: NSRect?) {
+        if let id = record.screenID.map({ CGDirectDisplayID($0) }),
+           NSScreen.screens.contains(where: { $0.displayID == id }) {
+            anchorDisplay = id
+        } else if let rect = sourceRect,
+                  let screen = NSScreen.screens.max(by: {
+                      $0.frame.intersection(rect).area < $1.frame.intersection(rect).area
+                  }), screen.frame.intersects(rect) {
+            anchorDisplay = screen.displayID
+        } else {
+            anchorDisplay = (NSScreen.main ?? NSScreen.screens.first)?.displayID
+        }
+    }
+
     func show(record: CaptureRecord, fileURL: URL, image: CGImage, from sourceRect: NSRect? = nil) {
         let panel = OverlayPanel(record: record, fileURL: fileURL, image: image) { [weak self] panel in
             self?.remove(panel)
         }
+        anchor(to: record, sourceRect: sourceRect)   // the stack follows the newest capture
         untuck()   // a new capture is something to look at; the stack comes back with it
         panels.append(panel)
         fannedOut = false
 
-        guard let source = sourceRect, !Tokens.reduceMotion, let screen = NSScreen.main else {
+        guard let source = sourceRect, !Tokens.reduceMotion, let screen = stackScreen else {
             layout()
             panel.present()
             return
@@ -118,7 +160,7 @@ final class OverlayController {
         // ordered out, and shifting them too would leave them parked below the screen for the
         // next fan-out to slide up from
         let stack = slotted
-        guard !tucked, let screen = NSScreen.main,
+        guard !tucked, let screen = stackScreen,
               let top = stack.map(\.frame.maxY).max() else { return }
         tucked = true
         tuckGeneration += 1
@@ -195,7 +237,7 @@ final class OverlayController {
     }
 
     private func layout(animated: Bool = true) {
-        guard let screen = NSScreen.main else { return }
+        guard let screen = stackScreen else { return }
         let slot = cornerSlotFrame(on: screen)
         if tucked { layoutTab(on: screen, slot: slot); return }
         let size = slot.size
@@ -255,6 +297,18 @@ final class OverlayController {
             Tokens.animate(0.2) { tab.animator().alphaValue = 1 }
         }
     }
+}
+
+extension NSScreen {
+    /// The display this screen draws, stable across the NSScreen objects AppKit hands back
+    /// after a display configuration change — which the screen references themselves are not.
+    var displayID: CGDirectDisplayID? {
+        deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID
+    }
+}
+
+private extension NSRect {
+    var area: CGFloat { isNull ? 0 : width * height }
 }
 
 /// The stack's chrome — the "+n" chip and the tuck tab — floats beside the cards: the same
@@ -816,7 +870,7 @@ final class OverlayView: NSView, NSDraggingSource {
         }
     }
     let chrome = NSStackView()
-    private var trashButton: NSButton!
+    private var trashButton: HoverButton!
     // Swipe-to-dismiss, modelled on a macOS notification banner: the card tracks the finger,
     // resists when dragged the wrong way, and on release either carries on off the edge or
     // springs back. The old version only measured the gesture and acted at the end, so the card
@@ -841,14 +895,9 @@ final class OverlayView: NSView, NSDraggingSource {
     /// Which way that edge lies on screen.
     private var edgeScreenSign: CGFloat { Settings.shared.overlayOnLeftEdge ? -1 : 1 }
 
-    private func button(_ symbol: String, _ tip: String, _ action: Selector) -> NSButton {
-        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: tip)!
-            .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))!
-        let b = NSButton(image: image, target: self, action: action)
-        b.isBordered = false
+    private func button(_ symbol: String, _ tip: String, _ action: Selector) -> HoverButton {
+        let b = HoverButton(symbol: symbol, pointSize: 11, tip: tip, target: self, action: action)
         b.contentTintColor = .white
-        b.toolTip = tip
-        b.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
             b.widthAnchor.constraint(equalToConstant: 22),
             b.heightAnchor.constraint(equalToConstant: 22),
@@ -894,9 +943,7 @@ final class OverlayView: NSView, NSDraggingSource {
             trashButton.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -5),
             trashButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
         ])
-        let area = NSTrackingArea(rect: .zero, options: [.activeAlways, .mouseEnteredAndExited, .inVisibleRect],
-                                  owner: self)
-        addTrackingArea(area)
+        trackHover()
     }
     required init?(coder: NSCoder) { fatalError() }
 
