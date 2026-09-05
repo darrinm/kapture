@@ -16,6 +16,20 @@ struct FileOperation: Codable {
     var probeMovieMetadata: Bool? = nil
 }
 
+/// Thrown for any operation on a capture whose journal entry has not finished replaying.
+public struct RecoveryBlocked: LocalizedError {
+    public let captureID: String
+    /// True when no retry can fix it and something on disk or in the journal needs a human;
+    /// false while recovery is only backing off between attempts.
+    public let quarantined: Bool
+    public let reason: String
+
+    public var errorDescription: String? {
+        (quarantined ? "This capture needs attention before it can change: "
+                     : "This capture has an unfinished file operation, retrying: ") + reason
+    }
+}
+
 extension Library {
     func withOperation<T>(for captureID: String? = nil, _ body: () throws -> T) throws -> T {
         db.operationLock.lock(); defer { db.operationLock.unlock() }
@@ -45,8 +59,11 @@ extension Library {
         return url
     }
 
+    /// Journal the plan, then carry it out. Every caller that staged bytes owns their cleanup
+    /// (a `defer` around the stage), so nothing is repeated here. A failure after the journal
+    /// row exists is recorded on it the same way a failed replay would be, so the entry backs
+    /// off or is quarantined exactly as if the crash had come a moment later.
     func commit(_ plan: FileOperation) throws {
-        defer { removeUnjournaledStage(root.appendingPathComponent(plan.source)) }
         let data = try JSONEncoder().encode(plan)
         let journalID = try db.queue.write { d in
             try d.execute(sql: """
@@ -54,14 +71,52 @@ extension Library {
                 """, arguments: [plan.op, plan.record.id, plan.source, plan.record.relPath, Date(), data])
             return d.lastInsertedRowID
         }
-        try finish(plan, journalID: journalID)
+        do { try finish(plan, journalID: journalID) }
+        catch {
+            try? recordReplayFailure(error, journalID: journalID, attempts: 0)
+            throw error
+        }
+    }
+
+    // MARK: - Replay
+
+    /// A replay failure that no retry can fix: something on disk or in the journal has to be
+    /// put right by hand first. A plan that will not decode, a file that is at neither end of
+    /// its move, a name already taken, a path outside the library. Everything else — a
+    /// permission not yet granted, a full or busy disk, a locked database — is assumed to clear
+    /// on its own and is retried with backoff rather than parked.
+    static func isPermanentRecoveryFailure(_ error: Error) -> Bool {
+        if error is DecodingError { return true }
+        guard let cocoa = error as? CocoaError else { return false }
+        switch cocoa.code {
+        case .fileReadCorruptFile, .fileReadInvalidFileName, .fileNoSuchFile, .fileReadNoSuchFile,
+             .fileWriteFileExists:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// How long a transient failure waits before the next try. The first failure waits for
+    /// nothing — the caller has its error, and the next operation or relaunch simply tries
+    /// again — then doubling from two seconds, capped at an hour. It never gives up, transient
+    /// meaning it will resolve, and while it waits the capture stays blocked so nothing
+    /// overtakes the half-finished operation.
+    static func recoveryBackoff(attempts: Int) -> TimeInterval {
+        attempts == 0 ? 0 : min(3600, pow(2, Double(min(attempts, 12))))
     }
 
     /// Testable separately from launch; the operation lock also prevents a later edit/rename
     /// from overtaking an operation whose filesystem half succeeded but whose commit failed.
     public func recoverPendingOperations() throws {
         db.operationLock.lock(); defer { db.operationLock.unlock() }
-        let rows = try db.queue.read { try Row.fetchAll($0, sql: "SELECT * FROM op_journal WHERE recoveryError IS NULL ORDER BY id") }
+        let rows = try db.queue.read { d in
+            try Row.fetchAll(d, sql: """
+                SELECT * FROM op_journal
+                WHERE recoveryError IS NULL AND (nextAttemptAt IS NULL OR nextAttemptAt <= ?)
+                ORDER BY id
+                """, arguments: [Date()])
+        }
         for row in rows {
             let journalID: Int64 = row["id"]
             do {
@@ -79,31 +134,56 @@ extension Library {
                     }
                 }
             } catch {
-                // Any per-entry failure is isolated. Keep its bytes and plan, and require an
-                // explicit retry before changing that capture; unrelated work can continue.
-                try db.queue.write { d in
-                    try d.execute(sql: "UPDATE op_journal SET recoveryError = ? WHERE id = ?",
-                                  arguments: [String(describing: error), journalID])
-                }
-                Log.store.error("quarantined journal entry \(journalID): \(error)")
+                // Isolated per entry: this capture waits or is parked, unrelated work continues.
+                try recordReplayFailure(error, journalID: journalID, attempts: row["attempts"])
             }
         }
     }
 
-    private func requireRecovered(_ id: String) throws {
-        if let message = try db.queue.read({ d in
-            try String.fetchOne(d, sql: "SELECT recoveryError FROM op_journal WHERE captureId = ? AND recoveryError IS NOT NULL LIMIT 1",
-                                arguments: [id])
-        }) {
-            throw RecoveryBlocked(description: "Capture has an unfinished file operation: " + message)
+    private func recordReplayFailure(_ error: Error, journalID: Int64, attempts: Int) throws {
+        let message = String(describing: error)
+        if Library.isPermanentRecoveryFailure(error) {
+            try db.queue.write { d in
+                try d.execute(sql: "UPDATE op_journal SET recoveryError = ?, lastError = ? WHERE id = ?",
+                              arguments: [message, message, journalID])
+            }
+            Log.store.error("quarantined journal entry \(journalID): \(message)")
+        } else {
+            let delay = Library.recoveryBackoff(attempts: attempts)
+            try db.queue.write { d in
+                try d.execute(sql: """
+                    UPDATE op_journal SET attempts = attempts + 1, nextAttemptAt = ?, lastError = ?
+                    WHERE id = ?
+                    """, arguments: [Date().addingTimeInterval(delay), message, journalID])
+            }
+            Log.store.error("journal entry \(journalID) failed, retrying in \(Int(delay))s: \(message)")
         }
+    }
+
+    /// A capture with an unfinished file operation is not touched until it finishes — whether
+    /// the entry is only backing off or needs a human. Otherwise an edit could overtake a rename
+    /// whose filesystem half succeeded.
+    private func requireRecovered(_ id: String) throws {
+        guard let row = try db.queue.read({ d in
+            try Row.fetchOne(d, sql: """
+                SELECT recoveryError, lastError FROM op_journal WHERE captureId = ?
+                ORDER BY recoveryError IS NULL, id LIMIT 1
+                """, arguments: [id])
+        }) else { return }
+        let quarantined: String? = row["recoveryError"]
+        let last: String? = row["lastError"]
+        throw RecoveryBlocked(captureID: id, quarantined: quarantined != nil,
+                              reason: quarantined ?? last ?? "the operation has not finished yet")
     }
 
     /// After repairing permissions or resolving a collision, retry only this capture's intents.
     public func retryRecovery(for id: String) throws {
         db.operationLock.lock(); defer { db.operationLock.unlock() }
         try db.queue.write { d in
-            try d.execute(sql: "UPDATE op_journal SET recoveryError = NULL WHERE captureId = ?", arguments: [id])
+            try d.execute(sql: """
+                UPDATE op_journal SET recoveryError = NULL, attempts = 0, nextAttemptAt = NULL
+                WHERE captureId = ?
+                """, arguments: [id])
         }
         try recoverPendingOperations()
         try requireRecovered(id)
@@ -111,6 +191,8 @@ extension Library {
             try d.execute(sql: "UPDATE ingest_jobs SET notBefore = ? WHERE captureId = ?", arguments: [Date(), id])
         }
     }
+
+    // MARK: - Staging
 
     func removeUnjournaledStage(_ file: URL) {
         guard file.deletingLastPathComponent().standardizedFileURL == root.appendingPathComponent(".pending").standardizedFileURL else { return }
@@ -124,7 +206,9 @@ extension Library {
         } catch { Log.store.error("staging cleanup deferred: \(error)") }
     }
 
-    /// Called only at startup: live snapshots and pre-journal staging files cannot exist yet.
+    /// Called only at startup. Live share snapshots and pre-journal staging files cannot exist
+    /// yet — `Library(exclusive:)` is what guarantees no other process is mid-operation on
+    /// this root.
     func cleanOrphanedStages() {
         db.operationLock.lock(); defer { db.operationLock.unlock() }
         let dir = root.appendingPathComponent(".pending")
@@ -132,12 +216,12 @@ extension Library {
         for file in files { removeUnjournaledStage(file) }
     }
 
+    // MARK: - Carrying out a plan
+
     private func moveSidecar(from source: URL, to target: URL, fallback: Sidecar?) throws {
         guard source != target else { return }
         let src = Sidecar.url(for: source), dst = Sidecar.url(for: target)
-        do {
-            _ = try FileManager.default.attributesOfItem(atPath: src.path)
-        } catch let error as CocoaError where error.code == .fileNoSuchFile || error.code == .fileReadNoSuchFile {
+        guard try itemExists(src) else {
             // A crash may already have moved it. Older plans may be the sole remaining copy.
             if !(try itemExists(dst)) { try fallback?.write(next: target) }
             return
@@ -215,6 +299,10 @@ extension Library {
 
     /// Old builds journaled only paths. Recover completed moves and reconstruct orphaned writes
     /// from their file/sidecar; an untouched source means the failed move can be abandoned.
+    ///
+    /// Presence is asked with `itemExists`, never `fileExists(atPath:)`: the latter answers
+    /// "no" to a file it is not allowed to see, and a permission that has not been granted yet
+    /// would otherwise read as a move that already happened.
     private func legacyPlan(_ row: Row) throws -> FileOperation? {
         let id: String = row["captureId"]
         let op: String = row["op"]
@@ -223,10 +311,10 @@ extension Library {
         let target = root.appendingPathComponent(dst)
         let existing = try db.queue.read { try CaptureRecord.fetchOne($0, key: id) }
         if let existing, existing.relPath != src, existing.relPath != dst,
-           FileManager.default.fileExists(atPath: url(for: existing).path) {
+           try itemExists(url(for: existing)) {
             return nil // an old failed intent was superseded by a later successful operation
         }
-        if let src, src != dst, FileManager.default.fileExists(atPath: root.appendingPathComponent(src).path) {
+        if let src, src != dst, try itemExists(root.appendingPathComponent(src)) {
             // Restore in old builds flipped status before doing the move.
             if op == "restore" {
                 try db.queue.write { d in
@@ -236,7 +324,7 @@ extension Library {
             }
             return nil
         }
-        guard FileManager.default.fileExists(atPath: target.path) else {
+        guard try itemExists(target) else {
             if existing == nil { return nil } // write never reached disk
             throw CocoaError(.fileNoSuchFile)
         }
@@ -244,12 +332,11 @@ extension Library {
            let existing, existing.fastID == Library.fastID(of: target) {
             return nil // the old file operation failed before replacing any pixels
         }
-        let sidecar: Sidecar?
-        if ["rename", "discard", "restore"].contains(op) {
-            sidecar = Sidecar.read(for: target) ?? src.flatMap { Sidecar.read(for: root.appendingPathComponent($0)) }
-        } else {
-            sidecar = try Sidecar.readIfPresent(for: target)
-        }
+        // Read leniently. A corrupt legacy sidecar is synthesised below, which is byte for byte
+        // what the old build wrote for a fresh capture — parking the entry instead would leave
+        // a crashed write with no row at all, and nothing to surface it for a retry.
+        let sidecar = Sidecar.read(for: target)
+            ?? src.flatMap { Sidecar.read(for: root.appendingPathComponent($0)) }
         let ext = target.pathExtension.lowercased()
         var record = existing ?? CaptureRecord(id: id,
             kind: ext == "gif" ? .gif : (["mp4", "mov"].contains(ext) ? .recording : .screenshot),
@@ -283,7 +370,9 @@ extension Library {
         return url
     }
 
-    private func itemExists(_ url: URL) throws -> Bool {
+    /// Whether something is at `url`. Unlike `fileExists(atPath:)` a file we may not read is
+    /// "yes" — the error it raises is the caller's to classify, not a silent "no".
+    func itemExists(_ url: URL) throws -> Bool {
         do { _ = try FileManager.default.attributesOfItem(atPath: url.path); return true }
         catch let error as CocoaError where error.code == .fileNoSuchFile || error.code == .fileReadNoSuchFile { return false }
     }
@@ -292,10 +381,6 @@ extension Library {
         do { try FileManager.default.removeItem(at: url) }
         catch let error as CocoaError where error.code == .fileNoSuchFile { }
     }
-}
-
-private struct RecoveryBlocked: Error, CustomStringConvertible {
-    let description: String
 }
 
 extension Library {

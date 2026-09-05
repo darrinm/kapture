@@ -35,7 +35,12 @@ extension Library {
                       record.aiState.acceptsName, record.status != .trashed, record.status != .sweeping else { return false }
                 if let job, try ingestRecord(job) == nil { return false }
                 let current = url(for: record)
-                let target = Library.uniqueURL(in: current.deletingLastPathComponent(), base: baseName, ext: current.pathExtension)
+                // Every edit re-runs naming, and the name usually comes back unchanged. That
+                // must not move the file: uniqueURL would count the capture's own file as a
+                // collision and mint "-2", then "-3" on the next edit.
+                let target = baseName == current.deletingPathExtension().lastPathComponent
+                    ? current
+                    : Library.uniqueURL(in: current.deletingLastPathComponent(), base: baseName, ext: current.pathExtension)
                 let source = record.relPath
                 record.relPath = rel(target); record.aiState = aiState; record.summary = summary
                 try commit(FileOperation(op: "rename", source: source, record: record,

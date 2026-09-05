@@ -20,13 +20,31 @@ public struct MediaResult: Sendable {
 public final class Library: @unchecked Sendable {
     public let db: Database
     public let root: URL
+    /// Held for the life of the instance when opened `exclusive`; closing it releases the lock.
+    private let exclusiveLock: FileHandle?
 
-    public init(db: Database, root: URL? = nil) throws {
+    /// `exclusive` makes this process the root's only writer: a `flock` on `<root>/.lock`,
+    /// refused if another process holds it. The operation lock is per process and the startup
+    /// sweep of `.pending` assumes nobody else is mid-upload, so the app and its command-line
+    /// harnesses must never share a root at once. Tests open a second instance on a root
+    /// while the first is alive, and leave it off.
+    public init(db: Database, root: URL? = nil, exclusive: Bool = false) throws {
         self.db = db
         self.root = root ?? Settings.shared.libraryRoot
         try FileManager.default.createDirectory(at: self.root, withIntermediateDirectories: true)
+        exclusiveLock = exclusive ? try Library.lock(self.root) : nil
         try recoverPendingOperations()
         cleanOrphanedStages()
+    }
+
+    private static func lock(_ root: URL) throws -> FileHandle {
+        let fd = open(root.appendingPathComponent(".lock").path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
+        guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        guard flock(fd, LOCK_EX | LOCK_NB) == 0 else {
+            close(fd)
+            throw LibraryBusy(root: root)
+        }
+        return FileHandle(fileDescriptor: fd, closeOnDealloc: true)
     }
 
     // DateFormatter creation is expensive; formatting through a shared instance is thread-safe.
@@ -378,19 +396,22 @@ public final class Library: @unchecked Sendable {
                 try CaptureRecord.fetchAll(d, sql: """
                     SELECT * FROM captures WHERE (status = 'sweeping'
                         OR (status = 'trashed' AND trashedAt < ?))
-                        AND NOT EXISTS (SELECT 1 FROM op_journal WHERE captureId = captures.id AND recoveryError IS NOT NULL)
+                        AND id NOT IN (SELECT captureId FROM blocked_captures)
                     """, arguments: [cutoff])
             }
+            var referents = OriginalReferents()
             for record in expired {
                 do {
+                    let file = url(for: record)
+                    // Everything that can refuse is decided before the row is marked, so
+                    // 'sweeping' always means deletion has begun — which is why restore
+                    // refuses it. A row that could be marked and then fail to decide would
+                    // be neither restorable nor sweepable.
+                    let original = originalToDelete(with: record, file: file, referents: &referents)
                     try db.queue.write { d in
                         try d.execute(sql: "UPDATE captures SET status = 'sweeping' WHERE id = ?", arguments: [record.id])
                     }
-                    let file = url(for: record)
-                    if let original = try Sidecar.readIfPresent(for: file)?.annotations?.original,
-                       try canDeleteOriginal(original, ownedBy: record.id) {
-                        try remove(try checkedOriginalURL(original))
-                    }
+                    if let original { try remove(original) }
                     try remove(file)
                     try remove(Sidecar.url(for: file))
                     try remove(tombstoneURL(record.id))
@@ -402,32 +423,76 @@ public final class Library: @unchecked Sendable {
             }
         } catch { Log.store.error("trash cleanup deferred: \(error)") }
     }
-    /// Legacy originals are named by a reusable visible path, not capture identity. Preserve
-    /// the file while another capture or unfinished plan references it. Unknown metadata also
-    /// keeps it: losing a little disk space is preferable to deleting someone else's original.
-    private func canDeleteOriginal(_ original: String, ownedBy id: String) throws -> Bool {
-        let target = try checkedOriginalURL(original)
-        let others = try db.queue.read { try CaptureRecord.fetchAll($0, sql: "SELECT * FROM captures WHERE id != ?", arguments: [id]) }
-        for other in others {
-            do {
-                if let path = try Sidecar.readIfPresent(for: url(for: other))?.annotations?.original,
-                   try checkedOriginalURL(path) == target { return false }
-            } catch { return false }
+
+    /// The pristine original to delete along with a swept capture, or nil to leave it on disk.
+    /// Anything unknowable — an unreadable sidecar, a path outside `.originals/` — keeps the
+    /// file: a little disk is cheaper than someone else's pixels.
+    private func originalToDelete(with record: CaptureRecord, file: URL,
+                                  referents: inout OriginalReferents) -> URL? {
+        guard let original = Sidecar.read(for: file)?.annotations?.original else { return nil }
+        guard let target = try? checkedOriginalURL(original) else {
+            Log.store.error("sweep keeps an original outside .originals/ for \(record.id): \(original, privacy: .public)")
+            return nil
         }
-        let plans = try db.queue.read { try Row.fetchAll($0, sql: "SELECT plan FROM op_journal WHERE captureId != ?", arguments: [id]) }
-        for row in plans {
-            guard let data: Data = row["plan"], let plan = try? JSONDecoder().decode(FileOperation.self, from: data) else { return false }
-            if let path = plan.sidecar?.annotations?.original, try checkedOriginalURL(path) == target { return false }
-            // A failed move may have put the sidecar at its destination before the DB row
-            // changed. New move plans preserve raw bytes instead of embedding decoded metadata.
-            for path in Set([plan.source, plan.record.relPath]) {
-                do {
-                    if let reference = try Sidecar.readIfPresent(for: root.appendingPathComponent(path))?.annotations?.original,
-                       try checkedOriginalURL(reference) == target { return false }
-                } catch { return false }
-            }
-        }
-        return true
+        // Originals this build mints are keyed by capture id and cannot be anyone else's.
+        if Library.isOwnOriginal(original, id: record.id) { return target }
+        // Legacy originals are keyed by the visible path, which two captures can have shared.
+        return referents.isReferenced(target, byAnyoneBut: record.id, in: self) ? nil : target
     }
 
+    /// The `.originals/<id>.<ext>` shape `originalPath(for:)` produces.
+    static func isOwnOriginal(_ path: String, id: String) -> Bool {
+        let name = path as NSString
+        return name.deletingLastPathComponent == ".originals" && name.lastPathComponent.hasPrefix(id + ".")
+    }
+
+    /// Which `.originals/` files the rest of the library still points at, built once per sweep
+    /// and only if a legacy original comes up. A sidecar or plan that cannot be read makes the
+    /// whole answer "unknown", which keeps every legacy original this pass.
+    struct OriginalReferents {
+        private var refs: [URL: Set<String>]?
+        private var uncertain = false
+
+        mutating func isReferenced(_ target: URL, byAnyoneBut id: String, in library: Library) -> Bool {
+            if refs == nil { (refs, uncertain) = library.scanOriginalReferents() }
+            return uncertain || refs![target, default: []].subtracting([id]).isEmpty == false
+        }
+    }
+
+    private func scanOriginalReferents() -> (refs: [URL: Set<String>], uncertain: Bool) {
+        var refs: [URL: Set<String>] = [:]
+        var uncertain = false
+        func note(_ path: String?, from id: String) {
+            guard let path else { return }
+            guard let url = try? checkedOriginalURL(path) else { uncertain = true; return }
+            refs[url, default: []].insert(id)
+        }
+        func note(sidecarAt rel: String, from id: String) {
+            do { note(try Sidecar.readIfPresent(for: root.appendingPathComponent(rel))?.annotations?.original, from: id) }
+            catch { uncertain = true }
+        }
+        do {
+            for row in try db.queue.read({ try Row.fetchAll($0, sql: "SELECT id, relPath FROM captures") }) {
+                note(sidecarAt: row["relPath"], from: row["id"])
+            }
+            // A failed move may have put the sidecar at its destination before the row changed.
+            // Plan-less legacy rows carry no sidecar, and their capture is already in the scan.
+            for row in try db.queue.read({ try Row.fetchAll($0, sql: "SELECT captureId, plan FROM op_journal") }) {
+                guard let data: Data = row["plan"] else { continue }
+                guard let plan = try? JSONDecoder().decode(FileOperation.self, from: data) else { uncertain = true; continue }
+                let id: String = row["captureId"]
+                note(plan.sidecar?.annotations?.original, from: id)
+                for rel in Set([plan.source, plan.record.relPath]) { note(sidecarAt: rel, from: id) }
+            }
+        } catch { uncertain = true }
+        return (refs, uncertain)
+    }
+}
+
+/// Thrown by `Library(exclusive:)` when another process already holds the root.
+public struct LibraryBusy: LocalizedError {
+    public let root: URL
+    public var errorDescription: String? {
+        "The library at \(root.path) is open in another Kapture process"
+    }
 }

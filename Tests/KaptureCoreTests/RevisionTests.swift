@@ -9,10 +9,11 @@ final class RevisionTests: XCTestCase {
         return (lib, record, dir)
     }
 
-    func testEditingNamedCaptureAllowsFreshTagsAndSkipsRedundantNaming() throws {
+    func testEditingNamedCaptureRefreshesTagsWithoutMovingAnUnchangedName() throws {
         let (lib, record, dir) = try fixture()
         defer { try? FileManager.default.removeItem(at: dir) }
         XCTAssertTrue(lib.applyName(record.id, baseName: "invoice", tags: ["oldtag"], summary: "old", aiState: .namedAPI))
+        let named = try XCTUnwrap(lib.db.queue.read { try CaptureRecord.fetchOne($0, key: record.id) })
         try lib.enqueueIngest(record.id, notBefore: Date())
         let redundant = try XCTUnwrap(lib.nextIngestJob())
         XCTAssertTrue(try lib.finishOCR(redundant, text: "invoice", naming: true))
@@ -22,7 +23,12 @@ final class RevisionTests: XCTestCase {
         XCTAssertTrue(try lib.finishOCR(ocr, text: "invoice", naming: true))
         let name = try XCTUnwrap(lib.nextIngestJob())
         XCTAssertEqual(name.stage, "name")
-        XCTAssertTrue(lib.applyName(record.id, baseName: "new-invoice", tags: ["stripe"], summary: "invoice", aiState: .namedAPI, job: name))
+        // Naming usually comes back with the same answer. That refreshes the tags and summary
+        // and leaves the file where it is — not invoice-2.png, then invoice-3.png next edit.
+        XCTAssertTrue(lib.applyName(record.id, baseName: "invoice", tags: ["stripe"], summary: "invoice", aiState: .namedAPI, job: name))
+        let renamed = try XCTUnwrap(lib.db.queue.read { try CaptureRecord.fetchOne($0, key: record.id) })
+        XCTAssertEqual(renamed.relPath, named.relPath)
+        XCTAssertEqual(renamed.aiState, .namedAPI)
         XCTAssertEqual(lib.search("stripe").count, 1)
         XCTAssertTrue(lib.search("oldtag").isEmpty)
     }

@@ -123,7 +123,10 @@ public actor IngestQueue {
     private func secondsUntilNextJob() -> TimeInterval? {
         guard let library else { return nil }
         return (try? library.db.queue.read { d -> TimeInterval? in
-            guard let next = try Date.fetchOne(d, sql: "SELECT MIN(notBefore) FROM ingest_jobs WHERE NOT EXISTS (SELECT 1 FROM op_journal WHERE captureId = ingest_jobs.captureId AND recoveryError IS NOT NULL)")
+            guard let next = try Date.fetchOne(d, sql: """
+                SELECT MIN(notBefore) FROM ingest_jobs
+                WHERE captureId NOT IN (SELECT captureId FROM blocked_captures)
+                """)
             else { return nil }
             return max(0, next.timeIntervalSinceNow)
         }) ?? nil

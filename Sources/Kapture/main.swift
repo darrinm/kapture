@@ -15,7 +15,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     func applicationDidFinishLaunching(_ notification: Notification) {
         do {
             let db = try KaptureCore.Database()
-            let library = try Library(db: db)
+            let library = try Library(db: db, exclusive: true)
             CaptureCoordinator.shared.library = library
             OverlayController.shared.library = library
             EditorController.shared.library = library
@@ -208,8 +208,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     @objc private func menuCheckForUpdates() { UpdaterController.shared.checkForUpdates() }
     @objc private func menuPinClipboard() { PinController.shared.pinFromClipboard() }
     @objc private func menuRestore() {
-        guard let library = CaptureCoordinator.shared.library,
-              let restored = try? library.restoreLastDiscarded() else { return }
+        guard let library = CaptureCoordinator.shared.library else { return }
+        let restored: CaptureRecord?
+        do { restored = try library.restoreLastDiscarded() }
+        catch { Toast.show(error.localizedDescription); return }   // a blocked capture says why
+        guard let restored else { return }
         Sounds.play("Pop")
         // discard cancelled its ingest job; an unnamed capture needs another pass
         if restored.aiState.acceptsName {

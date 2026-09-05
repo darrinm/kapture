@@ -754,7 +754,8 @@ final class LibraryGridView: NSView {
 
     private func discard(_ record: CaptureRecord) {
         guard record.status != .trashed else { return }
-        try? library.discard(record)
+        do { try library.discard(record) }
+        catch { Toast.show(error.localizedDescription); return }   // a blocked capture says why
         Sounds.play("Bottle")
         reload()
     }
@@ -813,8 +814,11 @@ final class LibraryGridView: NSView {
     /// Restore *this* capture. Restoring "the last discarded" from a right-click on a specific
     /// trashed item put a different file back.
     @objc private func restoreSelected() {
-        guard let record = selectedRecord,
-              let restored = try? library.restore(id: record.id) else { return }
+        guard let record = selectedRecord else { return }
+        let restored: CaptureRecord?
+        do { restored = try library.restore(id: record.id) }
+        catch { Toast.show(error.localizedDescription); return }   // a blocked capture says why
+        guard let restored else { return }
         // discard cancelled its ingest job; an unnamed capture needs another pass
         if restored.aiState.acceptsName {
             Task { await IngestQueue.shared.enqueue(restored.id, after: 0) }

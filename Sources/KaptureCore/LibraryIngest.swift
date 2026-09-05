@@ -38,8 +38,11 @@ extension Library {
 
     public func nextIngestJob() throws -> IngestJob? {
         try db.queue.read { d in
-            guard let row = try Row.fetchOne(d, sql: "SELECT * FROM ingest_jobs WHERE notBefore <= ? AND NOT EXISTS (SELECT 1 FROM op_journal WHERE captureId = ingest_jobs.captureId AND recoveryError IS NOT NULL) ORDER BY notBefore LIMIT 1",
-                                             arguments: [Date()]) else { return nil }
+            guard let row = try Row.fetchOne(d, sql: """
+                SELECT * FROM ingest_jobs WHERE notBefore <= ?
+                    AND captureId NOT IN (SELECT captureId FROM blocked_captures)
+                ORDER BY notBefore LIMIT 1
+                """, arguments: [Date()]) else { return nil }
             return IngestJob(captureId: row["captureId"], revision: row["revision"], generation: row["generation"],
                              stage: row["stage"], attempts: row["attempts"])
         }
@@ -84,8 +87,10 @@ extension Library {
 
     public func clearIngestJob(_ job: IngestJob) throws {
         try db.queue.write { d in
-            try d.execute(sql: "DELETE FROM ingest_jobs WHERE captureId = ? AND generation = ? AND NOT EXISTS (SELECT 1 FROM op_journal WHERE captureId = ingest_jobs.captureId AND recoveryError IS NOT NULL)",
-                          arguments: [job.captureId, job.generation])
+            try d.execute(sql: """
+                DELETE FROM ingest_jobs WHERE captureId = ? AND generation = ?
+                    AND captureId NOT IN (SELECT captureId FROM blocked_captures)
+                """, arguments: [job.captureId, job.generation])
         }
     }
 

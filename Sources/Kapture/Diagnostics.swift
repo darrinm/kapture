@@ -14,7 +14,9 @@ enum Diagnostics {
         let sem = DispatchSemaphore(value: 0)
         Task {
             do {
-                let library = try Library(db: KaptureCore.Database())
+                // exclusive: refuses to run beside the app rather than sweep its in-flight
+                // uploads out of .pending or race its operation lock from another process
+                let library = try Library(db: KaptureCore.Database(), exclusive: true)
                 await IngestQueue.shared.configure(library: library)
                 let useAPI = CommandLine.arguments.contains("--api")
                 if CommandLine.arguments.contains("--dry-run") {

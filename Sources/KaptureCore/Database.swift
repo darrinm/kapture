@@ -101,6 +101,19 @@ public final class Database: Sendable {
                 $0.add(column: "recoveryError", .text)
             }
         }
+        migrator.registerMigration("v6-recovery-backoff") { db in
+            // recoveryError marks an entry a human has to look at; these track the ones that
+            // are merely waiting for a permission, a disk, or a lock to come back.
+            try db.alter(table: "op_journal") {
+                $0.add(column: "attempts", .integer).notNull().defaults(to: 0)
+                $0.add(column: "nextAttemptAt", .datetime)
+                $0.add(column: "lastError", .text)
+            }
+            // The one definition of "this capture has an unfinished file operation". Every
+            // query that must leave such a capture alone joins against it, so the rule cannot
+            // drift between five pasted copies.
+            try db.execute(sql: "CREATE VIEW blocked_captures AS SELECT DISTINCT captureId FROM op_journal")
+        }
         try migrator.migrate(queue)
     }
 }
