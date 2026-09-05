@@ -31,19 +31,22 @@ extension Library {
         do {
             return try withOperation(for: id) {
                 guard !Library.isInUse(id),
-                      var record = try db.queue.read({ try CaptureRecord.fetchOne($0, key: id) }),
-                      record.aiState.acceptsName, record.status != .trashed, record.status != .sweeping else { return false }
-                if let job, try ingestRecord(job) == nil { return false }
+                      var record = try db.queue.read({ d -> CaptureRecord? in
+                          // With a job, the generation has to be current too — in the same read.
+                          if let job { return try Library.currentIngestRecord(d, job: job) }
+                          return try CaptureRecord.fetchOne(d, key: id)
+                      }),
+                      record.aiState.acceptsName, record.isLive else { return false }
                 let current = url(for: record)
                 // Every edit re-runs naming, and the name usually comes back unchanged. That
-                // must not move the file: uniqueURL would count the capture's own file as a
+                // must not move the file: availableURL would count the capture's own file as a
                 // collision and mint "-2", then "-3" on the next edit.
                 let target = try baseName == current.deletingPathExtension().lastPathComponent
                     ? current
                     : availableURL(in: current.deletingLastPathComponent(), base: baseName, ext: current.pathExtension)
                 let source = record.relPath
                 record.relPath = rel(target); record.aiState = aiState; record.summary = summary
-                try commit(FileOperation(op: "rename", source: source, record: record,
+                try commit(FileOperation(op: .rename, source: source, record: record,
                     sidecar: nil, tags: tags.joined(separator: " ")))
                 return true
             }

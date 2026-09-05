@@ -755,7 +755,7 @@ final class LibraryGridView: NSView {
     private func discard(_ record: CaptureRecord) {
         guard record.status != .trashed else { return }
         do { try library.discard(record) }
-        catch { Toast.show(error.localizedDescription); return }   // a blocked capture says why
+        catch { Toast.show(error, while: "Discard"); return }
         Sounds.play("Bottle")
         reload()
     }
@@ -817,7 +817,7 @@ final class LibraryGridView: NSView {
         guard let record = selectedRecord else { return }
         let restored: CaptureRecord?
         do { restored = try library.restore(id: record.id) }
-        catch { Toast.show(error.localizedDescription); return }   // a blocked capture says why
+        catch { Toast.show(error, while: "Restore"); return }
         guard let restored else { return }
         // discard cancelled its ingest job; an unnamed capture needs another pass
         if restored.aiState.acceptsName {

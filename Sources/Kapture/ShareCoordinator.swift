@@ -75,7 +75,7 @@ final class ShareCoordinator {
                 Log.shell.error("share failed: \(failure.description, privacy: .public)")
                 onFinish?(nil)
             } catch {
-                Toast.show("Share failed — \(error.localizedDescription)")
+                Toast.show(error, while: "Share")
                 onFinish?(nil)
             }
         }
@@ -92,7 +92,7 @@ final class ShareCoordinator {
             // the write, and that has to stop us *before* the server forgets a link this row
             // would otherwise go on offering as current — a 404 on the clipboard.
             do { _ = try library.setShareLink(id, url: nil) }
-            catch { Toast.show(error.localizedDescription); return }
+            catch { Toast.show(error, while: "Delete link"); return }
             do {
                 try await ShareService.delete(id: shareID)
                 Toast.show("Link deleted")

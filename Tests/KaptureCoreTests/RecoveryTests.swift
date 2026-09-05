@@ -2,36 +2,40 @@ import XCTest
 @testable import KaptureCore
 
 final class RecoveryTests: XCTestCase {
-    private func library() throws -> (Library, URL) {
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        let db = try Database(directory: dir.appendingPathComponent("db"))
-        return (try Library(db: db, root: dir.appendingPathComponent("files")), dir)
+    /// Journal a rename of `capture` to `destination` without carrying it out — the state a
+    /// crash between the journal row and the move leaves behind.
+    private func journalRename(_ lib: Library, _ capture: inout CaptureRecord, to destination: URL) throws {
+        let source = capture.relPath
+        capture.relPath = lib.rel(destination)
+        try lib.journal(FileOperation(op: .rename, source: source, record: capture, sidecar: nil))
     }
 
-    private func shot(_ lib: Library) throws -> CaptureRecord {
-        try lib.storePNG(Data([1, 2, 3]), width: 10, height: 20,
-                         sourceApp: "test", windowTitle: nil, screenID: nil).0
-    }
-
-    private func record(_ lib: Library, _ id: String) throws -> CaptureRecord {
-        try XCTUnwrap(lib.db.queue.read { try CaptureRecord.fetchOne($0, key: id) })
-    }
-
-    private func journal(_ lib: Library, _ plan: FileOperation) throws {
-        let data = try JSONEncoder().encode(plan)
+    /// A pre-plan journal row, as every shipped build wrote them.
+    private func legacyJournal(_ lib: Library, op: FileOperation.Op, id: String, src: String? = nil, dst: String?) throws {
         try lib.db.queue.write { d in
-            try d.execute(sql: "INSERT INTO op_journal (op,captureId,src,dst,startedAt,plan) VALUES (?,?,?,?,?,?)",
-                          arguments: [plan.op, plan.record.id, plan.source, plan.record.relPath, Date(), data])
+            try d.execute(sql: "INSERT INTO op_journal (op,captureId,src,dst,startedAt) VALUES (?,?,?,?,?)",
+                          arguments: [op.rawValue, id, src, dst, Date()])
         }
     }
 
-    private func reopen(_ lib: Library) throws -> Library {
-        try Library(db: Database(directory: lib.root.deletingLastPathComponent().appendingPathComponent("db")), root: lib.root)
+    /// Nothing can be moved into `dir` until `unlock` — an EACCES, the transient kind.
+    private func lock(_ dir: URL) throws {
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: dir.path)
+        addTeardownBlock { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path) }
+    }
+    private func unlock(_ dir: URL) throws {
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
+    }
+    private func lockedDirectory(_ lib: Library) throws -> URL {
+        let dir = lib.root.appendingPathComponent("locked")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try lock(dir)
+        return dir
     }
 
     func testEveryReplayFailureIsIsolatedAndCanBeRetried() throws {
         for failure in ["collision", "permissions", "missing-edit-source"] {
-            let (lib, dir) = try library()
+            let (lib, dir) = try makeLibrary()
             defer { try? FileManager.default.removeItem(at: dir) }
             var broken = try shot(lib)
             let healthy = try shot(lib)
@@ -39,17 +43,17 @@ final class RecoveryTests: XCTestCase {
             try lib.enqueueIngest(healthy.id, notBefore: Date())
             let destinationDir = lib.root.appendingPathComponent("destination")
             try FileManager.default.createDirectory(at: destinationDir, withIntermediateDirectories: true)
-            defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: destinationDir.path) }
             let destination = destinationDir.appendingPathComponent("capture.png")
-            if failure == "missing-edit-source" {
+            switch failure {
+            case "missing-edit-source":
                 try FileManager.default.removeItem(at: lib.url(for: broken))
                 XCTAssertThrowsError(try lib.applyEdit(broken.id, flattenedPNG: Data([9]), layersJSON: "[]", width: 1, height: 1))
-            } else {
-                let source = broken.relPath
-                broken.relPath = lib.rel(destination)
-                try journal(lib, FileOperation(op: "rename", source: source, record: broken, sidecar: nil))
-                if failure == "collision" { try Data([8]).write(to: destination) }
-                else { try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: destinationDir.path) }
+            case "collision":
+                try journalRename(lib, &broken, to: destination)
+                try Data([8]).write(to: destination)
+            default:
+                try journalRename(lib, &broken, to: destination)
+                try lock(destinationDir)
             }
             let reopened = try reopen(lib)
             XCTAssertThrowsError(try reopened.setStatus(broken.id, .kept))
@@ -58,19 +62,19 @@ final class RecoveryTests: XCTestCase {
             XCTAssertEqual(job.captureId, healthy.id)
             XCTAssertTrue(try reopened.finishOCR(job, text: "healthy", naming: false))
             XCTAssertEqual(try reopened.db.queue.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM ingest_jobs WHERE captureId = ?", arguments: [broken.id]) }, 1)
-            if failure == "collision" { try FileManager.default.removeItem(at: destination) }
-            if failure == "permissions" { try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: destinationDir.path) }
-            if failure == "missing-edit-source" {
-                try Data([1, 2, 3]).write(to: lib.url(for: broken))
+            switch failure {
+            case "missing-edit-source": try Data([1, 2, 3]).write(to: lib.url(for: broken))
+            case "collision": try FileManager.default.removeItem(at: destination)
+            default: try unlock(destinationDir)
             }
             try reopened.retryRecovery(for: broken.id)
             XCTAssertNoThrow(try reopened.setStatus(broken.id, .kept))
-            XCTAssertEqual(try reopened.db.queue.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM op_journal WHERE captureId = ?", arguments: [broken.id]) }, 0)
+            XCTAssertEqual(try journalCount(reopened, where: "captureId = '\(broken.id)'"), 0)
         }
     }
 
     func testUnreadableSidecarMovesVerbatimThroughRenameDiscardAndRestore() throws {
-        let (lib, dir) = try library()
+        let (lib, dir) = try makeLibrary()
         defer { try? FileManager.default.removeItem(at: dir) }
         let capture = try shot(lib)
         try lib.applyEdit(capture.id, flattenedPNG: Data([9]), layersJSON: "[layers]", width: 1, height: 1)
@@ -91,7 +95,7 @@ final class RecoveryTests: XCTestCase {
     }
 
     func testUnjournaledStagesAreRemovedAfterInsertFailureAndRestart() throws {
-        let (lib, dir) = try library()
+        let (lib, dir) = try makeLibrary()
         defer { try? FileManager.default.removeItem(at: dir) }
         let capture = try shot(lib)
         let trimmed = dir.appendingPathComponent("trimmed.mp4")
@@ -109,16 +113,17 @@ final class RecoveryTests: XCTestCase {
         var blocked = capture
         blocked.relPath = "collision.png"
         try Data([8]).write(to: lib.url(for: blocked))
-        try journal(lib, FileOperation(op: "write", source: lib.rel(retained), record: blocked, sidecar: nil))
-        let reopened = try reopen(lib)
-        XCTAssertEqual(try reopened.db.queue.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM op_journal WHERE recoveryError IS NOT NULL") }, 1)
+        try lib.journal(FileOperation(op: .write, source: lib.rel(retained), record: blocked, sidecar: nil))
+        // Only the instance holding the root sweeps .pending — the app at launch.
+        let reopened = try reopen(lib, exclusive: true)
+        XCTAssertEqual(try journalCount(reopened, where: "recoveryError IS NOT NULL"), 1)
         XCTAssertFalse(FileManager.default.fileExists(atPath: orphan.path))
         let sources = try reopened.db.queue.read { try String.fetchAll($0, sql: "SELECT src FROM op_journal") }
         XCTAssertTrue(FileManager.default.fileExists(atPath: retained.path), "retained=\(lib.rel(retained)); journal=\(sources)")
     }
 
     func testSweepPreservesLegacyOriginalUntilItsLastReferentIsGone() throws {
-        let (lib, dir) = try library()
+        let (lib, dir) = try makeLibrary()
         defer { try? FileManager.default.removeItem(at: dir) }
         let first = try shot(lib), second = try shot(lib)
         let shared = lib.root.appendingPathComponent(".originals/2026/09/reused-name.png")
@@ -139,7 +144,7 @@ final class RecoveryTests: XCTestCase {
     }
 
     func testSweepChecksSidecarMovedByAnUncommittedRename() throws {
-        let (lib, dir) = try library()
+        let (lib, dir) = try makeLibrary()
         defer { try? FileManager.default.removeItem(at: dir) }
         let first = try shot(lib), second = try shot(lib)
         let shared = lib.root.appendingPathComponent(".originals/shared.png")
@@ -166,18 +171,15 @@ final class RecoveryTests: XCTestCase {
     }
 
     func testUntouchedLegacyEditsDoNotInvalidateSearchOrShares() throws {
-        for op in ["flatten", "trim"] {
-            let (lib, dir) = try library()
+        for op in [FileOperation.Op.flatten, .trim] {
+            let (lib, dir) = try makeLibrary()
             defer { try? FileManager.default.removeItem(at: dir) }
             let capture = try shot(lib)
             XCTAssertTrue(lib.applyName(capture.id, baseName: "invoice", tags: ["stripe"], summary: "invoice", aiState: .namedAPI))
             let named = try record(lib, capture.id)
             try lib.updateSearchText(named.id, ocr: "paid")
             try lib.setShareLink(named.id, url: "https://kapture.sh/existing", revision: named.contentRevision)
-            try lib.db.queue.write { d in
-                try d.execute(sql: "INSERT INTO op_journal (op,captureId,src,dst,startedAt) VALUES (?,?,?,?,?)",
-                              arguments: [op, named.id, named.relPath, named.relPath, Date()])
-            }
+            try legacyJournal(lib, op: op, id: named.id, src: named.relPath, dst: named.relPath)
             let reopened = try reopen(lib)
             let recovered = try record(reopened, named.id)
             XCTAssertEqual(recovered.contentRevision, named.contentRevision)
@@ -192,14 +194,12 @@ final class RecoveryTests: XCTestCase {
         try await withThrowingTaskGroup(of: Void.self) { group in
             for _ in 0..<12 {
                 group.addTask {
-                    let (lib, dir) = try self.library()
+                    let (lib, dir) = try self.makeLibrary()
                     defer { try? FileManager.default.removeItem(at: dir) }
                     let file = lib.root.appendingPathComponent("legacy.mp4")
                     // Even malformed media must not block recovery waiting for a metadata task.
                     try Data([1, 2, 3]).write(to: file)
-                    try lib.db.queue.write { d in
-                        try d.execute(sql: "INSERT INTO op_journal (op,captureId,dst,startedAt) VALUES ('write','legacy','legacy.mp4',?)", arguments: [Date()])
-                    }
+                    try self.legacyJournal(lib, op: .write, id: "legacy", dst: "legacy.mp4")
                     let reopened = try self.reopen(lib)
                     XCTAssertEqual(try self.record(reopened, "legacy").kind, .recording)
                     XCTAssertNoThrow(try self.shot(reopened))
@@ -211,7 +211,7 @@ final class RecoveryTests: XCTestCase {
 
     func testFinderDeletedCaptureCanStillBeDiscardedAndSwept() throws {
         for restartFirst in [false, true] {
-            let (lib, dir) = try library()
+            let (lib, dir) = try makeLibrary()
             defer { try? FileManager.default.removeItem(at: dir) }
             let missing = try shot(lib)
             try FileManager.default.removeItem(at: lib.url(for: missing))
@@ -219,11 +219,11 @@ final class RecoveryTests: XCTestCase {
             // The end state the user asked for — row trashed, file gone — needs no file.
             XCTAssertNoThrow(try usable.discard(missing))
             XCTAssertEqual(try record(usable, missing.id).status, .trashed)
-            XCTAssertEqual(try usable.db.queue.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM op_journal") }, 0)
+            XCTAssertEqual(try journalCount(usable), 0)
             // Restoring it is the honest failure: said once, and the capture is not parked.
             XCTAssertThrowsError(try usable.restore(id: missing.id)) { XCTAssertTrue($0 is FileVanished, "\($0)") }
             XCTAssertEqual(try record(usable, missing.id).status, .trashed)
-            XCTAssertEqual(try usable.db.queue.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM op_journal") }, 0)
+            XCTAssertEqual(try journalCount(usable), 0)
             XCTAssertNoThrow(try usable.setStatus(missing.id, .trashed))
             usable.sweepTrash(olderThanDays: -1)
             XCTAssertNil(try usable.db.queue.read { try CaptureRecord.fetchOne($0, key: missing.id) })
@@ -232,7 +232,7 @@ final class RecoveryTests: XCTestCase {
     }
 
     func testARowLeftByADeletedFileDoesNotClaimTheNextCapturesName() throws {
-        let (lib, dir) = try library()
+        let (lib, dir) = try makeLibrary()
         defer { try? FileManager.default.removeItem(at: dir) }
         let first = try shot(lib), other = try shot(lib)
         XCTAssertTrue(lib.applyName(first.id, baseName: "ghost", tags: [], summary: "", aiState: .namedLocal))
@@ -244,41 +244,52 @@ final class RecoveryTests: XCTestCase {
         let renamed = try record(lib, other.id)
         XCTAssertNotEqual(renamed.relPath, ghost.relPath)
         XCTAssertTrue(renamed.relPath.hasSuffix("ghost-2.png"), renamed.relPath)
-        XCTAssertEqual(try lib.db.queue.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM op_journal") }, 0)
+        XCTAssertEqual(try journalCount(lib), 0)
+    }
+
+    func testAPendingPlansDestinationIsAlsoATakenName() throws {
+        let (lib, dir) = try makeLibrary()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        var waiting = try shot(lib)
+        let other = try shot(lib)
+        // A rename to "claimed" is journaled but backing off: no file there yet, no row yet.
+        let lockedDir = try lockedDirectory(lib)
+        try journalRename(lib, &waiting, to: lockedDir.appendingPathComponent("claimed.png"))
+        try lib.recoverPendingOperations()
+        try unlock(lockedDir)
+        // Nothing else may take that name meanwhile, or the replay collides and is quarantined.
+        try FileManager.default.moveItem(at: lib.url(for: other), to: lockedDir.appendingPathComponent("other.png"))
+        try lib.db.queue.write { try $0.execute(sql: "UPDATE captures SET relPath = ? WHERE id = ?",
+                                                 arguments: [lib.rel(lockedDir.appendingPathComponent("other.png")), other.id]) }
+        XCTAssertTrue(lib.applyName(other.id, baseName: "claimed", tags: [], summary: "", aiState: .namedLocal))
+        XCTAssertTrue(try record(lib, other.id).relPath.hasSuffix("claimed-2.png"))
     }
 
     func testAUniqueConstraintOnReplayIsQuarantinedNotRetriedForever() throws {
-        let (lib, dir) = try library()
+        let (lib, dir) = try makeLibrary()
         defer { try? FileManager.default.removeItem(at: dir) }
         let ghost = try shot(lib)
         var other = try shot(lib)
         try FileManager.default.removeItem(at: lib.url(for: ghost))
         // A plan that bypassed availableURL, as an older build's could have.
-        let source = other.relPath
-        other.relPath = ghost.relPath
-        try journal(lib, FileOperation(op: "rename", source: source, record: other, sidecar: nil))
+        try journalRename(lib, &other, to: lib.url(for: ghost))
         let reopened = try reopen(lib)
-        XCTAssertNotNil(try reopened.db.queue.read { try String.fetchOne($0, sql: "SELECT recoveryError FROM op_journal") })
+        XCTAssertEqual(try journalCount(reopened, where: "recoveryError IS NOT NULL"), 1)
         XCTAssertThrowsError(try reopened.setStatus(other.id, .kept)) {
             XCTAssertEqual(($0 as? RecoveryBlocked)?.quarantined, true)
         }
     }
 
     func testFinishingAReplayPullsTheCapturesIngestJobForward() throws {
-        let (lib, dir) = try library()
+        let (lib, dir) = try makeLibrary()
         defer { try? FileManager.default.removeItem(at: dir) }
         var capture = try shot(lib)
         try lib.enqueueIngest(capture.id, notBefore: Date().addingTimeInterval(3600))
-        let lockedDir = lib.root.appendingPathComponent("locked")
-        try FileManager.default.createDirectory(at: lockedDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: lockedDir.path) }
-        let source = capture.relPath
-        capture.relPath = lib.rel(lockedDir.appendingPathComponent("capture.png"))
-        try journal(lib, FileOperation(op: "rename", source: source, record: capture, sidecar: nil))
-        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: lockedDir.path)
+        let lockedDir = try lockedDirectory(lib)
+        try journalRename(lib, &capture, to: lockedDir.appendingPathComponent("capture.png"))
         let reopened = try reopen(lib)
         XCTAssertNil(try reopened.nextIngestJob(), "hidden while the capture is blocked")
-        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: lockedDir.path)
+        try unlock(lockedDir)
         try reopened.db.queue.write { try $0.execute(sql: "UPDATE op_journal SET nextAttemptAt = NULL") }
         XCTAssertNoThrow(try shot(reopened))   // any operation replays it
         // The drain loop may have gone to sleep with nothing to wait for; the job it could not
@@ -287,7 +298,7 @@ final class RecoveryTests: XCTestCase {
     }
 
     func testSweepKeepsALegacyOriginalAndItsRowWhileAnotherSidecarIsUnreadable() throws {
-        let (lib, dir) = try library()
+        let (lib, dir) = try makeLibrary()
         defer { try? FileManager.default.removeItem(at: dir) }
         let legacy = try shot(lib), bystander = try shot(lib)
         let shared = lib.root.appendingPathComponent(".originals/2026/09/legacy-name.png")
@@ -311,40 +322,35 @@ final class RecoveryTests: XCTestCase {
     }
 
     func testRecoveryContinuesPastMissingLegacyEntryAndCorruptPlan() throws {
-        let (lib, dir) = try library()
+        let (lib, dir) = try makeLibrary()
         defer { try? FileManager.default.removeItem(at: dir) }
         let missing = try shot(lib)
         try FileManager.default.removeItem(at: lib.url(for: missing))
+        try legacyJournal(lib, op: .discard, id: missing.id, src: missing.relPath, dst: ".trash/missing.png")
         try lib.db.queue.write { d in
-            try d.execute(sql: "INSERT INTO op_journal (op,captureId,src,dst,startedAt) VALUES ('discard',?,?,?,?)",
-                          arguments: [missing.id, missing.relPath, ".trash/missing.png", Date()])
             try d.execute(sql: "INSERT INTO op_journal (op,captureId,startedAt,plan) VALUES ('write','corrupt',?,?)",
                           arguments: [Date(), Data("not JSON".utf8)])
         }
         let staged = try lib.stageData(Data([9]))
         let pending = CaptureRecord(kind: .screenshot, width: 1, height: 1, bytes: 1, relPath: "healthy.png", fastID: "")
-        try journal(lib, FileOperation(op: "write", source: lib.rel(staged), record: pending, sidecar: nil))
+        try lib.journal(FileOperation(op: .write, source: lib.rel(staged), record: pending, sidecar: nil))
         let reopened = try reopen(lib)
         XCTAssertEqual(try Data(contentsOf: reopened.url(for: record(reopened, pending.id))), Data([9]))
         // The legacy discard finished without its file; only the corrupt plan needs a human.
         XCTAssertEqual(try record(reopened, missing.id).status, .trashed)
-        XCTAssertEqual(try reopened.db.queue.read {
-            try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM op_journal WHERE recoveryError IS NOT NULL")
-        }, 1)
-        XCTAssertEqual(try reopened.db.queue.read {
-            try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM op_journal WHERE recoveryError IS NULL")
-        }, 0)
+        XCTAssertEqual(try journalCount(reopened, where: "recoveryError IS NOT NULL"), 1)
+        XCTAssertEqual(try journalCount(reopened, where: "recoveryError IS NULL"), 0)
     }
 
     func testRestartFinishesAWriteBeforeOrAfterItsFileMove() throws {
         for moved in [false, true] {
-            let (lib, dir) = try library()
+            let (lib, dir) = try makeLibrary()
             defer { try? FileManager.default.removeItem(at: dir) }
             let staged = try lib.stageData(Data([4, 5, 6]))
             let pending = CaptureRecord(kind: .screenshot, width: 3, height: 4, bytes: 3,
                                         relPath: "recovered.png", fastID: "")
             let sidecar = Sidecar(id: pending.id, created: pending.createdAt, app: "test", window: nil)
-            try journal(lib, FileOperation(op: "write", source: lib.rel(staged), record: pending, sidecar: sidecar))
+            try lib.journal(FileOperation(op: .write, source: lib.rel(staged), record: pending, sidecar: sidecar))
             if moved { try FileManager.default.moveItem(at: staged, to: lib.url(for: pending)) }
             let reopened = try reopen(lib)
             XCTAssertEqual(try record(reopened, pending.id).width, 3)
@@ -352,14 +358,14 @@ final class RecoveryTests: XCTestCase {
             XCTAssertEqual(try Data(contentsOf: reopened.url(for: pending)), Data([4, 5, 6]))
             try reopened.recoverPendingOperations()
             XCTAssertEqual(reopened.search().count, 1)
-            XCTAssertEqual(try lib.db.queue.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM op_journal") }, 0)
+            XCTAssertEqual(try journalCount(lib), 0)
             // The caller that would have enqueued OCR never returned; recovery owes it one.
             XCTAssertEqual(try reopened.nextIngestJob()?.captureId, pending.id)
         }
     }
 
     func testRestartCompletesEditAfterPixelsChangedBeforeSidecarOrDatabase() throws {
-        let (lib, dir) = try library()
+        let (lib, dir) = try makeLibrary()
         defer { try? FileManager.default.removeItem(at: dir) }
         var capture = try shot(lib)
         try lib.updateSearchText(capture.id, ocr: "secret")
@@ -374,7 +380,7 @@ final class RecoveryTests: XCTestCase {
         sidecar.annotations = .init(original: original, layersJSON: "[redaction]")
         capture.contentRevision += 1; capture.width = 5; capture.height = 6
         capture.shareStale = true; capture.summary = nil
-        try journal(lib, FileOperation(op: "flatten", source: lib.rel(staged), record: capture, sidecar: sidecar))
+        try lib.journal(FileOperation(op: .flatten, source: lib.rel(staged), record: capture, sidecar: sidecar))
         _ = try FileManager.default.replaceItemAt(lib.url(for: capture), withItemAt: staged)
         let reopened = try reopen(lib)
         let recovered = try record(reopened, capture.id)
@@ -385,11 +391,11 @@ final class RecoveryTests: XCTestCase {
         XCTAssertTrue(reopened.search("secret").isEmpty)
         XCTAssertEqual(Sidecar.read(for: reopened.url(for: recovered))?.annotations?.layersJSON, "[redaction]")
         XCTAssertEqual(try Data(contentsOf: reopened.editBase(for: recovered).image), Data([1, 2, 3]))
-        XCTAssertEqual(try reopened.nextIngestJob()?.revision, 1)
+        XCTAssertEqual(try reopened.nextIngestJob()?.stage, .ocr)
     }
 
     func testRestartCompletesDiscardAndRestoreWithTheSidecarLeftAtSource() throws {
-        let (lib, dir) = try library()
+        let (lib, dir) = try makeLibrary()
         defer { try? FileManager.default.removeItem(at: dir) }
         var capture = try shot(lib)
         let initial = capture.relPath
@@ -397,8 +403,8 @@ final class RecoveryTests: XCTestCase {
         let sidecar = Sidecar.read(for: source)
         capture.relPath = ".trash/interrupted.png"; capture.status = .trashed; capture.trashedAt = Date()
         try FileManager.default.createDirectory(at: lib.trashDir, withIntermediateDirectories: true)
-        try journal(lib, FileOperation(op: "discard", source: initial, record: capture, sidecar: sidecar,
-                                       originalRelPath: initial))
+        try lib.journal(FileOperation(op: .discard, source: initial, record: capture, sidecar: sidecar,
+                                      originalRelPath: initial))
         try FileManager.default.moveItem(at: source, to: lib.url(for: capture))
         let reopened = try reopen(lib)
         XCTAssertEqual(try record(reopened, capture.id).status, .trashed)
@@ -406,7 +412,7 @@ final class RecoveryTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: Sidecar.url(for: source).path))
         let trashPath = capture.relPath
         capture.relPath = initial; capture.status = .kept; capture.trashedAt = nil
-        try journal(reopened, FileOperation(op: "restore", source: trashPath, record: capture, sidecar: sidecar))
+        try reopened.journal(FileOperation(op: .restore, source: trashPath, record: capture, sidecar: sidecar))
         try FileManager.default.moveItem(at: reopened.root.appendingPathComponent(trashPath), to: source)
         let restored = try reopen(reopened)
         XCTAssertEqual(try record(restored, capture.id).status, .kept)
@@ -415,7 +421,7 @@ final class RecoveryTests: XCTestCase {
     }
 
     func testActualEditRecoversAfterTheDatabaseCommitFails() throws {
-        let (lib, dir) = try library()
+        let (lib, dir) = try makeLibrary()
         defer { try? FileManager.default.removeItem(at: dir) }
         let capture = try shot(lib)
         try lib.updateSearchText(capture.id, ocr: "secret")
@@ -438,7 +444,7 @@ final class RecoveryTests: XCTestCase {
     }
 
     func testRestoreAvoidsSidecarCollisionsWithAnotherMediaType() throws {
-        let (lib, dir) = try library()
+        let (lib, dir) = try makeLibrary()
         defer { try? FileManager.default.removeItem(at: dir) }
         let capture = try shot(lib)
         let original = lib.url(for: capture)
@@ -452,14 +458,11 @@ final class RecoveryTests: XCTestCase {
     }
 
     func testLegacyRenameJournalIsRecoveredOnLaunch() throws {
-        let (lib, dir) = try library()
+        let (lib, dir) = try makeLibrary()
         defer { try? FileManager.default.removeItem(at: dir) }
         let capture = try shot(lib)
         let target = lib.root.appendingPathComponent("renamed.png")
-        try lib.db.queue.write { d in
-            try d.execute(sql: "INSERT INTO op_journal (op,captureId,src,dst,startedAt) VALUES ('rename',?,?,?,?)",
-                          arguments: [capture.id, capture.relPath, "renamed.png", Date()])
-        }
+        try legacyJournal(lib, op: .rename, id: capture.id, src: capture.relPath, dst: "renamed.png")
         try FileManager.default.moveItem(at: lib.url(for: capture), to: target)
         let reopened = try reopen(lib)
         XCTAssertEqual(try record(reopened, capture.id).relPath, "renamed.png")
@@ -469,7 +472,7 @@ final class RecoveryTests: XCTestCase {
 
     func testSweepRemovesOriginalAndRetriesEachFailureBoundary() throws {
         for failedPart in ["original", "capture", "sidecar", "tombstone"] {
-            let (lib, dir) = try library()
+            let (lib, dir) = try makeLibrary()
             defer { try? FileManager.default.removeItem(at: dir) }
             let capture = try shot(lib)
             try lib.applyEdit(capture.id, flattenedPNG: Data([4]), layersJSON: "[]", width: 1, height: 1)
@@ -495,7 +498,7 @@ final class RecoveryTests: XCTestCase {
 
     func testRestoreRepeatedCollisionsPreservesMovieAndGIFExtensions() throws {
         for ext in ["mp4", "gif"] {
-            let (lib, dir) = try library()
+            let (lib, dir) = try makeLibrary()
             defer { try? FileManager.default.removeItem(at: dir) }
             let temp = dir.appendingPathComponent("movie.\(ext)")
             try Data([1, 2]).write(to: temp)
@@ -519,20 +522,15 @@ final class RecoveryTests: XCTestCase {
     // MARK: replay failures are classified, not all parked
 
     func testTransientReplayFailureBacksOffAndHealsOnItsOwn() throws {
-        let (lib, dir) = try library()
+        let (lib, dir) = try makeLibrary()
         defer { try? FileManager.default.removeItem(at: dir) }
         var capture = try shot(lib)
-        let lockedDir = lib.root.appendingPathComponent("locked")
-        try FileManager.default.createDirectory(at: lockedDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: lockedDir.path) }
-        let source = capture.relPath
-        capture.relPath = lib.rel(lockedDir.appendingPathComponent("capture.png"))
-        try journal(lib, FileOperation(op: "rename", source: source, record: capture, sidecar: nil))
-        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: lockedDir.path)
+        let lockedDir = try lockedDirectory(lib)
+        try journalRename(lib, &capture, to: lockedDir.appendingPathComponent("capture.png"))
 
         let reopened = try reopen(lib)
         // Waiting, not parked — and the capture is blocked meanwhile, with the reason attached.
-        XCTAssertNil(try reopened.db.queue.read { try String.fetchOne($0, sql: "SELECT recoveryError FROM op_journal") })
+        XCTAssertEqual(try journalCount(reopened, where: "recoveryError IS NOT NULL"), 0)
         XCTAssertEqual(try reopened.db.queue.read { try Int.fetchOne($0, sql: "SELECT attempts FROM op_journal") }, 1)
         XCTAssertNotNil(try reopened.db.queue.read { try Date.fetchOne($0, sql: "SELECT nextAttemptAt FROM op_journal") })
         XCTAssertThrowsError(try reopened.setStatus(capture.id, .kept)) { error in
@@ -540,24 +538,22 @@ final class RecoveryTests: XCTestCase {
         }
         // The permission arrives. Once the backoff elapses, the next operation on anything
         // finishes it — no retryRecovery, no relaunch, no hand-edited row.
-        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: lockedDir.path)
+        try unlock(lockedDir)
         try reopened.db.queue.write { try $0.execute(sql: "UPDATE op_journal SET nextAttemptAt = NULL") }
         XCTAssertNoThrow(try reopened.setStatus(capture.id, .kept))
-        XCTAssertEqual(try reopened.db.queue.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM op_journal") }, 0)
+        XCTAssertEqual(try journalCount(reopened), 0)
         XCTAssertEqual(try record(reopened, capture.id).relPath, capture.relPath)
     }
 
     func testPermanentReplayFailureIsQuarantinedAndSaysSo() throws {
-        let (lib, dir) = try library()
+        let (lib, dir) = try makeLibrary()
         defer { try? FileManager.default.removeItem(at: dir) }
         var capture = try shot(lib)
         let taken = lib.root.appendingPathComponent("taken.png")
         try Data([8]).write(to: taken)
-        let source = capture.relPath
-        capture.relPath = lib.rel(taken)
-        try journal(lib, FileOperation(op: "rename", source: source, record: capture, sidecar: nil))
+        try journalRename(lib, &capture, to: taken)
         let reopened = try reopen(lib)
-        XCTAssertNotNil(try reopened.db.queue.read { try String.fetchOne($0, sql: "SELECT recoveryError FROM op_journal") })
+        XCTAssertEqual(try journalCount(reopened, where: "recoveryError IS NOT NULL"), 1)
         XCTAssertThrowsError(try reopened.setStatus(capture.id, .kept)) { error in
             XCTAssertEqual((error as? RecoveryBlocked)?.quarantined, true)
             XCTAssertTrue(error.localizedDescription.contains("needs attention"))
@@ -569,24 +565,22 @@ final class RecoveryTests: XCTestCase {
     }
 
     func testLegacyWriteWithACorruptSidecarStillGetsARow() throws {
-        let (lib, dir) = try library()
+        let (lib, dir) = try makeLibrary()
         defer { try? FileManager.default.removeItem(at: dir) }
         let file = lib.root.appendingPathComponent("legacy.png")
         try Data([1, 2, 3]).write(to: file)
         try Data("not json".utf8).write(to: Sidecar.url(for: file))
-        try lib.db.queue.write { d in
-            try d.execute(sql: "INSERT INTO op_journal (op,captureId,dst,startedAt) VALUES ('write','legacy','legacy.png',?)", arguments: [Date()])
-        }
+        try legacyJournal(lib, op: .write, id: "legacy", dst: "legacy.png")
         let reopened = try reopen(lib)
         XCTAssertEqual(try record(reopened, "legacy").relPath, "legacy.png")
         XCTAssertEqual(Sidecar.read(for: file)?.id, "legacy", "synthesised, as the old build would have written it")
-        XCTAssertEqual(try reopened.db.queue.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM op_journal") }, 0)
+        XCTAssertEqual(try journalCount(reopened), 0)
     }
 
     // MARK: sweep decides before it marks
 
     func testSweepWithAnUnreadableSidecarKeepsTheOriginalAndSweepsTheRest() throws {
-        let (lib, dir) = try library()
+        let (lib, dir) = try makeLibrary()
         defer { try? FileManager.default.removeItem(at: dir) }
         let capture = try shot(lib)
         try lib.applyEdit(capture.id, flattenedPNG: Data([4]), layersJSON: "[]", width: 1, height: 1)
@@ -605,13 +599,13 @@ final class RecoveryTests: XCTestCase {
     }
 
     func testSweepDeletesAnIdKeyedOriginalDespiteACorruptSidecarElsewhere() throws {
-        let (lib, dir) = try library()
+        let (lib, dir) = try makeLibrary()
         defer { try? FileManager.default.removeItem(at: dir) }
         let capture = try shot(lib), bystander = try shot(lib)
         try Data("not json".utf8).write(to: Sidecar.url(for: lib.url(for: bystander)))
         try lib.applyEdit(capture.id, flattenedPNG: Data([4]), layersJSON: "[]", width: 1, height: 1)
         let original = lib.editBase(for: try record(lib, capture.id)).image
-        XCTAssertTrue(Library.isOwnOriginal(lib.rel(original), id: capture.id))
+        XCTAssertEqual(lib.rel(original), Library.ownOriginalPath(id: capture.id, ext: "png"))
         try lib.discard(try record(lib, capture.id))
         lib.sweepTrash(olderThanDays: -1)
         // An id-keyed original is nobody else's by construction, so the bystander's unreadable
@@ -624,7 +618,7 @@ final class RecoveryTests: XCTestCase {
     // MARK: one process per root
 
     func testExclusiveLibraryRefusesASecondOpenerOnTheSameRoot() throws {
-        let (lib, dir) = try library()
+        let (lib, dir) = try makeLibrary()
         defer { try? FileManager.default.removeItem(at: dir) }
         let held = try Library(db: lib.db, root: lib.root, exclusive: true)
         XCTAssertThrowsError(try Library(db: Database(directory: dir.appendingPathComponent("db2")),
@@ -637,7 +631,7 @@ final class RecoveryTests: XCTestCase {
     }
 
     func testRenameBetweenEditsKeepsTheSameOriginal() throws {
-        let (lib, dir) = try library()
+        let (lib, dir) = try makeLibrary()
         defer { try? FileManager.default.removeItem(at: dir) }
         let capture = try shot(lib)
         try lib.applyEdit(capture.id, flattenedPNG: Data([4]), layersJSON: "[]", width: 1, height: 1)

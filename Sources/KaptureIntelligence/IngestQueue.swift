@@ -54,10 +54,7 @@ public actor IngestQueue {
     }
 
     public func cancel(_ id: String) {
-        guard let library else { return }
-        try? library.db.queue.write { d in
-            try d.execute(sql: "DELETE FROM ingest_jobs WHERE captureId = ?", arguments: [id])
-        }
+        try? library?.cancelIngest(id)
     }
 
     private func clearJob(_ job: IngestJob) {
@@ -150,8 +147,8 @@ public actor IngestQueue {
 
     private func process(_ job: IngestJob) async {
         switch job.stage {
-        case "name": await nameStage(job)
-        default: await ocrStage(job)
+        case .ocr: await ocrStage(job)
+        case .name: await nameStage(job)
         }
     }
 
@@ -170,9 +167,8 @@ public actor IngestQueue {
             return (OCRService.indexText(for: image), wantsAPI ? ImageEncoding.jpegData(image) : nil)
         }.value
 
-        // re-check status: the capture may have been discarded while OCR ran
-        guard liveRecord(job) != nil else { return }
-
+        // No re-check here: finishOCR makes the same generation-and-status check inside its own
+        // transaction, and a retry for a capture discarded meanwhile updates no row.
         if result.text.isEmpty, job.attempts < 2 {
             // transient failures (a file still being written) get one more go
             try? library.retryIngestJob(job, after: 20, error: "empty")

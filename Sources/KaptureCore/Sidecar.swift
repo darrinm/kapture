@@ -24,6 +24,11 @@ public struct Sidecar: Codable {
         self.source = Source(app: app, window: window)
     }
 
+    /// The sidecar a capture gets when it has none: identity and provenance, nothing else yet.
+    public init(for record: CaptureRecord) {
+        self.init(id: record.id, created: record.createdAt, app: record.sourceApp, window: record.windowTitle)
+    }
+
     public static func read(for fileURL: URL) -> Sidecar? {
         let dec = JSONDecoder()
         dec.dateDecodingStrategy = .iso8601

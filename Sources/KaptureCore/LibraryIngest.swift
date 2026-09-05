@@ -1,39 +1,48 @@
 import Foundation
 import GRDB
 
-/// A generation distinguishes cancel/re-enqueue at the same pixel revision as well as edits.
+/// A generation tells a cancel-and-re-enqueue from the job it replaced, and an edit — which
+/// always re-enqueues under a fresh one — from the OCR that was in flight against the old
+/// pixels. A result belongs to its generation; a job that has moved on ignores it.
 public struct IngestJob: Sendable {
+    public enum Stage: String, Sendable {
+        case ocr, name
+    }
+
     public let captureId: String
-    public let revision: Int64
     public let generation: String
-    public let stage: String
+    public let stage: Stage
     public let attempts: Int
 }
 
 extension Library {
     static func enqueueIngest(_ d: GRDB.Database, record: CaptureRecord, notBefore: Date,
                               replacing: Bool = false) throws {
-        let generation = UUID().uuidString
+        // The pixels changed: whatever stage the old job reached, it was reading the old ones.
+        // Start over under a generation the in-flight result cannot claim.
+        if replacing { try cancelIngest(d, id: record.id) }
         try d.execute(sql: """
-            INSERT INTO ingest_jobs (captureId, stage, notBefore, attempts, revision, generation)
-            VALUES (?, 'ocr', ?, 0, ?, ?)
-            ON CONFLICT(captureId) DO UPDATE SET
-                notBefore = MIN(notBefore, excluded.notBefore),
-                stage = CASE WHEN revision != excluded.revision OR ? THEN 'ocr' ELSE stage END,
-                attempts = CASE WHEN revision != excluded.revision OR ? THEN 0 ELSE attempts END,
-                generation = CASE WHEN revision != excluded.revision OR ? THEN excluded.generation ELSE generation END,
-                revision = excluded.revision
-            """, arguments: [record.id, notBefore, record.contentRevision, generation, replacing, replacing, replacing])
+            INSERT INTO ingest_jobs (captureId, stage, notBefore, attempts, generation)
+            VALUES (?, ?, ?, 0, ?)
+            ON CONFLICT(captureId) DO UPDATE SET notBefore = MIN(notBefore, excluded.notBefore)
+            """, arguments: [record.id, IngestJob.Stage.ocr.rawValue, notBefore, UUID().uuidString])
+    }
+
+    static func cancelIngest(_ d: GRDB.Database, id: String) throws {
+        try d.execute(sql: "DELETE FROM ingest_jobs WHERE captureId = ?", arguments: [id])
     }
 
     public func enqueueIngest(_ id: String, notBefore: Date) throws {
         try withOperation(for: id) {
             try db.queue.write { d in
-                guard let record = try CaptureRecord.fetchOne(d, key: id),
-                      record.status != .trashed, record.status != .sweeping else { return }
+                guard let record = try CaptureRecord.fetchOne(d, key: id), record.isLive else { return }
                 try Library.enqueueIngest(d, record: record, notBefore: notBefore)
             }
         }
+    }
+
+    public func cancelIngest(_ id: String) throws {
+        try db.queue.write { try Library.cancelIngest($0, id: id) }
     }
 
     public func nextIngestJob() throws -> IngestJob? {
@@ -43,14 +52,13 @@ extension Library {
                     AND captureId NOT IN (SELECT captureId FROM blocked_captures)
                 ORDER BY notBefore LIMIT 1
                 """, arguments: [Date()]) else { return nil }
-            return IngestJob(captureId: row["captureId"], revision: row["revision"], generation: row["generation"],
-                             stage: row["stage"], attempts: row["attempts"])
+            return IngestJob(captureId: row["captureId"], generation: row["generation"],
+                             stage: IngestJob.Stage(rawValue: row["stage"]) ?? .ocr, attempts: row["attempts"])
         }
     }
 
     static func currentIngestRecord(_ d: GRDB.Database, job: IngestJob) throws -> CaptureRecord? {
-        guard let record = try CaptureRecord.fetchOne(d, key: job.captureId),
-              record.contentRevision == job.revision, record.status != .trashed, record.status != .sweeping,
+        guard let record = try CaptureRecord.fetchOne(d, key: job.captureId), record.isLive,
               try String.fetchOne(d, sql: "SELECT generation FROM ingest_jobs WHERE captureId = ?",
                                   arguments: [job.captureId]) == job.generation else { return nil }
         return record
@@ -62,8 +70,9 @@ extension Library {
         }
     }
 
-    /// The revision check, index write, and job transition must share one transaction. An edit
-    /// also takes the operation lock, so pixels cannot change between that check and the write.
+    /// The generation check, index write, and job transition must share one transaction. An
+    /// edit also takes the operation lock, so pixels cannot change between that check and the
+    /// write.
     @discardableResult
     public func finishOCR(_ job: IngestJob, text: String, naming: Bool) throws -> Bool {
         try withOperation(for: job.captureId) {
@@ -75,10 +84,10 @@ extension Library {
                 try d.execute(sql: "UPDATE captures SET aiState = ? WHERE id = ?",
                               arguments: [state.rawValue, job.captureId])
                 if naming && record.aiState.acceptsName {
-                    try d.execute(sql: "UPDATE ingest_jobs SET stage = 'name', attempts = 0, lastError = NULL WHERE captureId = ?",
-                                  arguments: [job.captureId])
+                    try d.execute(sql: "UPDATE ingest_jobs SET stage = ?, attempts = 0, lastError = NULL WHERE captureId = ?",
+                                  arguments: [IngestJob.Stage.name.rawValue, job.captureId])
                 } else {
-                    try d.execute(sql: "DELETE FROM ingest_jobs WHERE captureId = ?", arguments: [job.captureId])
+                    try Library.cancelIngest(d, id: job.captureId)
                 }
                 return true
             }

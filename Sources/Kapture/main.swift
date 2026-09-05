@@ -29,9 +29,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             EditorController.shared.onFlattened = { id in
                 OverlayController.shared.showCard(recordID: id)
             }
-            EditorController.shared.onSaveFailed = { _, error in
-                Toast.show("Couldn't save the edit — \(error.localizedDescription)")
-            }
+            EditorController.shared.onSaveFailed = { _, error in Toast.show(error, while: "Saving the edit") }
             EditorController.shared.onWindowOpened = { ActivationPolicy.acquire() }
             EditorController.shared.onWindowClosed = { ActivationPolicy.release() }
         } catch {
@@ -222,7 +220,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         guard let library = CaptureCoordinator.shared.library else { return }
         let restored: CaptureRecord?
         do { restored = try library.restoreLastDiscarded() }
-        catch { Toast.show(error.localizedDescription); return }   // a blocked capture says why
+        catch { Toast.show(error, while: "Restore"); return }
         guard let restored else { return }
         Sounds.play("Pop")
         // discard cancelled its ingest job; an unnamed capture needs another pass

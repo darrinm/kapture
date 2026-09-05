@@ -14,14 +14,26 @@ public struct MediaResult: Sendable {
     }
 }
 
+/// Thrown by `Library(exclusive:)` when another process already holds the root.
+public struct LibraryBusy: LocalizedError {
+    public let root: URL
+    public var errorDescription: String? {
+        "The library at \(root.path) is open in another Kapture process"
+    }
+}
+
 /// The library: visible files under the root (truth), DB index in App Support (derived).
 /// @unchecked Sendable: all mutable state lives in the thread-safe DatabaseQueue; `db` and
-/// `root` are immutable, and file operations are serialized through the op journal.
+/// `root` are immutable; file operations are serialized by `db.operationLock` through
+/// `withOperation`, and made durable by the op journal.
 public final class Library: @unchecked Sendable {
     public let db: Database
     public let root: URL
     /// Held for the life of the instance when opened `exclusive`; closing it releases the lock.
     private let exclusiveLock: FileHandle?
+    /// Whether this process may assume it is the root's only writer. False for a test's second
+    /// instance on a shared root, and for a volume whose `flock` cannot answer.
+    var holdsRootLock: Bool { exclusiveLock != nil }
 
     /// `exclusive` makes this process the root's only writer: a `flock` on `<root>/.lock`,
     /// refused if another process holds it. The operation lock is per process and the startup
@@ -85,7 +97,7 @@ public final class Library: @unchecked Sendable {
 
     /// Expand `Settings.filenameTemplate` for one capture: `%Y %m %d %H %M %S` are the capture's
     /// date parts, `%n` is the kind word ("capture"/"recording"), `%%` is a literal percent. The
-    /// result is the base name only — `uniqueURL` still de-duplicates and adds the extension.
+    /// result is the base name only — `availableURL` still de-duplicates and adds the extension.
     public static func templatedName(kind: String, at date: Date = Date(),
                                      template: String? = nil) -> String {
         let chars = Array(template ?? Settings.shared.filenameTemplate)
@@ -118,30 +130,19 @@ public final class Library: @unchecked Sendable {
         return out
     }
 
-    /// First non-colliding "base.ext" in `dir`, then "base-2.ext", "base-3.ext", …
+    /// First non-colliding "base.ext" in `dir`, then "base-2.ext", "base-3.ext", … — as far
+    /// as the filesystem knows, which is all an export location has. The library's own names
+    /// go through `availableURL`.
     public static func uniqueURL(in dir: URL, base: String, ext: String) -> URL {
-        var url = dir.appendingPathComponent(base).appendingPathExtension(ext)
-        var n = 2
-        while FileManager.default.fileExists(atPath: url.path)
-                || FileManager.default.fileExists(atPath: Sidecar.url(for: url).path) {
-            url = dir.appendingPathComponent("\(base)-\(n)").appendingPathExtension(ext)
-            n += 1
+        uniqueURL(in: dir, base: base, ext: ext) { url in
+            FileManager.default.fileExists(atPath: url.path)
+                || FileManager.default.fileExists(atPath: Sidecar.url(for: url).path)
         }
-        return url
     }
 
-    /// `uniqueURL` that also steers clear of a path a row still holds. A file deleted in Finder
-    /// leaves its row behind, and a new capture landing on that path would trip the relPath
-    /// UNIQUE constraint at commit — after its file had already moved there.
-    func availableURL(in dir: URL, base: String, ext: String) throws -> URL {
-        func taken(_ url: URL) throws -> Bool {
-            try FileManager.default.fileExists(atPath: url.path)
-                || FileManager.default.fileExists(atPath: Sidecar.url(for: url).path)
-                || db.queue.read { d in
-                    try Bool.fetchOne(d, sql: "SELECT EXISTS(SELECT 1 FROM captures WHERE relPath = ?)",
-                                      arguments: [rel(url)]) ?? false
-                }
-        }
+    /// The one naming loop: the first candidate `taken` does not refuse.
+    static func uniqueURL(in dir: URL, base: String, ext: String,
+                          taken: (URL) throws -> Bool) rethrows -> URL {
         var url = dir.appendingPathComponent(base).appendingPathExtension(ext)
         var n = 2
         while try taken(url) {
@@ -149,6 +150,22 @@ public final class Library: @unchecked Sendable {
             n += 1
         }
         return url
+    }
+
+    /// `uniqueURL` for the library's own files. A name is also taken when a row still holds it
+    /// — a file deleted in Finder leaves its row behind — or when a journaled plan is on its
+    /// way there; either would trip the UNIQUE relPath or a moveItem collision at commit, after
+    /// the file had already moved. Presence is asked with `itemExists`, so a file we may not
+    /// read counts as there.
+    func availableURL(in dir: URL, base: String, ext: String) throws -> URL {
+        try Library.uniqueURL(in: dir, base: base, ext: ext) { url in
+            try itemExists(url) || itemExists(Sidecar.url(for: url)) || db.queue.read { d in
+                try Bool.fetchOne(d, sql: """
+                    SELECT EXISTS(SELECT 1 FROM captures WHERE relPath = ?)
+                        OR EXISTS(SELECT 1 FROM op_journal WHERE dst = ?)
+                    """, arguments: [rel(url), rel(url)]) ?? false
+            }
+        }
     }
 
     /// Path of `url` relative to the library root — the one place that owns this string surgery.
@@ -195,8 +212,8 @@ public final class Library: @unchecked Sendable {
     public func storeMovie(from tempURL: URL, width: Int, height: Int, duration: Double,
                            sourceApp: String?, ext: String = "mp4",
                            kind: CaptureKind = .recording) throws -> (CaptureRecord, URL) {
-        // The copy into .pending is the slow part — a movie coming off an external volume —
-        // and needs no lock: only startup sweeps .pending, and startup is exclusive.
+        // Staging is the slow part — a movie coming off an external volume — and needs no
+        // lock: only startup sweeps .pending, and only while holding the root.
         let staged = try stageFile(tempURL)
         defer { removeUnjournaledStage(staged) }
         return try withOperation {
@@ -206,9 +223,7 @@ public final class Library: @unchecked Sendable {
             var record = CaptureRecord(kind: kind, createdAt: now, width: width, height: height,
                 bytes: Library.byteSize(of: tempURL), relPath: rel(target), sourceApp: sourceApp, fastID: "")
             record.durationS = duration
-            let plan = FileOperation(op: "write", source: rel(staged), record: record,
-                sidecar: Sidecar(id: record.id, created: now, app: sourceApp, window: nil))
-            try commit(plan)
+            try commit(FileOperation(op: .write, source: rel(staged), record: record, sidecar: Sidecar(for: record)))
             try? removeIfPresent(tempURL)
             record.fastID = Library.fastID(of: target)
             return (record, target)
@@ -217,17 +232,16 @@ public final class Library: @unchecked Sendable {
 
     public func storePNG(_ data: Data, width: Int, height: Int,
                          sourceApp: String?, windowTitle: String?, screenID: Int?) throws -> (CaptureRecord, URL) {
-        try withOperation {
+        let staged = try stageData(data)   // off the lock, as in storeMovie
+        defer { removeUnjournaledStage(staged) }
+        return try withOperation {
             let now = Date()
             let target = try availableURL(in: try shardDir(for: now),
                 base: Library.templatedName(kind: "capture", at: now), ext: "png")
             var record = CaptureRecord(kind: .screenshot, createdAt: now, width: width, height: height,
                 bytes: data.count, relPath: rel(target), sourceApp: sourceApp, windowTitle: windowTitle,
                 screenID: screenID, fastID: "")
-            let staged = try stageData(data)
-            defer { removeUnjournaledStage(staged) }
-            try commit(FileOperation(op: "write", source: rel(staged), record: record,
-                sidecar: Sidecar(id: record.id, created: now, app: sourceApp, window: windowTitle)))
+            try commit(FileOperation(op: .write, source: rel(staged), record: record, sidecar: Sidecar(for: record)))
             record.fastID = Library.fastID(of: target)
             return (record, target)
         }
@@ -276,7 +290,7 @@ public final class Library: @unchecked Sendable {
     func shareSnapshot(_ id: String, linking: (URL, URL) throws -> Void) throws -> (record: CaptureRecord, file: URL) {
         let snapshot = try withOperation(for: id) { () -> (CaptureRecord, URL, FileHandle?) in
             guard let record = try db.queue.read({ try CaptureRecord.fetchOne($0, key: id) }),
-                  record.status != .trashed, record.status != .sweeping else { throw CocoaError(.fileNoSuchFile) }
+                  record.isLive else { throw CocoaError(.fileNoSuchFile) }
             let source = url(for: record)
             let file = try stagingURL(ext: source.pathExtension)
             do {
@@ -303,10 +317,17 @@ public final class Library: @unchecked Sendable {
         return (record, file)
     }
 
+    /// Where this build keeps a capture's pristine pixels: keyed by its id, so the file can be
+    /// nobody else's — unlike a legacy original, keyed by a visible path two captures could
+    /// have shared.
+    static func ownOriginalPath(id: String, ext: String) -> String {
+        ".originals/\(id).\(ext)"
+    }
+
     /// Reuse the sidecar's original across renames. Never infer absence from a read failure.
     func originalPath(for record: CaptureRecord) throws -> String {
         try Sidecar.readIfPresent(for: url(for: record))?.annotations?.original
-            ?? ".originals/\(record.id).\(url(for: record).pathExtension)"
+            ?? Library.ownOriginalPath(id: record.id, ext: url(for: record).pathExtension)
     }
 
     public func applyTrim(_ id: String, trimmedURL: URL, duration: Double) throws {
@@ -317,34 +338,30 @@ public final class Library: @unchecked Sendable {
                   record.status != .sweeping else { return }
             record.bytes = Library.byteSize(of: staged)
             record.durationS = duration
-            try replaceContent(record, staged: staged, layersJSON: "[]", op: "trim")
+            try replaceContent(record, staged: staged, layersJSON: "[]", op: .trim)
             try? removeIfPresent(trimmedURL)
         }
     }
 
     public func applyEdit(_ id: String, flattenedPNG: Data, layersJSON: String,
                           width: Int, height: Int) throws {
+        let staged = try stageData(flattenedPNG)   // off the lock, as in storeMovie
+        defer { removeUnjournaledStage(staged) }
         try withOperation(for: id) {
             guard var record = try db.queue.read({ try CaptureRecord.fetchOne($0, key: id) }),
                   record.status != .sweeping else { return }
-            let staged = try stageData(flattenedPNG)
-            defer { removeUnjournaledStage(staged) }
             record.bytes = flattenedPNG.count
             record.width = width; record.height = height
-            try replaceContent(record, staged: staged, layersJSON: layersJSON, op: "flatten")
+            try replaceContent(record, staged: staged, layersJSON: layersJSON, op: .flatten)
         }
     }
 
-    private func replaceContent(_ current: CaptureRecord, staged: URL, layersJSON: String, op: String) throws {
+    private func replaceContent(_ current: CaptureRecord, staged: URL, layersJSON: String,
+                                op: FileOperation.Op) throws {
         var record = current
-        var sidecar = try Sidecar.readIfPresent(for: url(for: record))
-            ?? Sidecar(id: record.id, created: record.createdAt, app: record.sourceApp, window: record.windowTitle)
+        var sidecar = try Sidecar.readIfPresent(for: url(for: record)) ?? Sidecar(for: record)
         sidecar.annotations = .init(original: try originalPath(for: record), layersJSON: layersJSON)
-        record.contentRevision += 1
-        record.contentHash = nil
-        record.shareStale = record.shareURL != nil
-        record.summary = nil
-        record.aiState = .none
+        record.markContentReplaced()
         try commit(FileOperation(op: op, source: rel(staged), record: record, sidecar: sidecar))
     }
 
@@ -377,7 +394,7 @@ public final class Library: @unchecked Sendable {
     public func discard(_ requested: CaptureRecord) throws {
         try withOperation(for: requested.id) {
             guard var record = try db.queue.read({ try CaptureRecord.fetchOne($0, key: requested.id) }),
-                  record.status != .trashed, record.status != .sweeping else { return }
+                  record.isLive else { return }
             let source = record.relPath
             let file = url(for: record)
             let shard = trashDir.appendingPathComponent((source as NSString).deletingLastPathComponent)
@@ -385,7 +402,7 @@ public final class Library: @unchecked Sendable {
             let target = try availableURL(in: shard, base: file.deletingPathExtension().lastPathComponent,
                                           ext: file.pathExtension)
             record.status = .trashed; record.trashedAt = Date(); record.relPath = rel(target)
-            try commit(FileOperation(op: "discard", source: source, record: record,
+            try commit(FileOperation(op: .discard, source: source, record: record,
                 sidecar: nil, originalRelPath: source))
         }
     }
@@ -416,7 +433,7 @@ public final class Library: @unchecked Sendable {
             let target = try availableURL(in: desired.deletingLastPathComponent(),
                 base: desired.deletingPathExtension().lastPathComponent, ext: desired.pathExtension)
             record.status = .kept; record.trashedAt = nil; record.relPath = rel(target)
-            try commit(FileOperation(op: "restore", source: source, record: record, sidecar: nil))
+            try commit(FileOperation(op: .restore, source: source, record: record, sidecar: nil))
             return try db.queue.read { try CaptureRecord.fetchOne($0, key: id) }
         }
     }
@@ -441,98 +458,98 @@ public final class Library: @unchecked Sendable {
             }
         } catch { Log.store.error("trash cleanup deferred: \(error)"); return }
 
-        var referents = OriginalReferents()
+        var referents: OriginalReferents?
         var undecided: [String] = []
         for record in expired {
+            // Decided before the lock: reading a sidecar — and, for a legacy original, every
+            // sidecar in the library — is the slow part, and none of it should hold up a Keep
+            // press. A restore that lands in between is caught by the checks under the lock,
+            // and the scan cannot go stale in a way that deletes anything: legacy references
+            // are only ever carried across moves, never created, so a stale map can at most
+            // keep a file it might have deleted.
+            let disposition = originalDisposition(for: record, referents: &referents)
+            if case .undecidable = disposition {
+                // Keep the row as well: its sidecar is what still names the original, and the
+                // next pass can decide once the sidecar it could not read is fixed.
+                undecided.append(record.id)
+                continue
+            }
             do {
                 // One capture per hold of the lock: a Keep press on the main thread waits out
                 // one capture's deletes, not the whole pass.
                 try withOperation(for: record.id) {
                     guard let current = try db.queue.read({ try CaptureRecord.fetchOne($0, key: record.id) }),
-                          current.status == .trashed || current.status == .sweeping else { return }   // restored meanwhile
-                    let file = url(for: current)
-                    // Everything that can refuse is decided before the row is marked, so
+                          !current.isLive, current.relPath == record.relPath else { return }   // restored meanwhile
+                    // Everything that can refuse was decided before the row is marked, so
                     // 'sweeping' always means deletion has begun — which is why restore
                     // refuses it. A row that could be marked and then fail to decide would
                     // be neither restorable nor sweepable.
-                    let original: URL?
-                    switch originalDisposition(for: current, file: file, referents: &referents) {
-                    case .none: original = nil
-                    case .delete(let url): original = url
-                    case .undecidable:
-                        // Keep the row as well: its sidecar is what still names the original,
-                        // and the next pass can decide once the sidecar it could not read is fixed.
-                        undecided.append(current.id)
-                        return
-                    }
                     try db.queue.write { d in
                         try d.execute(sql: "UPDATE captures SET status = 'sweeping' WHERE id = ?", arguments: [current.id])
                     }
-                    if let original { try remove(original) }
+                    if case .delete(let original) = disposition { try remove(original) }
+                    let file = url(for: current)
                     try remove(file)
                     try remove(Sidecar.url(for: file))
                     try remove(tombstoneURL(current.id))
                     try db.queue.write { d in
-                        try d.execute(sql: "DELETE FROM ingest_jobs WHERE captureId = ?", arguments: [current.id])
+                        try Library.cancelIngest(d, id: current.id)
                         try d.execute(sql: "DELETE FROM captures WHERE id = ?", arguments: [current.id])
                     }
                 }
             } catch { Log.store.error("trash cleanup will retry \(record.id): \(error)") }
         }
         if !undecided.isEmpty {
-            let unresolved = referents.unresolved.joined(separator: ", ")
+            let unresolved = (referents?.unresolved ?? []).joined(separator: ", ")
             Log.store.error("trash cleanup kept \(undecided.count) capture(s) whose legacy originals could not be vouched for; sidecars or plans unreadable for: \(unresolved, privacy: .public)")
         }
     }
 
     enum OriginalDisposition {
-        case none, delete(URL), undecidable
+        case keep, delete(URL), undecidable
     }
 
     /// What to do about a swept capture's pristine original. Anything unknowable keeps the
     /// file — a little disk is cheaper than someone else's pixels — and `.undecidable` keeps
     /// the row too, so the original stays named by a sidecar the next pass can read again.
-    private func originalDisposition(for record: CaptureRecord, file: URL,
-                                     referents: inout OriginalReferents) -> OriginalDisposition {
-        guard let original = Sidecar.read(for: file)?.annotations?.original else { return .none }
+    private func originalDisposition(for record: CaptureRecord,
+                                     referents: inout OriginalReferents?) -> OriginalDisposition {
+        let file = url(for: record)
+        guard let original = Sidecar.read(for: file)?.annotations?.original else { return .keep }
         guard let target = try? checkedOriginalURL(original) else {
             Log.store.error("sweep keeps an original outside .originals/ for \(record.id): \(original, privacy: .public)")
-            return .none
+            return .keep
         }
-        // Originals this build mints are keyed by capture id and cannot be anyone else's.
-        if Library.isOwnOriginal(original, id: record.id) { return .delete(target) }
+        if original == Library.ownOriginalPath(id: record.id, ext: file.pathExtension) { return .delete(target) }
+        // Already gone — an earlier sweep of a sibling took it — so nobody needs asking.
+        guard (try? itemExists(target)) == true else { return .keep }
         // Legacy originals are keyed by the visible path, which two captures can have shared.
-        switch referents.referenced(target, byAnyoneBut: record.id, in: self) {
-        case .some(true): return .none
+        let scan = referents ?? scanOriginalReferents()
+        referents = scan
+        switch scan.referenced(target, byAnyoneBut: record.id) {
+        case .some(true): return .keep
         case .some(false): return .delete(target)
         case .none: return .undecidable
         }
-    }
-
-    /// The `.originals/<id>.<ext>` shape `originalPath(for:)` produces.
-    static func isOwnOriginal(_ path: String, id: String) -> Bool {
-        let name = path as NSString
-        return name.deletingLastPathComponent == ".originals" && name.lastPathComponent.hasPrefix(id + ".")
     }
 
     /// Which `.originals/` files the rest of the library still points at, built once per sweep
     /// and only if a legacy original comes up. Any sidecar or plan that cannot be read makes
     /// the answer unknowable for the pass — it could have named any of them.
     struct OriginalReferents {
-        private var refs: [URL: Set<String>]?
+        let refs: [URL: Set<String>]
         /// Capture ids whose sidecar or plan could not be read or did not point inside
         /// `.originals/`. Non-empty means no legacy original can be vouched for this pass.
-        private(set) var unresolved: [String] = []
+        let unresolved: [String]
 
         /// nil when unknowable.
-        mutating func referenced(_ target: URL, byAnyoneBut id: String, in library: Library) -> Bool? {
-            if refs == nil { (refs, unresolved) = library.scanOriginalReferents() }
+        func referenced(_ target: URL, byAnyoneBut id: String) -> Bool? {
             guard unresolved.isEmpty else { return nil }
-            return refs![target, default: []].subtracting([id]).isEmpty == false
+            return !refs[target, default: []].subtracting([id]).isEmpty
         }
     }
 
-    private func scanOriginalReferents() -> (refs: [URL: Set<String>], unresolved: [String]) {
+    private func scanOriginalReferents() -> OriginalReferents {
         var refs: [URL: Set<String>] = [:]
         var unresolved: [String] = []
         func note(_ path: String?, from id: String) {
@@ -558,14 +575,6 @@ public final class Library: @unchecked Sendable {
                 for rel in Set([plan.source, plan.record.relPath]) { note(sidecarAt: rel, from: id) }
             }
         } catch { unresolved.append("(database: \(error))") }
-        return (refs, unresolved)
-    }
-}
-
-/// Thrown by `Library(exclusive:)` when another process already holds the root.
-public struct LibraryBusy: LocalizedError {
-    public let root: URL
-    public var errorDescription: String? {
-        "The library at \(root.path) is open in another Kapture process"
+        return OriginalReferents(refs: refs, unresolved: unresolved)
     }
 }

@@ -7,7 +7,22 @@ import AVFoundation
 /// plan is safe whether the crash happened before the move, during metadata writes, or before
 /// the SQLite commit. Incoming bytes are staged on the library's own filesystem.
 struct FileOperation: Codable {
-    var op: String
+    /// Encoded as its raw string, so plans and journal rows written by earlier builds decode.
+    enum Op: String, Codable {
+        case write, rename, discard, restore, flatten, trim
+
+        /// Flatten and trim swap the pixels under an existing path.
+        var replacesContent: Bool { self == .flatten || self == .trim }
+        /// A move carries the sidecar's bytes verbatim; everything else writes a fresh one.
+        var movesSidecar: Bool { self == .rename || self == .discard || self == .restore }
+        /// The name in the search index follows the file for these.
+        var changesName: Bool { self == .write || self == .rename || self == .restore }
+        /// A discard's end state — row trashed, file gone — is reachable without the file, and
+        /// is what the user asked for. Nothing else has anything to operate on without it.
+        var completesWithoutFile: Bool { self == .discard }
+    }
+
+    var op: Op
     var source: String
     var record: CaptureRecord
     var sidecar: Sidecar?
@@ -67,18 +82,26 @@ extension Library {
         return url
     }
 
+    /// Make the plan durable. Separate from carrying it out so a test can leave a plan
+    /// journaled but unfinished — the state a crash leaves behind — without a second copy of
+    /// this statement.
+    @discardableResult
+    func journal(_ plan: FileOperation) throws -> Int64 {
+        let data = try JSONEncoder().encode(plan)
+        return try db.queue.write { d in
+            try d.execute(sql: """
+                INSERT INTO op_journal (op, captureId, src, dst, startedAt, plan) VALUES (?, ?, ?, ?, ?, ?)
+                """, arguments: [plan.op.rawValue, plan.record.id, plan.source, plan.record.relPath, Date(), data])
+            return d.lastInsertedRowID
+        }
+    }
+
     /// Journal the plan, then carry it out. Every caller that staged bytes owns their cleanup
     /// (a `defer` around the stage), so nothing is repeated here. A failure after the journal
     /// row exists is recorded on it the same way a failed replay would be, so the entry backs
     /// off or is quarantined exactly as if the crash had come a moment later.
     func commit(_ plan: FileOperation) throws {
-        let data = try JSONEncoder().encode(plan)
-        let journalID = try db.queue.write { d in
-            try d.execute(sql: """
-                INSERT INTO op_journal (op, captureId, src, dst, startedAt, plan) VALUES (?, ?, ?, ?, ?, ?)
-                """, arguments: [plan.op, plan.record.id, plan.source, plan.record.relPath, Date(), data])
-            return d.lastInsertedRowID
-        }
+        let journalID = try journal(plan)
         do { try finish(plan, journalID: journalID, replay: false) }
         catch {
             try? recordReplayFailure(error, journalID: journalID, attempts: 0)
@@ -111,17 +134,14 @@ extension Library {
         }
     }
 
-    /// How long a transient failure waits before the next try. The first failure waits for
-    /// nothing — the caller has its error, and the next operation or relaunch simply tries
-    /// again — then doubling from two seconds, capped at an hour. It never gives up, transient
-    /// meaning it will resolve, and while it waits the capture stays blocked so nothing
-    /// overtakes the half-finished operation.
+    /// Never gives up — transient means it will resolve — and the capture stays blocked while
+    /// it waits, so nothing overtakes the half-finished operation.
     static func recoveryBackoff(attempts: Int) -> TimeInterval {
         attempts == 0 ? 0 : min(3600, pow(2, Double(min(attempts, 12))))
     }
 
-    /// Testable separately from launch; the operation lock also prevents a later edit/rename
-    /// from overtaking an operation whose filesystem half succeeded but whose commit failed.
+    /// Replay every due journal entry. Runs ahead of every operation, so a plan whose commit
+    /// failed cannot be overtaken by a later edit or rename of the same capture.
     public func recoverPendingOperations() throws {
         db.operationLock.lock(); defer { db.operationLock.unlock() }
         let rows = try db.queue.read { d in
@@ -154,6 +174,8 @@ extension Library {
         }
     }
 
+    /// `recoveryError` set means quarantined — a human's turn; `lastError` is the most recent
+    /// transient failure, and what the block reports while it waits.
     private func recordReplayFailure(_ error: Error, journalID: Int64, attempts: Int) throws {
         let message = String(describing: error)
         if error is FileVanished {
@@ -163,8 +185,8 @@ extension Library {
             Log.store.error("abandoned journal entry \(journalID): \(message)")
         } else if Library.isPermanentRecoveryFailure(error) {
             try db.queue.write { d in
-                try d.execute(sql: "UPDATE op_journal SET recoveryError = ?, lastError = ? WHERE id = ?",
-                              arguments: [message, message, journalID])
+                try d.execute(sql: "UPDATE op_journal SET recoveryError = ? WHERE id = ?",
+                              arguments: [message, journalID])
             }
             Log.store.error("quarantined journal entry \(journalID): \(message)")
         } else {
@@ -206,9 +228,6 @@ extension Library {
         }
         try recoverPendingOperations()
         try requireRecovered(id)
-        try db.queue.write { d in
-            try d.execute(sql: "UPDATE ingest_jobs SET notBefore = ? WHERE captureId = ?", arguments: [Date(), id])
-        }
     }
 
     // MARK: - Staging
@@ -225,10 +244,11 @@ extension Library {
         } catch { Log.store.error("staging cleanup deferred: \(error)") }
     }
 
-    /// Called only at startup. Live share snapshots and pre-journal staging files cannot exist
-    /// yet — `Library(exclusive:)` is what guarantees no other process is mid-operation on
-    /// this root.
+    /// Called at startup. Only an instance that holds the root's lock may do this: a stage is
+    /// copied before it is journaled and a share snapshot is never journaled, so another
+    /// process mid-operation would find its bytes gone.
     func cleanOrphanedStages() {
+        guard holdsRootLock else { return }
         db.operationLock.lock(); defer { db.operationLock.unlock() }
         let dir = root.appendingPathComponent(".pending")
         guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { return }
@@ -257,12 +277,11 @@ extension Library {
         let fm = FileManager.default
         let source = root.appendingPathComponent(plan.source)
         let target = url(for: plan.record)
-        let replacing = plan.op == "flatten" || plan.op == "trim"
         // Before anything lands there — the file, but also a sidecar or tombstone for a discard
         // whose file is already gone, on a first launch where .trash/ has never been made.
         try fm.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
         if source != target, try itemExists(source) {
-            if replacing {
+            if plan.op.replacesContent {
                 if let original = plan.sidecar?.annotations?.original {
                     let originalURL = try checkedOriginalURL(original)
                     if !(try itemExists(originalURL)) {
@@ -281,34 +300,35 @@ extension Library {
                 try fm.moveItem(at: source, to: target)
             }
         }
-        if !(try itemExists(target)) {
-            // A discard's end state — row trashed, file gone — is reachable without the file,
-            // and is what the user asked for. Anything else has nothing left to operate on.
-            guard plan.op == "discard" else {
-                throw FileVanished(path: plan.op == "write" ? plan.record.relPath : plan.source)
-            }
+        if !(try itemExists(target)), !plan.op.completesWithoutFile {
+            throw FileVanished(path: plan.op == .write ? plan.record.relPath : plan.source)
         }
-        if ["discard", "restore", "rename"].contains(plan.op) {
+        if plan.op.movesSidecar {
             try moveSidecar(from: source, to: target, fallback: plan.sidecar)
         } else {
             try plan.sidecar?.write(next: target)
         }
-        if plan.op == "discard", let original = plan.originalRelPath {
-            let tomb = Tombstone(id: plan.record.id, originalRelPath: original,
-                                 trashedAt: plan.record.trashedAt ?? Date())
-            let enc = JSONEncoder(); enc.dateEncodingStrategy = .iso8601
-            try enc.encode(tomb).write(to: tombstoneURL(plan.record.id), options: .atomic)
-        } else if plan.op == "restore" {
+        switch plan.op {
+        case .discard:
+            if let original = plan.originalRelPath {
+                let tomb = Tombstone(id: plan.record.id, originalRelPath: original,
+                                     trashedAt: plan.record.trashedAt ?? Date())
+                let enc = JSONEncoder(); enc.dateEncodingStrategy = .iso8601
+                try enc.encode(tomb).write(to: tombstoneURL(plan.record.id), options: .atomic)
+            }
+        case .restore:
             try removeIfPresent(tombstoneURL(plan.record.id))
+        default:
+            break
         }
         var record = plan.record
         record.fastID = Library.fastID(of: target)
         record.bytes = Library.byteSize(of: target)
         try db.queue.write { d in
             try record.save(d)
-            try Library.indexText(d, id: record.id, name: ["write", "rename", "restore"].contains(plan.op) ? target.lastPathComponent : nil,
-                                  summary: plan.op == "rename" ? record.summary : nil, tags: plan.tags)
-            if replacing {
+            try Library.indexText(d, id: record.id, name: plan.op.changesName ? target.lastPathComponent : nil,
+                                  summary: plan.op == .rename ? record.summary : nil, tags: plan.tags)
+            if plan.op.replacesContent {
                 try d.execute(sql: "UPDATE fts_source SET ocr = '', summary = '', tags = '' WHERE captureId = ?",
                               arguments: [record.id])
                 if record.canAnnotate || record.kind == .gif {
@@ -316,11 +336,11 @@ extension Library {
                 }
             }
             if record.status == .trashed {
-                try d.execute(sql: "DELETE FROM ingest_jobs WHERE captureId = ?", arguments: [record.id])
+                try Library.cancelIngest(d, id: record.id)
             } else if replay {
                 // A write finished here never reached the caller that would have enqueued its
                 // OCR; a first-run write leaves that to the caller and its debounce.
-                if plan.op == "write", record.canAnnotate || record.kind == .gif {
+                if plan.op == .write, record.canAnnotate || record.kind == .gif {
                     try Library.enqueueIngest(d, record: record, notBefore: Date())
                 }
                 // This capture's jobs were hidden while its entry existed, and the drain loop
@@ -335,7 +355,7 @@ extension Library {
             let recovered = record
             Task.detached(priority: .utility) { await self.refreshMovieMetadata(recovered) }
         }
-        Log.store.info("completed \(plan.op, privacy: .public) for \(record.relPath, privacy: .public)")
+        Log.store.info("completed \(plan.op.rawValue, privacy: .public) for \(record.relPath, privacy: .public)")
     }
 
     /// Old builds journaled only paths. Recover completed moves and reconstruct orphaned writes
@@ -346,9 +366,10 @@ extension Library {
     /// would otherwise read as a move that already happened.
     private func legacyPlan(_ row: Row) throws -> FileOperation? {
         let id: String = row["captureId"]
-        let op: String = row["op"]
+        let opName: String = row["op"]
+        guard let op = FileOperation.Op(rawValue: opName),
+              let dst: String = row["dst"] else { throw CocoaError(.fileReadCorruptFile) }
         let src: String? = row["src"]
-        guard let dst: String = row["dst"] else { throw CocoaError(.fileReadCorruptFile) }
         let target = root.appendingPathComponent(dst)
         let existing = try db.queue.read { try CaptureRecord.fetchOne($0, key: id) }
         if let existing, existing.relPath != src, existing.relPath != dst,
@@ -357,7 +378,7 @@ extension Library {
         }
         if let src, src != dst, try itemExists(root.appendingPathComponent(src)) {
             // Restore in old builds flipped status before doing the move.
-            if op == "restore" {
+            if op == .restore {
                 try db.queue.write { d in
                     try d.execute(sql: "UPDATE captures SET status = 'trashed', trashedAt = COALESCE(trashedAt, ?) WHERE id = ?",
                                   arguments: [Date(), id])
@@ -367,9 +388,8 @@ extension Library {
         }
         if !(try itemExists(target)) {
             guard let existing else { return nil } // write never reached disk
-            // A discard can finish without its file; nothing else has anything to operate on.
-            guard op == "discard" else { throw FileVanished(path: existing.relPath) }
-        } else if ["flatten", "trim"].contains(op), src == dst,
+            guard op.completesWithoutFile else { throw FileVanished(path: existing.relPath) }
+        } else if op.replacesContent, src == dst,
                   let existing, existing.fastID == Library.fastID(of: target) {
             return nil // the old file operation failed before replacing any pixels
         }
@@ -385,23 +405,20 @@ extension Library {
             bytes: Library.byteSize(of: target), relPath: dst, sourceApp: sidecar?.source?.app,
             windowTitle: sidecar?.source?.window, fastID: Library.fastID(of: target))
         record.relPath = dst
-        if op == "discard" { record.status = .trashed; record.trashedAt = row["startedAt"] }
-        if op == "restore" { record.status = .kept; record.trashedAt = nil }
-        if existing == nil || op == "flatten" || op == "trim" {
+        if op == .discard { record.status = .trashed; record.trashedAt = row["startedAt"] }
+        if op == .restore { record.status = .kept; record.trashedAt = nil }
+        if existing == nil || op.replacesContent {
             if let image = CGImageSourceCreateWithURL(target as CFURL, nil),
                let props = CGImageSourceCopyPropertiesAtIndex(image, 0, nil) as? [CFString: Any] {
                 record.width = props[kCGImagePropertyPixelWidth] as? Int ?? record.width
                 record.height = props[kCGImagePropertyPixelHeight] as? Int ?? record.height
             }
         }
-        if op == "flatten" || op == "trim" {
-            record.contentRevision += 1; record.contentHash = nil
-            record.summary = nil; record.shareStale = record.shareURL != nil; record.aiState = .none
-        }
+        if op.replacesContent { record.markContentReplaced() }
         return FileOperation(op: op, source: src ?? dst, record: record,
-            sidecar: sidecar ?? Sidecar(id: id, created: record.createdAt, app: record.sourceApp, window: record.windowTitle),
-            originalRelPath: op == "discard" ? src : nil,
-            probeMovieMetadata: record.kind == .recording && (existing == nil || op == "trim"))
+            sidecar: sidecar ?? Sidecar(for: record),
+            originalRelPath: op == .discard ? src : nil,
+            probeMovieMetadata: record.kind == .recording && (existing == nil || op == .trim))
     }
 
     func checkedOriginalURL(_ path: String) throws -> URL {
