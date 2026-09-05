@@ -1,7 +1,10 @@
 // Pieces the public routes and the admin dashboard both need. Kept apart so neither file has to
 // import the other, and so there is exactly one definition of how a token is checked.
 
+import type { QuotaCounter } from "./quota";
+
 export interface Env {
+  QUOTA_COUNTERS: DurableObjectNamespace<QuotaCounter>;
   BUCKET: R2Bucket;
   QUOTAS: KVNamespace;
   /**

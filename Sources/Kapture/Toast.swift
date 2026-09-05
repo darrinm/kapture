@@ -11,6 +11,12 @@ enum Toast {
     /// order out the one that replaced it partway through the animation.
     private static var generation = 0
 
+    /// An action that failed, in the error's own words. `RecoveryBlocked`, `FileVanished` and
+    /// `LibraryBusy` each describe themselves; anything else at least says what was tried.
+    static func show(_ error: Error, while action: String) {
+        show("\(action) failed — \(error.localizedDescription)")
+    }
+
     static func show(_ message: String) {
         let label = NSTextField(labelWithString: message)
         label.font = .systemFont(ofSize: 13, weight: .medium)

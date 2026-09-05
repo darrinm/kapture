@@ -97,8 +97,8 @@ used for naming. Nothing about them leaves the Keychain: iCloud Keychain is end-
 and the server only ever holds a hash of the token. If you would rather a Mac not have them,
 signing that Mac out of iCloud Keychain is what stops it.
 
-The server is a single Cloudflare Worker plus an R2 bucket — about 300 lines, in
-[`worker/`](worker/). The author runs one at `kapture.sh`; you can deploy your own in a few
+The server is a Cloudflare Worker with R2 storage, KV for credentials, and Durable Objects
+for atomic upload quotas, in [`worker/`](worker/). The author runs one at `kapture.sh`; you can deploy your own in a few
 minutes and point Kapture at it (Settings › Sharing reads the endpoint from the
 `shareEndpoint` default). See [`worker/README.md`](worker/README.md) for the deploy steps and
 the security posture: tokens are stored only as hashes, uploads are limited to an allowlist of

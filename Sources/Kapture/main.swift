@@ -15,7 +15,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     func applicationDidFinishLaunching(_ notification: Notification) {
         do {
             let db = try KaptureCore.Database()
-            let library = try Library(db: db)
+            let library = try Library(db: db, exclusive: true)
             CaptureCoordinator.shared.library = library
             OverlayController.shared.library = library
             EditorController.shared.library = library
@@ -28,14 +28,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             }
             EditorController.shared.onFlattened = { id in
                 OverlayController.shared.showCard(recordID: id)
-                // re-read the edited pixels: applyEdit dropped the old text, and what the
-                // capture says now may differ from what it said before it was annotated
-                Task { await IngestQueue.shared.enqueue(id, after: 0) }
             }
+            EditorController.shared.onSaveFailed = { _, error in Toast.show(error, while: "Saving the edit") }
             EditorController.shared.onWindowOpened = { ActivationPolicy.acquire() }
             EditorController.shared.onWindowClosed = { ActivationPolicy.release() }
         } catch {
             Log.shell.error("store init failed: \(error)")
+            // Without a library every capture is dropped on the floor. That cannot be silent —
+            // least of all for "another Kapture already has it open", which is the one the user
+            // can fix.
+            NSApp.activate(ignoringOtherApps: true)
+            let alert = NSAlert()
+            alert.messageText = "Kapture can't open its library"
+            alert.informativeText = error.localizedDescription
+            alert.runModal()
         }
 
         // Only warm the content cache once permission exists — an unauthorized SCShareableContent
@@ -211,8 +217,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     @objc private func menuCheckForUpdates() { UpdaterController.shared.checkForUpdates() }
     @objc private func menuPinClipboard() { PinController.shared.pinFromClipboard() }
     @objc private func menuRestore() {
-        guard let library = CaptureCoordinator.shared.library,
-              let restored = try? library.restoreLastDiscarded() else { return }
+        guard let library = CaptureCoordinator.shared.library else { return }
+        let restored: CaptureRecord?
+        do { restored = try library.restoreLastDiscarded() }
+        catch { Toast.show(error, while: "Restore"); return }
+        guard let restored else { return }
         Sounds.play("Pop")
         // discard cancelled its ingest job; an unnamed capture needs another pass
         if restored.aiState.acceptsName {

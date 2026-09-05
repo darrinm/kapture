@@ -24,11 +24,25 @@ public struct Sidecar: Codable {
         self.source = Source(app: app, window: window)
     }
 
+    /// The sidecar a capture gets when it has none: identity and provenance, nothing else yet.
+    public init(for record: CaptureRecord) {
+        self.init(id: record.id, created: record.createdAt, app: record.sourceApp, window: record.windowTitle)
+    }
+
     public static func read(for fileURL: URL) -> Sidecar? {
         let dec = JSONDecoder()
         dec.dateDecodingStrategy = .iso8601
         guard let data = try? Data(contentsOf: url(for: fileURL)) else { return nil }
         return try? dec.decode(Sidecar.self, from: data)
+    }
+
+    /// Mutation paths must distinguish a missing sidecar from one we cannot safely interpret.
+    public static func readIfPresent(for fileURL: URL) throws -> Sidecar? {
+        let data: Data
+        do { data = try Data(contentsOf: url(for: fileURL)) }
+        catch let error as CocoaError where error.code == .fileNoSuchFile || error.code == .fileReadNoSuchFile { return nil }
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(Sidecar.self, from: data)
     }
 
     public static func url(for fileURL: URL) -> URL {

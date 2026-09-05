@@ -43,6 +43,7 @@ public struct CaptureRecord: Codable, Sendable, FetchableRecord, PersistableReco
     public var windowTitle: String?
     public var screenID: Int?
     public var fastID: String        // "size:mtimeNs:inode" — primary identity (spec §2.2 F11)
+    public var contentRevision: Int64 = 0
     public var contentHash: String?  // lazy SHA-256
     public var aiState: AIState
     public var summary: String?
@@ -73,6 +74,19 @@ public struct CaptureRecord: Codable, Sendable, FetchableRecord, PersistableReco
     public var canAnnotate: Bool { kind == .screenshot }
     /// GIF export reads a movie; a GIF is already one.
     public var canExportGIF: Bool { kind == .recording }
+    /// Neither in the trash nor being swept: the states an operation may act on.
+    public var isLive: Bool { status != .trashed && status != .sweeping }
+
+    /// What replacing the pixels invalidates: their identity, any share of them, and everything
+    /// the AI concluded from the old ones. The search index is cleared alongside, by the
+    /// operation that commits this.
+    public mutating func markContentReplaced() {
+        contentRevision += 1
+        contentHash = nil
+        shareStale = shareURL != nil
+        summary = nil
+        aiState = .none
+    }
 }
 
 /// Crockford-base32 ULID: sortable, unique, no deps.

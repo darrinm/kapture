@@ -103,7 +103,9 @@ final class TrimmerController {
             window.close()
             OverlayController.shared.showCard(recordID: recordID)
         } catch {
+            // The window stays open with the range intact; the user just needs to know why.
             Log.capture.error("trimmer: export failed: \(error)")
+            Toast.show(error, while: "Trim")
         }
     }
 
