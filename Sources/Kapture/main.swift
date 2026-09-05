@@ -29,10 +29,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             EditorController.shared.onFlattened = { id in
                 OverlayController.shared.showCard(recordID: id)
             }
+            EditorController.shared.onSaveFailed = { _, error in
+                Toast.show("Couldn't save the edit — \(error.localizedDescription)")
+            }
             EditorController.shared.onWindowOpened = { ActivationPolicy.acquire() }
             EditorController.shared.onWindowClosed = { ActivationPolicy.release() }
         } catch {
             Log.shell.error("store init failed: \(error)")
+            // Without a library every capture is dropped on the floor. That cannot be silent —
+            // least of all for "another Kapture already has it open", which is the one the user
+            // can fix.
+            NSApp.activate(ignoringOtherApps: true)
+            let alert = NSAlert()
+            alert.messageText = "Kapture can't open its library"
+            alert.informativeText = error.localizedDescription
+            alert.runModal()
         }
 
         // Only warm the content cache once permission exists — an unauthorized SCShareableContent

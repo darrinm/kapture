@@ -209,30 +209,105 @@ final class RecoveryTests: XCTestCase {
         }
     }
 
-    func testFinderDeletedCaptureDoesNotBlockOperationsOrRestart() throws {
+    func testFinderDeletedCaptureCanStillBeDiscardedAndSwept() throws {
         for restartFirst in [false, true] {
             let (lib, dir) = try library()
             defer { try? FileManager.default.removeItem(at: dir) }
             let missing = try shot(lib)
             try FileManager.default.removeItem(at: lib.url(for: missing))
-            XCTAssertThrowsError(try lib.discard(missing))
-
             let usable = restartFirst ? try reopen(lib) : lib
-            let unrelated = try shot(usable)
-            try usable.discard(unrelated)
-            XCTAssertNotNil(try usable.restore(id: unrelated.id))
-            let reopened = try reopen(usable)
-            XCTAssertNotNil(try shot(reopened))
-            // Keep the failed plan and the old sidecar, but never replay it automatically.
-            let errors = try reopened.db.queue.read { d in
-                try String.fetchAll(d, sql: "SELECT recoveryError FROM op_journal WHERE captureId = ?",
-                                    arguments: [missing.id])
-            }
-            XCTAssertEqual(errors.count, 1)
-            XCTAssertFalse(errors[0].isEmpty)
-            XCTAssertNotNil(Sidecar.read(for: lib.url(for: missing)))
-            XCTAssertEqual(try record(reopened, missing.id).relPath, missing.relPath)
+            // The end state the user asked for — row trashed, file gone — needs no file.
+            XCTAssertNoThrow(try usable.discard(missing))
+            XCTAssertEqual(try record(usable, missing.id).status, .trashed)
+            XCTAssertEqual(try usable.db.queue.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM op_journal") }, 0)
+            // Restoring it is the honest failure: said once, and the capture is not parked.
+            XCTAssertThrowsError(try usable.restore(id: missing.id)) { XCTAssertTrue($0 is FileVanished, "\($0)") }
+            XCTAssertEqual(try record(usable, missing.id).status, .trashed)
+            XCTAssertEqual(try usable.db.queue.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM op_journal") }, 0)
+            XCTAssertNoThrow(try usable.setStatus(missing.id, .trashed))
+            usable.sweepTrash(olderThanDays: -1)
+            XCTAssertNil(try usable.db.queue.read { try CaptureRecord.fetchOne($0, key: missing.id) })
+            XCTAssertNoThrow(try shot(try reopen(usable)))
         }
+    }
+
+    func testARowLeftByADeletedFileDoesNotClaimTheNextCapturesName() throws {
+        let (lib, dir) = try library()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let first = try shot(lib), other = try shot(lib)
+        XCTAssertTrue(lib.applyName(first.id, baseName: "ghost", tags: [], summary: "", aiState: .namedLocal))
+        let ghost = try record(lib, first.id)
+        try FileManager.default.removeItem(at: lib.url(for: ghost))
+        try FileManager.default.removeItem(at: Sidecar.url(for: lib.url(for: ghost)))
+        // Same directory, same name: the filesystem says free, the row says taken.
+        XCTAssertTrue(lib.applyName(other.id, baseName: "ghost", tags: [], summary: "", aiState: .namedLocal))
+        let renamed = try record(lib, other.id)
+        XCTAssertNotEqual(renamed.relPath, ghost.relPath)
+        XCTAssertTrue(renamed.relPath.hasSuffix("ghost-2.png"), renamed.relPath)
+        XCTAssertEqual(try lib.db.queue.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM op_journal") }, 0)
+    }
+
+    func testAUniqueConstraintOnReplayIsQuarantinedNotRetriedForever() throws {
+        let (lib, dir) = try library()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let ghost = try shot(lib)
+        var other = try shot(lib)
+        try FileManager.default.removeItem(at: lib.url(for: ghost))
+        // A plan that bypassed availableURL, as an older build's could have.
+        let source = other.relPath
+        other.relPath = ghost.relPath
+        try journal(lib, FileOperation(op: "rename", source: source, record: other, sidecar: nil))
+        let reopened = try reopen(lib)
+        XCTAssertNotNil(try reopened.db.queue.read { try String.fetchOne($0, sql: "SELECT recoveryError FROM op_journal") })
+        XCTAssertThrowsError(try reopened.setStatus(other.id, .kept)) {
+            XCTAssertEqual(($0 as? RecoveryBlocked)?.quarantined, true)
+        }
+    }
+
+    func testFinishingAReplayPullsTheCapturesIngestJobForward() throws {
+        let (lib, dir) = try library()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        var capture = try shot(lib)
+        try lib.enqueueIngest(capture.id, notBefore: Date().addingTimeInterval(3600))
+        let lockedDir = lib.root.appendingPathComponent("locked")
+        try FileManager.default.createDirectory(at: lockedDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: lockedDir.path) }
+        let source = capture.relPath
+        capture.relPath = lib.rel(lockedDir.appendingPathComponent("capture.png"))
+        try journal(lib, FileOperation(op: "rename", source: source, record: capture, sidecar: nil))
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: lockedDir.path)
+        let reopened = try reopen(lib)
+        XCTAssertNil(try reopened.nextIngestJob(), "hidden while the capture is blocked")
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: lockedDir.path)
+        try reopened.db.queue.write { try $0.execute(sql: "UPDATE op_journal SET nextAttemptAt = NULL") }
+        XCTAssertNoThrow(try shot(reopened))   // any operation replays it
+        // The drain loop may have gone to sleep with nothing to wait for; the job it could not
+        // see is due now, not in an hour.
+        XCTAssertEqual(try reopened.nextIngestJob()?.captureId, capture.id)
+    }
+
+    func testSweepKeepsALegacyOriginalAndItsRowWhileAnotherSidecarIsUnreadable() throws {
+        let (lib, dir) = try library()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let legacy = try shot(lib), bystander = try shot(lib)
+        let shared = lib.root.appendingPathComponent(".originals/2026/09/legacy-name.png")
+        try FileManager.default.createDirectory(at: shared.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data([1, 2, 3]).write(to: shared)
+        var sidecar = try XCTUnwrap(Sidecar.read(for: lib.url(for: legacy)))
+        sidecar.annotations = .init(original: lib.rel(shared), layersJSON: "[]")
+        try sidecar.write(next: lib.url(for: legacy))
+        let bystanderSidecar = Sidecar.url(for: lib.url(for: bystander))
+        let good = try Data(contentsOf: bystanderSidecar)
+        try Data("not json".utf8).write(to: bystanderSidecar)
+        try lib.discard(legacy)
+        lib.sweepTrash(olderThanDays: -1)
+        // Undecidable: nothing deleted, and the row stays so its sidecar still names the original.
+        XCTAssertEqual(try record(lib, legacy.id).status, .trashed)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: shared.path))
+        try good.write(to: bystanderSidecar)
+        lib.sweepTrash(olderThanDays: -1)
+        XCTAssertNil(try lib.db.queue.read { try CaptureRecord.fetchOne($0, key: legacy.id) })
+        XCTAssertFalse(FileManager.default.fileExists(atPath: shared.path))
     }
 
     func testRecoveryContinuesPastMissingLegacyEntryAndCorruptPlan() throws {
@@ -251,9 +326,11 @@ final class RecoveryTests: XCTestCase {
         try journal(lib, FileOperation(op: "write", source: lib.rel(staged), record: pending, sidecar: nil))
         let reopened = try reopen(lib)
         XCTAssertEqual(try Data(contentsOf: reopened.url(for: record(reopened, pending.id))), Data([9]))
+        // The legacy discard finished without its file; only the corrupt plan needs a human.
+        XCTAssertEqual(try record(reopened, missing.id).status, .trashed)
         XCTAssertEqual(try reopened.db.queue.read {
             try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM op_journal WHERE recoveryError IS NOT NULL")
-        }, 2)
+        }, 1)
         XCTAssertEqual(try reopened.db.queue.read {
             try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM op_journal WHERE recoveryError IS NULL")
         }, 0)
@@ -276,6 +353,8 @@ final class RecoveryTests: XCTestCase {
             try reopened.recoverPendingOperations()
             XCTAssertEqual(reopened.search().count, 1)
             XCTAssertEqual(try lib.db.queue.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM op_journal") }, 0)
+            // The caller that would have enqueued OCR never returned; recovery owes it one.
+            XCTAssertEqual(try reopened.nextIngestJob()?.captureId, pending.id)
         }
     }
 

@@ -51,8 +51,17 @@ final class ShareCoordinator {
                     filename: (snapshot.record.relPath as NSString).lastPathComponent)
                 // an open library picks the new link up from the write itself — see
                 // `Library.observeCaptures`; it used to have to be told from here
-                let current = try library.setShareLink(id, url: link.url.absoluteString,
+                let current: Bool
+                do {
+                    current = try library.setShareLink(id, url: link.url.absoluteString,
                                                        revision: snapshot.record.contentRevision)
+                } catch {
+                    // The row refused the link (its file operation is still settling), so
+                    // nothing local remembers it and nothing could revoke it later. Take it
+                    // back down now rather than leave it charged against the quota, unlisted.
+                    try? await ShareService.delete(id: link.url.lastPathComponent)
+                    throw error
+                }
                 guard current else {
                     Toast.show("Capture changed while uploading — share again to upload the latest version")
                     onFinish?(nil)
@@ -79,14 +88,18 @@ final class ShareCoordinator {
         else { return }
         let id = record.id
         Task {
+            // Forget it locally first. A capture whose file operation is still settling refuses
+            // the write, and that has to stop us *before* the server forgets a link this row
+            // would otherwise go on offering as current — a 404 on the clipboard.
+            do { _ = try library.setShareLink(id, url: nil) }
+            catch { Toast.show(error.localizedDescription); return }
             do {
                 try await ShareService.delete(id: shareID)
-                _ = try? library.setShareLink(id, url: nil)
                 Toast.show("Link deleted")
-            } catch let failure as ShareFailure {
-                Toast.show(failure.description)
             } catch {
-                Toast.show("Could not delete the link")
+                // Still live on the server, so the row has to keep knowing about it.
+                _ = try? library.setShareLink(id, url: existing, revision: record.contentRevision)
+                Toast.show((error as? ShareFailure)?.description ?? "Could not delete the link")
             }
         }
     }

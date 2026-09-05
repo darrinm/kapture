@@ -37,11 +37,23 @@ public final class Library: @unchecked Sendable {
         cleanOrphanedStages()
     }
 
-    private static func lock(_ root: URL) throws -> FileHandle {
+    /// nil when the filesystem cannot lock at all. The lock is a safety net for a root two
+    /// processes might share, not a reason a root that works for everything else should fail.
+    private static func lock(_ root: URL) throws -> FileHandle? {
         let fd = open(root.appendingPathComponent(".lock").path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
-        guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-        guard flock(fd, LOCK_EX | LOCK_NB) == 0 else {
+        guard fd >= 0 else {
+            Log.store.error("library lock unavailable (open failed, errno \(errno)); running without it")
+            return nil
+        }
+        if flock(fd, LOCK_EX | LOCK_NB) != 0 {
+            let reason = errno
             close(fd)
+            // Only "someone else holds it" is a refusal. ENOTSUP and its relatives mean the
+            // volume cannot answer the question, which is not the same as answering "busy".
+            guard reason == EWOULDBLOCK else {
+                Log.store.error("library lock unavailable (flock failed, errno \(reason)); running without it")
+                return nil
+            }
             throw LibraryBusy(root: root)
         }
         return FileHandle(fileDescriptor: fd, closeOnDealloc: true)
@@ -118,6 +130,27 @@ public final class Library: @unchecked Sendable {
         return url
     }
 
+    /// `uniqueURL` that also steers clear of a path a row still holds. A file deleted in Finder
+    /// leaves its row behind, and a new capture landing on that path would trip the relPath
+    /// UNIQUE constraint at commit — after its file had already moved there.
+    func availableURL(in dir: URL, base: String, ext: String) throws -> URL {
+        func taken(_ url: URL) throws -> Bool {
+            try FileManager.default.fileExists(atPath: url.path)
+                || FileManager.default.fileExists(atPath: Sidecar.url(for: url).path)
+                || db.queue.read { d in
+                    try Bool.fetchOne(d, sql: "SELECT EXISTS(SELECT 1 FROM captures WHERE relPath = ?)",
+                                      arguments: [rel(url)]) ?? false
+                }
+        }
+        var url = dir.appendingPathComponent(base).appendingPathExtension(ext)
+        var n = 2
+        while try taken(url) {
+            url = dir.appendingPathComponent("\(base)-\(n)").appendingPathExtension(ext)
+            n += 1
+        }
+        return url
+    }
+
     /// Path of `url` relative to the library root — the one place that owns this string surgery.
     func rel(_ url: URL) -> String {
         url.path.replacingOccurrences(of: root.path + "/", with: "")
@@ -162,15 +195,17 @@ public final class Library: @unchecked Sendable {
     public func storeMovie(from tempURL: URL, width: Int, height: Int, duration: Double,
                            sourceApp: String?, ext: String = "mp4",
                            kind: CaptureKind = .recording) throws -> (CaptureRecord, URL) {
-        try withOperation {
+        // The copy into .pending is the slow part — a movie coming off an external volume —
+        // and needs no lock: only startup sweeps .pending, and startup is exclusive.
+        let staged = try stageFile(tempURL)
+        defer { removeUnjournaledStage(staged) }
+        return try withOperation {
             let now = Date()
-            let target = Library.uniqueURL(in: try shardDir(for: now),
+            let target = try availableURL(in: try shardDir(for: now),
                 base: Library.templatedName(kind: "recording", at: now), ext: ext)
             var record = CaptureRecord(kind: kind, createdAt: now, width: width, height: height,
                 bytes: Library.byteSize(of: tempURL), relPath: rel(target), sourceApp: sourceApp, fastID: "")
             record.durationS = duration
-            let staged = try stageFile(tempURL)
-            defer { removeUnjournaledStage(staged) }
             let plan = FileOperation(op: "write", source: rel(staged), record: record,
                 sidecar: Sidecar(id: record.id, created: now, app: sourceApp, window: nil))
             try commit(plan)
@@ -184,7 +219,7 @@ public final class Library: @unchecked Sendable {
                          sourceApp: String?, windowTitle: String?, screenID: Int?) throws -> (CaptureRecord, URL) {
         try withOperation {
             let now = Date()
-            let target = Library.uniqueURL(in: try shardDir(for: now),
+            let target = try availableURL(in: try shardDir(for: now),
                 base: Library.templatedName(kind: "capture", at: now), ext: "png")
             var record = CaptureRecord(kind: .screenshot, createdAt: now, width: width, height: height,
                 bytes: data.count, relPath: rel(target), sourceApp: sourceApp, windowTitle: windowTitle,
@@ -275,11 +310,11 @@ public final class Library: @unchecked Sendable {
     }
 
     public func applyTrim(_ id: String, trimmedURL: URL, duration: Double) throws {
+        let staged = try stageFile(trimmedURL)   // off the lock, as in storeMovie
+        defer { removeUnjournaledStage(staged) }
         try withOperation(for: id) {
             guard var record = try db.queue.read({ try CaptureRecord.fetchOne($0, key: id) }),
                   record.status != .sweeping else { return }
-            let staged = try stageFile(trimmedURL)
-            defer { removeUnjournaledStage(staged) }
             record.bytes = Library.byteSize(of: staged)
             record.durationS = duration
             try replaceContent(record, staged: staged, layersJSON: "[]", op: "trim")
@@ -317,8 +352,12 @@ public final class Library: @unchecked Sendable {
     public func editBase(for record: CaptureRecord) -> (image: URL, layersJSON: String?) {
         let fileURL = url(for: record)
         guard let ann = Sidecar.read(for: fileURL)?.annotations else { return (fileURL, nil) }
-        let orig = root.appendingPathComponent(ann.original)
-        return (FileManager.default.fileExists(atPath: orig.path) ? orig : fileURL, ann.layersJSON)
+        // The containment check the sweep and the replayer already enforce: a sidecar pointing
+        // outside .originals/ does not get to choose what the editor opens.
+        if let orig = try? checkedOriginalURL(ann.original), FileManager.default.fileExists(atPath: orig.path) {
+            return (orig, ann.layersJSON)
+        }
+        return (fileURL, ann.layersJSON)
     }
 
     // MARK: - Trash (spec §2.2 F7)
@@ -343,7 +382,7 @@ public final class Library: @unchecked Sendable {
             let file = url(for: record)
             let shard = trashDir.appendingPathComponent((source as NSString).deletingLastPathComponent)
             try FileManager.default.createDirectory(at: shard, withIntermediateDirectories: true)
-            let target = Library.uniqueURL(in: shard, base: file.deletingPathExtension().lastPathComponent,
+            let target = try availableURL(in: shard, base: file.deletingPathExtension().lastPathComponent,
                                           ext: file.pathExtension)
             record.status = .trashed; record.trashedAt = Date(); record.relPath = rel(target)
             try commit(FileOperation(op: "discard", source: source, record: record,
@@ -374,7 +413,7 @@ public final class Library: @unchecked Sendable {
                 .originalRelPath ?? String(source.dropFirst(".trash/".count))
             let desired = root.appendingPathComponent(original)
             try FileManager.default.createDirectory(at: desired.deletingLastPathComponent(), withIntermediateDirectories: true)
-            let target = Library.uniqueURL(in: desired.deletingLastPathComponent(),
+            let target = try availableURL(in: desired.deletingLastPathComponent(),
                 base: desired.deletingPathExtension().lastPathComponent, ext: desired.pathExtension)
             record.status = .kept; record.trashedAt = nil; record.relPath = rel(target)
             try commit(FileOperation(op: "restore", source: source, record: record, sidecar: nil))
@@ -388,56 +427,86 @@ public final class Library: @unchecked Sendable {
     }
 
     func sweepTrash(olderThanDays days: Int, removing remove: (URL) throws -> Void) {
-        db.operationLock.lock(); defer { db.operationLock.unlock() }
+        let cutoff = Date().addingTimeInterval(-Double(days) * 86400)
+        let expired: [CaptureRecord]
         do {
-            try recoverPendingOperations()
-            let cutoff = Date().addingTimeInterval(-Double(days) * 86400)
-            let expired = try db.queue.read { d in
-                try CaptureRecord.fetchAll(d, sql: """
-                    SELECT * FROM captures WHERE (status = 'sweeping'
-                        OR (status = 'trashed' AND trashedAt < ?))
-                        AND id NOT IN (SELECT captureId FROM blocked_captures)
-                    """, arguments: [cutoff])
+            expired = try withOperation {
+                try db.queue.read { d in
+                    try CaptureRecord.fetchAll(d, sql: """
+                        SELECT * FROM captures WHERE (status = 'sweeping'
+                            OR (status = 'trashed' AND trashedAt < ?))
+                            AND id NOT IN (SELECT captureId FROM blocked_captures)
+                        """, arguments: [cutoff])
+                }
             }
-            var referents = OriginalReferents()
-            for record in expired {
-                do {
-                    let file = url(for: record)
+        } catch { Log.store.error("trash cleanup deferred: \(error)"); return }
+
+        var referents = OriginalReferents()
+        var undecided: [String] = []
+        for record in expired {
+            do {
+                // One capture per hold of the lock: a Keep press on the main thread waits out
+                // one capture's deletes, not the whole pass.
+                try withOperation(for: record.id) {
+                    guard let current = try db.queue.read({ try CaptureRecord.fetchOne($0, key: record.id) }),
+                          current.status == .trashed || current.status == .sweeping else { return }   // restored meanwhile
+                    let file = url(for: current)
                     // Everything that can refuse is decided before the row is marked, so
                     // 'sweeping' always means deletion has begun — which is why restore
                     // refuses it. A row that could be marked and then fail to decide would
                     // be neither restorable nor sweepable.
-                    let original = originalToDelete(with: record, file: file, referents: &referents)
+                    let original: URL?
+                    switch originalDisposition(for: current, file: file, referents: &referents) {
+                    case .none: original = nil
+                    case .delete(let url): original = url
+                    case .undecidable:
+                        // Keep the row as well: its sidecar is what still names the original,
+                        // and the next pass can decide once the sidecar it could not read is fixed.
+                        undecided.append(current.id)
+                        return
+                    }
                     try db.queue.write { d in
-                        try d.execute(sql: "UPDATE captures SET status = 'sweeping' WHERE id = ?", arguments: [record.id])
+                        try d.execute(sql: "UPDATE captures SET status = 'sweeping' WHERE id = ?", arguments: [current.id])
                     }
                     if let original { try remove(original) }
                     try remove(file)
                     try remove(Sidecar.url(for: file))
-                    try remove(tombstoneURL(record.id))
+                    try remove(tombstoneURL(current.id))
                     try db.queue.write { d in
-                        try d.execute(sql: "DELETE FROM ingest_jobs WHERE captureId = ?", arguments: [record.id])
-                        try d.execute(sql: "DELETE FROM captures WHERE id = ?", arguments: [record.id])
+                        try d.execute(sql: "DELETE FROM ingest_jobs WHERE captureId = ?", arguments: [current.id])
+                        try d.execute(sql: "DELETE FROM captures WHERE id = ?", arguments: [current.id])
                     }
-                } catch { Log.store.error("trash cleanup will retry \(record.id): \(error)") }
-            }
-        } catch { Log.store.error("trash cleanup deferred: \(error)") }
+                }
+            } catch { Log.store.error("trash cleanup will retry \(record.id): \(error)") }
+        }
+        if !undecided.isEmpty {
+            let unresolved = referents.unresolved.joined(separator: ", ")
+            Log.store.error("trash cleanup kept \(undecided.count) capture(s) whose legacy originals could not be vouched for; sidecars or plans unreadable for: \(unresolved, privacy: .public)")
+        }
     }
 
-    /// The pristine original to delete along with a swept capture, or nil to leave it on disk.
-    /// Anything unknowable — an unreadable sidecar, a path outside `.originals/` — keeps the
-    /// file: a little disk is cheaper than someone else's pixels.
-    private func originalToDelete(with record: CaptureRecord, file: URL,
-                                  referents: inout OriginalReferents) -> URL? {
-        guard let original = Sidecar.read(for: file)?.annotations?.original else { return nil }
+    enum OriginalDisposition {
+        case none, delete(URL), undecidable
+    }
+
+    /// What to do about a swept capture's pristine original. Anything unknowable keeps the
+    /// file — a little disk is cheaper than someone else's pixels — and `.undecidable` keeps
+    /// the row too, so the original stays named by a sidecar the next pass can read again.
+    private func originalDisposition(for record: CaptureRecord, file: URL,
+                                     referents: inout OriginalReferents) -> OriginalDisposition {
+        guard let original = Sidecar.read(for: file)?.annotations?.original else { return .none }
         guard let target = try? checkedOriginalURL(original) else {
             Log.store.error("sweep keeps an original outside .originals/ for \(record.id): \(original, privacy: .public)")
-            return nil
+            return .none
         }
         // Originals this build mints are keyed by capture id and cannot be anyone else's.
-        if Library.isOwnOriginal(original, id: record.id) { return target }
+        if Library.isOwnOriginal(original, id: record.id) { return .delete(target) }
         // Legacy originals are keyed by the visible path, which two captures can have shared.
-        return referents.isReferenced(target, byAnyoneBut: record.id, in: self) ? nil : target
+        switch referents.referenced(target, byAnyoneBut: record.id, in: self) {
+        case .some(true): return .none
+        case .some(false): return .delete(target)
+        case .none: return .undecidable
+        }
     }
 
     /// The `.originals/<id>.<ext>` shape `originalPath(for:)` produces.
@@ -447,29 +516,33 @@ public final class Library: @unchecked Sendable {
     }
 
     /// Which `.originals/` files the rest of the library still points at, built once per sweep
-    /// and only if a legacy original comes up. A sidecar or plan that cannot be read makes the
-    /// whole answer "unknown", which keeps every legacy original this pass.
+    /// and only if a legacy original comes up. Any sidecar or plan that cannot be read makes
+    /// the answer unknowable for the pass — it could have named any of them.
     struct OriginalReferents {
         private var refs: [URL: Set<String>]?
-        private var uncertain = false
+        /// Capture ids whose sidecar or plan could not be read or did not point inside
+        /// `.originals/`. Non-empty means no legacy original can be vouched for this pass.
+        private(set) var unresolved: [String] = []
 
-        mutating func isReferenced(_ target: URL, byAnyoneBut id: String, in library: Library) -> Bool {
-            if refs == nil { (refs, uncertain) = library.scanOriginalReferents() }
-            return uncertain || refs![target, default: []].subtracting([id]).isEmpty == false
+        /// nil when unknowable.
+        mutating func referenced(_ target: URL, byAnyoneBut id: String, in library: Library) -> Bool? {
+            if refs == nil { (refs, unresolved) = library.scanOriginalReferents() }
+            guard unresolved.isEmpty else { return nil }
+            return refs![target, default: []].subtracting([id]).isEmpty == false
         }
     }
 
-    private func scanOriginalReferents() -> (refs: [URL: Set<String>], uncertain: Bool) {
+    private func scanOriginalReferents() -> (refs: [URL: Set<String>], unresolved: [String]) {
         var refs: [URL: Set<String>] = [:]
-        var uncertain = false
+        var unresolved: [String] = []
         func note(_ path: String?, from id: String) {
             guard let path else { return }
-            guard let url = try? checkedOriginalURL(path) else { uncertain = true; return }
+            guard let url = try? checkedOriginalURL(path) else { unresolved.append(id); return }
             refs[url, default: []].insert(id)
         }
         func note(sidecarAt rel: String, from id: String) {
             do { note(try Sidecar.readIfPresent(for: root.appendingPathComponent(rel))?.annotations?.original, from: id) }
-            catch { uncertain = true }
+            catch { unresolved.append(id) }
         }
         do {
             for row in try db.queue.read({ try Row.fetchAll($0, sql: "SELECT id, relPath FROM captures") }) {
@@ -479,13 +552,13 @@ public final class Library: @unchecked Sendable {
             // Plan-less legacy rows carry no sidecar, and their capture is already in the scan.
             for row in try db.queue.read({ try Row.fetchAll($0, sql: "SELECT captureId, plan FROM op_journal") }) {
                 guard let data: Data = row["plan"] else { continue }
-                guard let plan = try? JSONDecoder().decode(FileOperation.self, from: data) else { uncertain = true; continue }
                 let id: String = row["captureId"]
+                guard let plan = try? JSONDecoder().decode(FileOperation.self, from: data) else { unresolved.append(id); continue }
                 note(plan.sidecar?.annotations?.original, from: id)
                 for rel in Set([plan.source, plan.record.relPath]) { note(sidecarAt: rel, from: id) }
             }
-        } catch { uncertain = true }
-        return (refs, uncertain)
+        } catch { unresolved.append("(database: \(error))") }
+        return (refs, unresolved)
     }
 }
 

@@ -12,6 +12,9 @@ public final class EditorController {
     public var library: Library?
     /// Called after Done flattens — the shell reopens the capture as an overlay card.
     public var onFlattened: ((String) -> Void)?
+    /// Called when the flatten could not be saved. The editor has already put itself back with
+    /// the same layers by then; the shell says why.
+    public var onSaveFailed: ((String, Error) -> Void)?
     /// Window lifecycle hooks — the shell uses these to toggle activation policy.
     public var onWindowOpened: (() -> Void)?
     public var onWindowClosed: (() -> Void)?
@@ -76,14 +79,27 @@ public final class EditorController {
     private func save(recordID: String, base: CGImage, layers: [Annotation], reopenAsCard: Bool) {
         guard let library else { return }
         let onFlattened = self.onFlattened
+        let onSaveFailed = self.onSaveFailed
         Task.detached(priority: .userInitiated) {
             if let out = AnnotationRenderer.flatten(base: base, layers: layers),
                let png = ImageEncoding.pngData(out) {
+                let json = AnnotationCodec.encode(layers)
                 do {
-                    try library.applyEdit(recordID, flattenedPNG: png,
-                                          layersJSON: AnnotationCodec.encode(layers),
+                    try library.applyEdit(recordID, flattenedPNG: png, layersJSON: json,
                                           width: out.width, height: out.height)
-                } catch { Log.store.error("apply edit failed: \(error)"); return }
+                } catch {
+                    // Done has already closed the window. A log line is not where a redaction
+                    // goes to be found again: put the same layers back in front of the user,
+                    // and let the shell say why.
+                    Log.store.error("apply edit failed: \(error)")
+                    await MainActor.run {
+                        if let record = try? library.db.queue.read({ try CaptureRecord.fetchOne($0, key: recordID) }) {
+                            EditorController.shared.present(recordID: recordID, record: record, base: base, layersJSON: json)
+                        }
+                        onSaveFailed?(recordID, error)
+                    }
+                    return
+                }
             }
             if reopenAsCard {
                 await MainActor.run { onFlattened?(recordID) }

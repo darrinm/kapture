@@ -16,6 +16,14 @@ struct FileOperation: Codable {
     var probeMovieMetadata: Bool? = nil
 }
 
+/// The file an operation needed is at neither end of its move. No retry will make it appear
+/// and the row is as consistent as it can be, so the entry is abandoned rather than parked:
+/// the caller hears once, and the capture is not blocked afterwards.
+public struct FileVanished: LocalizedError {
+    public let path: String
+    public var errorDescription: String? { "The file for this capture is missing: \(path)" }
+}
+
 /// Thrown for any operation on a capture whose journal entry has not finished replaying.
 public struct RecoveryBlocked: LocalizedError {
     public let captureID: String
@@ -71,7 +79,7 @@ extension Library {
                 """, arguments: [plan.op, plan.record.id, plan.source, plan.record.relPath, Date(), data])
             return d.lastInsertedRowID
         }
-        do { try finish(plan, journalID: journalID) }
+        do { try finish(plan, journalID: journalID, replay: false) }
         catch {
             try? recordReplayFailure(error, journalID: journalID, attempts: 0)
             throw error
@@ -81,12 +89,18 @@ extension Library {
     // MARK: - Replay
 
     /// A replay failure that no retry can fix: something on disk or in the journal has to be
-    /// put right by hand first. A plan that will not decode, a file that is at neither end of
-    /// its move, a name already taken, a path outside the library. Everything else — a
-    /// permission not yet granted, a full or busy disk, a locked database — is assumed to clear
-    /// on its own and is retried with backoff rather than parked.
+    /// put right by hand first. A plan that will not decode, a name already taken — on disk or
+    /// by a row — a path outside the library. Everything else — a permission not yet granted,
+    /// a full or busy disk, a locked database — is assumed to clear on its own and is retried
+    /// with backoff rather than parked. (A file missing at both ends is neither: see
+    /// `FileVanished`.)
     static func isPermanentRecoveryFailure(_ error: Error) -> Bool {
         if error is DecodingError { return true }
+        if let database = error as? DatabaseError {
+            // Only the "taken" constraints. A trigger's RAISE, a CHECK, a NOT NULL all report
+            // SQLITE_CONSTRAINT too, and none of them is a name collision.
+            return [.SQLITE_CONSTRAINT_UNIQUE, .SQLITE_CONSTRAINT_PRIMARYKEY].contains(database.extendedResultCode)
+        }
         guard let cocoa = error as? CocoaError else { return false }
         switch cocoa.code {
         case .fileReadCorruptFile, .fileReadInvalidFileName, .fileNoSuchFile, .fileReadNoSuchFile,
@@ -127,7 +141,7 @@ extension Library {
                     plan = try legacyPlan(row)
                 }
                 if let plan {
-                    try finish(plan, journalID: journalID)
+                    try finish(plan, journalID: journalID, replay: true)
                 } else {
                     try db.queue.write { d in
                         try d.execute(sql: "DELETE FROM op_journal WHERE id = ?", arguments: [journalID])
@@ -142,7 +156,12 @@ extension Library {
 
     private func recordReplayFailure(_ error: Error, journalID: Int64, attempts: Int) throws {
         let message = String(describing: error)
-        if Library.isPermanentRecoveryFailure(error) {
+        if error is FileVanished {
+            try db.queue.write { d in
+                try d.execute(sql: "DELETE FROM op_journal WHERE id = ?", arguments: [journalID])
+            }
+            Log.store.error("abandoned journal entry \(journalID): \(message)")
+        } else if Library.isPermanentRecoveryFailure(error) {
             try db.queue.write { d in
                 try d.execute(sql: "UPDATE op_journal SET recoveryError = ?, lastError = ? WHERE id = ?",
                               arguments: [message, message, journalID])
@@ -231,13 +250,18 @@ extension Library {
         try FileManager.default.moveItem(at: src, to: dst)
     }
 
-    private func finish(_ plan: FileOperation, journalID: Int64) throws {
+    /// `replay` is a plan being finished after the fact — by a later operation or a relaunch —
+    /// rather than by the call that made it. The caller of that call is long gone, so what it
+    /// would have done next (enqueue OCR, wake the ingest queue) falls to us.
+    private func finish(_ plan: FileOperation, journalID: Int64, replay: Bool) throws {
         let fm = FileManager.default
         let source = root.appendingPathComponent(plan.source)
         let target = url(for: plan.record)
         let replacing = plan.op == "flatten" || plan.op == "trim"
+        // Before anything lands there — the file, but also a sidecar or tombstone for a discard
+        // whose file is already gone, on a first launch where .trash/ has never been made.
+        try fm.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
         if source != target, try itemExists(source) {
-            try fm.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
             if replacing {
                 if let original = plan.sidecar?.annotations?.original {
                     let originalURL = try checkedOriginalURL(original)
@@ -257,7 +281,13 @@ extension Library {
                 try fm.moveItem(at: source, to: target)
             }
         }
-        guard try itemExists(target) else { throw CocoaError(.fileNoSuchFile) }
+        if !(try itemExists(target)) {
+            // A discard's end state — row trashed, file gone — is reachable without the file,
+            // and is what the user asked for. Anything else has nothing left to operate on.
+            guard plan.op == "discard" else {
+                throw FileVanished(path: plan.op == "write" ? plan.record.relPath : plan.source)
+            }
+        }
         if ["discard", "restore", "rename"].contains(plan.op) {
             try moveSidecar(from: source, to: target, fallback: plan.sidecar)
         } else {
@@ -287,6 +317,17 @@ extension Library {
             }
             if record.status == .trashed {
                 try d.execute(sql: "DELETE FROM ingest_jobs WHERE captureId = ?", arguments: [record.id])
+            } else if replay {
+                // A write finished here never reached the caller that would have enqueued its
+                // OCR; a first-run write leaves that to the caller and its debounce.
+                if plan.op == "write", record.canAnnotate || record.kind == .gif {
+                    try Library.enqueueIngest(d, record: record, notBefore: Date())
+                }
+                // This capture's jobs were hidden while its entry existed, and the drain loop
+                // may have gone to sleep with nothing to wait for. The ingest queue observes
+                // writes to ingest_jobs, not to op_journal, so touching the row is the wake-up.
+                try d.execute(sql: "UPDATE ingest_jobs SET notBefore = MIN(notBefore, ?) WHERE captureId = ?",
+                              arguments: [Date(), record.id])
             }
             try d.execute(sql: "DELETE FROM op_journal WHERE id = ?", arguments: [journalID])
         }
@@ -324,12 +365,12 @@ extension Library {
             }
             return nil
         }
-        guard try itemExists(target) else {
-            if existing == nil { return nil } // write never reached disk
-            throw CocoaError(.fileNoSuchFile)
-        }
-        if ["flatten", "trim"].contains(op), src == dst,
-           let existing, existing.fastID == Library.fastID(of: target) {
+        if !(try itemExists(target)) {
+            guard let existing else { return nil } // write never reached disk
+            // A discard can finish without its file; nothing else has anything to operate on.
+            guard op == "discard" else { throw FileVanished(path: existing.relPath) }
+        } else if ["flatten", "trim"].contains(op), src == dst,
+                  let existing, existing.fastID == Library.fastID(of: target) {
             return nil // the old file operation failed before replacing any pixels
         }
         // Read leniently. A corrupt legacy sidecar is synthesised below, which is byte for byte
