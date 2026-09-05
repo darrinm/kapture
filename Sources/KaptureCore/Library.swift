@@ -26,6 +26,7 @@ public final class Library: @unchecked Sendable {
         self.root = root ?? Settings.shared.libraryRoot
         try FileManager.default.createDirectory(at: self.root, withIntermediateDirectories: true)
         try recoverPendingOperations()
+        cleanOrphanedStages()
     }
 
     // DateFormatter creation is expensive; formatting through a shared instance is thread-safe.
@@ -151,9 +152,11 @@ public final class Library: @unchecked Sendable {
                 bytes: Library.byteSize(of: tempURL), relPath: rel(target), sourceApp: sourceApp, fastID: "")
             record.durationS = duration
             let staged = try stageFile(tempURL)
+            defer { removeUnjournaledStage(staged) }
             let plan = FileOperation(op: "write", source: rel(staged), record: record,
                 sidecar: Sidecar(id: record.id, created: now, app: sourceApp, window: nil))
             try commit(plan)
+            try? removeIfPresent(tempURL)
             record.fastID = Library.fastID(of: target)
             return (record, target)
         }
@@ -169,6 +172,7 @@ public final class Library: @unchecked Sendable {
                 bytes: data.count, relPath: rel(target), sourceApp: sourceApp, windowTitle: windowTitle,
                 screenID: screenID, fastID: "")
             let staged = try stageData(data)
+            defer { removeUnjournaledStage(staged) }
             try commit(FileOperation(op: "write", source: rel(staged), record: record,
                 sidecar: Sidecar(id: record.id, created: now, app: sourceApp, window: windowTitle)))
             record.fastID = Library.fastID(of: target)
@@ -177,7 +181,7 @@ public final class Library: @unchecked Sendable {
     }
 
     public func setStatus(_ id: String, _ status: CaptureStatus) throws {
-        try withOperation {
+        try withOperation(for: id) {
             try db.queue.write { d in
                 try d.execute(sql: "UPDATE captures SET status = ? WHERE id = ?", arguments: [status.rawValue, id])
             }
@@ -199,7 +203,7 @@ public final class Library: @unchecked Sendable {
     /// A stale link is retained for revocation, but must never be reused as the current share.
     @discardableResult
     public func setShareLink(_ id: String, url: String?, revision: Int64? = nil) throws -> Bool {
-        try withOperation {
+        try withOperation(for: id) {
             try db.queue.write { d in
                 guard let record = try CaptureRecord.fetchOne(d, key: id) else { return false }
                 let current = url == nil || record.contentRevision == revision
@@ -210,42 +214,68 @@ public final class Library: @unchecked Sendable {
         }
     }
 
-    /// Copy under the same lock used by edits and renames. URLSession reads this immutable
-    /// temporary file, so replacing the library file during upload cannot mix revisions.
+    /// Hard-link on the library filesystem while locked: an atomic replacement keeps the old
+    /// inode alive without copying a movie from an external disk while blocking capture actions.
     public func shareSnapshot(_ id: String) throws -> (record: CaptureRecord, file: URL) {
-        try withOperation {
-            guard let record = try db.queue.read({ try CaptureRecord.fetchOne($0, key: id) }),
-                  record.status != .trashed, record.status != .sweeping else { throw CocoaError(.fileNoSuchFile) }
-            let file = Library.tempURL(prefix: "kapture-share", ext: url(for: record).pathExtension)
-            try FileManager.default.copyItem(at: url(for: record), to: file)
-            return (record, file)
-        }
+        try shareSnapshot(id, linking: FileManager.default.linkItem)
     }
 
-    /// Reuse the sidecar's original across renames. New originals are keyed by capture id,
-    /// so reusing an old visible filename cannot attach another capture's pristine pixels.
-    func originalPath(for record: CaptureRecord) -> String {
-        Sidecar.read(for: url(for: record))?.annotations?.original
+    func shareSnapshot(_ id: String, linking: (URL, URL) throws -> Void) throws -> (record: CaptureRecord, file: URL) {
+        let snapshot = try withOperation(for: id) { () -> (CaptureRecord, URL, FileHandle?) in
+            guard let record = try db.queue.read({ try CaptureRecord.fetchOne($0, key: id) }),
+                  record.status != .trashed, record.status != .sweeping else { throw CocoaError(.fileNoSuchFile) }
+            let source = url(for: record)
+            let file = try stagingURL(ext: source.pathExtension)
+            do {
+                try linking(source, file)
+                return (record, file, nil)
+            } catch {
+                try? removeIfPresent(file)
+                // Some removable filesystems do not support hard links. Pin the open file
+                // descriptor under the lock, then stream its bytes after releasing the lock.
+                let handle = try FileHandle(forReadingFrom: source)
+                return (record, Library.tempURL(prefix: "kapture-share", ext: source.pathExtension), handle)
+            }
+        }
+        let (record, file, input) = snapshot
+        if let input {
+            defer { try? input.close() }
+            do {
+                guard FileManager.default.createFile(atPath: file.path, contents: nil) else { throw CocoaError(.fileWriteUnknown) }
+                let output = try FileHandle(forWritingTo: file)
+                defer { try? output.close() }
+                while let data = try input.read(upToCount: 1_048_576), !data.isEmpty { try output.write(contentsOf: data) }
+            } catch { try? removeIfPresent(file); throw error }
+        }
+        return (record, file)
+    }
+
+    /// Reuse the sidecar's original across renames. Never infer absence from a read failure.
+    func originalPath(for record: CaptureRecord) throws -> String {
+        try Sidecar.readIfPresent(for: url(for: record))?.annotations?.original
             ?? ".originals/\(record.id).\(url(for: record).pathExtension)"
     }
 
     public func applyTrim(_ id: String, trimmedURL: URL, duration: Double) throws {
-        try withOperation {
+        try withOperation(for: id) {
             guard var record = try db.queue.read({ try CaptureRecord.fetchOne($0, key: id) }),
                   record.status != .sweeping else { return }
             let staged = try stageFile(trimmedURL)
+            defer { removeUnjournaledStage(staged) }
             record.bytes = Library.byteSize(of: staged)
             record.durationS = duration
             try replaceContent(record, staged: staged, layersJSON: "[]", op: "trim")
+            try? removeIfPresent(trimmedURL)
         }
     }
 
     public func applyEdit(_ id: String, flattenedPNG: Data, layersJSON: String,
                           width: Int, height: Int) throws {
-        try withOperation {
+        try withOperation(for: id) {
             guard var record = try db.queue.read({ try CaptureRecord.fetchOne($0, key: id) }),
                   record.status != .sweeping else { return }
             let staged = try stageData(flattenedPNG)
+            defer { removeUnjournaledStage(staged) }
             record.bytes = flattenedPNG.count
             record.width = width; record.height = height
             try replaceContent(record, staged: staged, layersJSON: layersJSON, op: "flatten")
@@ -254,13 +284,14 @@ public final class Library: @unchecked Sendable {
 
     private func replaceContent(_ current: CaptureRecord, staged: URL, layersJSON: String, op: String) throws {
         var record = current
-        var sidecar = Sidecar.read(for: url(for: record))
+        var sidecar = try Sidecar.readIfPresent(for: url(for: record))
             ?? Sidecar(id: record.id, created: record.createdAt, app: record.sourceApp, window: record.windowTitle)
-        sidecar.annotations = .init(original: originalPath(for: record), layersJSON: layersJSON)
+        sidecar.annotations = .init(original: try originalPath(for: record), layersJSON: layersJSON)
         record.contentRevision += 1
         record.contentHash = nil
         record.shareStale = record.shareURL != nil
         record.summary = nil
+        record.aiState = .none
         try commit(FileOperation(op: op, source: rel(staged), record: record, sidecar: sidecar))
     }
 
@@ -287,7 +318,7 @@ public final class Library: @unchecked Sendable {
     }
 
     public func discard(_ requested: CaptureRecord) throws {
-        try withOperation {
+        try withOperation(for: requested.id) {
             guard var record = try db.queue.read({ try CaptureRecord.fetchOne($0, key: requested.id) }),
                   record.status != .trashed, record.status != .sweeping else { return }
             let source = record.relPath
@@ -298,7 +329,7 @@ public final class Library: @unchecked Sendable {
                                           ext: file.pathExtension)
             record.status = .trashed; record.trashedAt = Date(); record.relPath = rel(target)
             try commit(FileOperation(op: "discard", source: source, record: record,
-                sidecar: Sidecar.read(for: file), originalRelPath: source))
+                sidecar: nil, originalRelPath: source))
         }
     }
 
@@ -316,11 +347,10 @@ public final class Library: @unchecked Sendable {
     /// Restore and sweeping use the same operation lock, so no optimistic status flip is needed.
     @discardableResult
     public func restore(id: String) throws -> CaptureRecord? {
-        try withOperation {
+        try withOperation(for: id) {
             guard var record = try db.queue.read({ try CaptureRecord.fetchOne($0, key: id) }),
                   record.status == .trashed else { return nil }
             let source = record.relPath
-            let file = url(for: record)
             let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
             let original = (try? dec.decode(Tombstone.self, from: Data(contentsOf: tombstoneURL(id))))?
                 .originalRelPath ?? String(source.dropFirst(".trash/".count))
@@ -329,7 +359,7 @@ public final class Library: @unchecked Sendable {
             let target = Library.uniqueURL(in: desired.deletingLastPathComponent(),
                 base: desired.deletingPathExtension().lastPathComponent, ext: desired.pathExtension)
             record.status = .kept; record.trashedAt = nil; record.relPath = rel(target)
-            try commit(FileOperation(op: "restore", source: source, record: record, sidecar: Sidecar.read(for: file)))
+            try commit(FileOperation(op: "restore", source: source, record: record, sidecar: nil))
             return try db.queue.read { try CaptureRecord.fetchOne($0, key: id) }
         }
     }
@@ -346,8 +376,9 @@ public final class Library: @unchecked Sendable {
             let cutoff = Date().addingTimeInterval(-Double(days) * 86400)
             let expired = try db.queue.read { d in
                 try CaptureRecord.fetchAll(d, sql: """
-                    SELECT * FROM captures WHERE status = 'sweeping'
-                        OR (status = 'trashed' AND trashedAt < ?)
+                    SELECT * FROM captures WHERE (status = 'sweeping'
+                        OR (status = 'trashed' AND trashedAt < ?))
+                        AND NOT EXISTS (SELECT 1 FROM op_journal WHERE captureId = captures.id AND recoveryError IS NOT NULL)
                     """, arguments: [cutoff])
             }
             for record in expired {
@@ -356,7 +387,8 @@ public final class Library: @unchecked Sendable {
                         try d.execute(sql: "UPDATE captures SET status = 'sweeping' WHERE id = ?", arguments: [record.id])
                     }
                     let file = url(for: record)
-                    if let original = Sidecar.read(for: file)?.annotations?.original {
+                    if let original = try Sidecar.readIfPresent(for: file)?.annotations?.original,
+                       try canDeleteOriginal(original, ownedBy: record.id) {
                         try remove(try checkedOriginalURL(original))
                     }
                     try remove(file)
@@ -370,4 +402,32 @@ public final class Library: @unchecked Sendable {
             }
         } catch { Log.store.error("trash cleanup deferred: \(error)") }
     }
+    /// Legacy originals are named by a reusable visible path, not capture identity. Preserve
+    /// the file while another capture or unfinished plan references it. Unknown metadata also
+    /// keeps it: losing a little disk space is preferable to deleting someone else's original.
+    private func canDeleteOriginal(_ original: String, ownedBy id: String) throws -> Bool {
+        let target = try checkedOriginalURL(original)
+        let others = try db.queue.read { try CaptureRecord.fetchAll($0, sql: "SELECT * FROM captures WHERE id != ?", arguments: [id]) }
+        for other in others {
+            do {
+                if let path = try Sidecar.readIfPresent(for: url(for: other))?.annotations?.original,
+                   try checkedOriginalURL(path) == target { return false }
+            } catch { return false }
+        }
+        let plans = try db.queue.read { try Row.fetchAll($0, sql: "SELECT plan FROM op_journal WHERE captureId != ?", arguments: [id]) }
+        for row in plans {
+            guard let data: Data = row["plan"], let plan = try? JSONDecoder().decode(FileOperation.self, from: data) else { return false }
+            if let path = plan.sidecar?.annotations?.original, try checkedOriginalURL(path) == target { return false }
+            // A failed move may have put the sidecar at its destination before the DB row
+            // changed. New move plans preserve raw bytes instead of embedding decoded metadata.
+            for path in Set([plan.source, plan.record.relPath]) {
+                do {
+                    if let reference = try Sidecar.readIfPresent(for: root.appendingPathComponent(path))?.annotations?.original,
+                       try checkedOriginalURL(reference) == target { return false }
+                } catch { return false }
+            }
+        }
+        return true
+    }
+
 }

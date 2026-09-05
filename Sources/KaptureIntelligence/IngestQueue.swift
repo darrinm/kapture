@@ -123,7 +123,7 @@ public actor IngestQueue {
     private func secondsUntilNextJob() -> TimeInterval? {
         guard let library else { return nil }
         return (try? library.db.queue.read { d -> TimeInterval? in
-            guard let next = try Date.fetchOne(d, sql: "SELECT MIN(notBefore) FROM ingest_jobs")
+            guard let next = try Date.fetchOne(d, sql: "SELECT MIN(notBefore) FROM ingest_jobs WHERE NOT EXISTS (SELECT 1 FROM op_journal WHERE captureId = ingest_jobs.captureId AND recoveryError IS NOT NULL)")
             else { return nil }
             return max(0, next.timeIntervalSinceNow)
         }) ?? nil
@@ -132,11 +132,17 @@ public actor IngestQueue {
     private func nextDueJob() -> IngestJob? { try? library?.nextIngestJob() }
 
     private func liveRecord(_ job: IngestJob) -> CaptureRecord? {
-        guard let record = try? library?.ingestRecord(job), record.canAnnotate || record.kind == .gif else {
-            clearJob(job)
+        do {
+            guard let record = try library?.ingestRecord(job), record.canAnnotate || record.kind == .gif else {
+                clearJob(job)
+                return nil
+            }
+            return record
+        } catch {
+            // A failed read/recovery is not a deletion. Retain this generation for retry.
+            try? library?.retryIngestJob(job, after: 20, error: "capture temporarily unavailable")
             return nil
         }
-        return record
     }
 
     private func process(_ job: IngestJob) async {
@@ -153,7 +159,7 @@ public actor IngestQueue {
 
         // Decide up front whether the name stage will want pixels, so this one decode can
         // produce them too. The CGImage never leaves the detached task — only the JPEG does.
-        let naming = Settings.shared.aiNamingEnabled
+        let naming = Settings.shared.aiNamingEnabled && record.aiState.acceptsName
         let wantsAPI = naming && !(Keychain.anthropicKey ?? "").isEmpty
         let url = library.url(for: record)
         let result = await Task.detached(priority: .utility) { () -> (text: String, jpeg: Data?) in
@@ -183,7 +189,7 @@ public actor IngestQueue {
 
     private func nameStage(_ job: IngestJob) async {
         guard let library, let record = liveRecord(job) else { return }
-        guard Settings.shared.aiNamingEnabled else {   // turned off between the stages
+        guard Settings.shared.aiNamingEnabled, record.aiState.acceptsName else {   // turned off between the stages
             clearJob(job)
             return
         }

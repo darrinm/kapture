@@ -29,6 +29,186 @@ final class RecoveryTests: XCTestCase {
         try Library(db: Database(directory: lib.root.deletingLastPathComponent().appendingPathComponent("db")), root: lib.root)
     }
 
+    func testEveryReplayFailureIsIsolatedAndCanBeRetried() throws {
+        for failure in ["collision", "permissions", "missing-edit-source"] {
+            let (lib, dir) = try library()
+            defer { try? FileManager.default.removeItem(at: dir) }
+            var broken = try shot(lib)
+            let healthy = try shot(lib)
+            try lib.enqueueIngest(broken.id, notBefore: Date())
+            try lib.enqueueIngest(healthy.id, notBefore: Date())
+            let destinationDir = lib.root.appendingPathComponent("destination")
+            try FileManager.default.createDirectory(at: destinationDir, withIntermediateDirectories: true)
+            defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: destinationDir.path) }
+            let destination = destinationDir.appendingPathComponent("capture.png")
+            if failure == "missing-edit-source" {
+                try FileManager.default.removeItem(at: lib.url(for: broken))
+                XCTAssertThrowsError(try lib.applyEdit(broken.id, flattenedPNG: Data([9]), layersJSON: "[]", width: 1, height: 1))
+            } else {
+                let source = broken.relPath
+                broken.relPath = lib.rel(destination)
+                try journal(lib, FileOperation(op: "rename", source: source, record: broken, sidecar: nil))
+                if failure == "collision" { try Data([8]).write(to: destination) }
+                else { try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: destinationDir.path) }
+            }
+            let reopened = try reopen(lib)
+            XCTAssertThrowsError(try reopened.setStatus(broken.id, .kept))
+            XCTAssertNoThrow(try shot(reopened))
+            let job = try XCTUnwrap(reopened.nextIngestJob())
+            XCTAssertEqual(job.captureId, healthy.id)
+            XCTAssertTrue(try reopened.finishOCR(job, text: "healthy", naming: false))
+            XCTAssertEqual(try reopened.db.queue.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM ingest_jobs WHERE captureId = ?", arguments: [broken.id]) }, 1)
+            if failure == "collision" { try FileManager.default.removeItem(at: destination) }
+            if failure == "permissions" { try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: destinationDir.path) }
+            if failure == "missing-edit-source" {
+                try Data([1, 2, 3]).write(to: lib.url(for: broken))
+            }
+            try reopened.retryRecovery(for: broken.id)
+            XCTAssertNoThrow(try reopened.setStatus(broken.id, .kept))
+            XCTAssertEqual(try reopened.db.queue.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM op_journal WHERE captureId = ?", arguments: [broken.id]) }, 0)
+        }
+    }
+
+    func testUnreadableSidecarMovesVerbatimThroughRenameDiscardAndRestore() throws {
+        let (lib, dir) = try library()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let capture = try shot(lib)
+        try lib.applyEdit(capture.id, flattenedPNG: Data([9]), layersJSON: "[layers]", width: 1, height: 1)
+        let initial = Sidecar.url(for: lib.url(for: capture))
+        let bytes = try Data(contentsOf: initial)
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: initial.path)
+        XCTAssertNil(Sidecar.read(for: lib.url(for: capture)))
+        XCTAssertTrue(lib.applyName(capture.id, baseName: "renamed", tags: [], summary: "", aiState: .namedLocal))
+        try lib.discard(record(lib, capture.id))
+        let restored = try XCTUnwrap(lib.restore(id: capture.id))
+        let sidecar = Sidecar.url(for: lib.url(for: restored))
+        XCTAssertEqual((try FileManager.default.attributesOfItem(atPath: sidecar.path)[.posixPermissions] as? NSNumber)?.intValue, 0)
+        XCTAssertThrowsError(try lib.applyEdit(capture.id, flattenedPNG: Data([8]), layersJSON: "[]", width: 1, height: 1))
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: sidecar.path)
+        XCTAssertEqual(try Data(contentsOf: sidecar), bytes)
+        XCTAssertEqual(try Data(contentsOf: lib.editBase(for: restored).image), Data([1, 2, 3]))
+        XCTAssertEqual(try Data(contentsOf: lib.url(for: restored)), Data([9]))
+    }
+
+    func testUnjournaledStagesAreRemovedAfterInsertFailureAndRestart() throws {
+        let (lib, dir) = try library()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let capture = try shot(lib)
+        let trimmed = dir.appendingPathComponent("trimmed.mp4")
+        try Data(repeating: 7, count: 4 * 1024 * 1024).write(to: trimmed)
+        try lib.db.queue.write { d in
+            try d.execute(sql: "CREATE TEMP TRIGGER fail_insert BEFORE INSERT ON op_journal BEGIN SELECT RAISE(FAIL, 'journal unavailable'); END")
+        }
+        XCTAssertThrowsError(try shot(lib))
+        XCTAssertThrowsError(try lib.applyTrim(capture.id, trimmedURL: trimmed, duration: 1))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: trimmed.path))
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: lib.root.appendingPathComponent(".pending").path), [])
+        try lib.db.queue.write { try $0.execute(sql: "DROP TRIGGER fail_insert") }
+        let orphan = try lib.stageData(Data([5]))
+        let retained = try lib.stageData(Data([6]))
+        var blocked = capture
+        blocked.relPath = "collision.png"
+        try Data([8]).write(to: lib.url(for: blocked))
+        try journal(lib, FileOperation(op: "write", source: lib.rel(retained), record: blocked, sidecar: nil))
+        let reopened = try reopen(lib)
+        XCTAssertEqual(try reopened.db.queue.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM op_journal WHERE recoveryError IS NOT NULL") }, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: orphan.path))
+        let sources = try reopened.db.queue.read { try String.fetchAll($0, sql: "SELECT src FROM op_journal") }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: retained.path), "retained=\(lib.rel(retained)); journal=\(sources)")
+    }
+
+    func testSweepPreservesLegacyOriginalUntilItsLastReferentIsGone() throws {
+        let (lib, dir) = try library()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let first = try shot(lib), second = try shot(lib)
+        let shared = lib.root.appendingPathComponent(".originals/2026/09/reused-name.png")
+        try FileManager.default.createDirectory(at: shared.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data([1, 2, 3]).write(to: shared)
+        for capture in [first, second] {
+            var sidecar = try XCTUnwrap(Sidecar.read(for: lib.url(for: capture)))
+            sidecar.annotations = .init(original: lib.rel(shared), layersJSON: "[]")
+            try sidecar.write(next: lib.url(for: capture))
+        }
+        try lib.discard(first)
+        lib.sweepTrash(olderThanDays: -1)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: shared.path))
+        XCTAssertEqual(try Data(contentsOf: lib.editBase(for: second).image), Data([1, 2, 3]))
+        try lib.discard(second)
+        lib.sweepTrash(olderThanDays: -1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: shared.path))
+    }
+
+    func testSweepChecksSidecarMovedByAnUncommittedRename() throws {
+        let (lib, dir) = try library()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let first = try shot(lib), second = try shot(lib)
+        let shared = lib.root.appendingPathComponent(".originals/shared.png")
+        try FileManager.default.createDirectory(at: shared.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data([1]).write(to: shared)
+        for capture in [first, second] {
+            var sidecar = try XCTUnwrap(Sidecar.read(for: lib.url(for: capture)))
+            sidecar.annotations = .init(original: lib.rel(shared), layersJSON: "[]")
+            try sidecar.write(next: lib.url(for: capture))
+        }
+        try lib.discard(first)
+        try lib.db.queue.write { d in
+            try d.execute(sql: "CREATE TEMP TRIGGER fail_rename BEFORE UPDATE ON captures WHEN OLD.id = '\(second.id)' BEGIN SELECT RAISE(FAIL, 'commit failure'); END")
+        }
+        XCTAssertFalse(lib.applyName(second.id, baseName: "moved", tags: [], summary: "", aiState: .namedLocal))
+        lib.sweepTrash(olderThanDays: -1)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: shared.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: Sidecar.url(for: lib.url(for: second)).path))
+        XCTAssertNil(try lib.db.queue.read { try CaptureRecord.fetchOne($0, key: first.id) })
+        try lib.db.queue.write { try $0.execute(sql: "DROP TRIGGER fail_rename") }
+        try lib.retryRecovery(for: second.id)
+        let recovered = try record(lib, second.id)
+        XCTAssertEqual(try Data(contentsOf: lib.editBase(for: recovered).image), Data([1]))
+    }
+
+    func testUntouchedLegacyEditsDoNotInvalidateSearchOrShares() throws {
+        for op in ["flatten", "trim"] {
+            let (lib, dir) = try library()
+            defer { try? FileManager.default.removeItem(at: dir) }
+            let capture = try shot(lib)
+            XCTAssertTrue(lib.applyName(capture.id, baseName: "invoice", tags: ["stripe"], summary: "invoice", aiState: .namedAPI))
+            let named = try record(lib, capture.id)
+            try lib.updateSearchText(named.id, ocr: "paid")
+            try lib.setShareLink(named.id, url: "https://kapture.sh/existing", revision: named.contentRevision)
+            try lib.db.queue.write { d in
+                try d.execute(sql: "INSERT INTO op_journal (op,captureId,src,dst,startedAt) VALUES (?,?,?,?,?)",
+                              arguments: [op, named.id, named.relPath, named.relPath, Date()])
+            }
+            let reopened = try reopen(lib)
+            let recovered = try record(reopened, named.id)
+            XCTAssertEqual(recovered.contentRevision, named.contentRevision)
+            XCTAssertFalse(recovered.shareStale)
+            XCTAssertEqual(recovered.aiState, .namedAPI)
+            XCTAssertEqual(reopened.search("stripe").count, 1)
+            XCTAssertEqual(reopened.search("paid").count, 1)
+        }
+    }
+
+    func testConcurrentLegacyMovieRecoveryDoesNotWaitForAsyncMetadata() async throws {
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for _ in 0..<12 {
+                group.addTask {
+                    let (lib, dir) = try self.library()
+                    defer { try? FileManager.default.removeItem(at: dir) }
+                    let file = lib.root.appendingPathComponent("legacy.mp4")
+                    // Even malformed media must not block recovery waiting for a metadata task.
+                    try Data([1, 2, 3]).write(to: file)
+                    try lib.db.queue.write { d in
+                        try d.execute(sql: "INSERT INTO op_journal (op,captureId,dst,startedAt) VALUES ('write','legacy','legacy.mp4',?)", arguments: [Date()])
+                    }
+                    let reopened = try self.reopen(lib)
+                    XCTAssertEqual(try self.record(reopened, "legacy").kind, .recording)
+                    XCTAssertNoThrow(try self.shot(reopened))
+                }
+            }
+            try await group.waitForAll()
+        }
+    }
+
     func testFinderDeletedCaptureDoesNotBlockOperationsOrRestart() throws {
         for restartFirst in [false, true] {
             let (lib, dir) = try library()
@@ -106,7 +286,7 @@ final class RecoveryTests: XCTestCase {
         try lib.updateSearchText(capture.id, ocr: "secret")
         try lib.setShareLink(capture.id, url: "https://kapture.sh/old", revision: 0)
         capture = try record(lib, capture.id)
-        let original = lib.originalPath(for: capture)
+        let original = try lib.originalPath(for: capture)
         let originalURL = lib.root.appendingPathComponent(original)
         try FileManager.default.createDirectory(at: originalURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         try FileManager.default.copyItem(at: lib.url(for: capture), to: originalURL)

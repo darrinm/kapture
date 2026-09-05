@@ -29,7 +29,7 @@ extension Library {
     public func applyName(_ id: String, baseName: String, tags: [String], summary: String,
                           aiState: CaptureRecord.AIState, job: IngestJob? = nil) -> Bool {
         do {
-            return try withOperation {
+            return try withOperation(for: id) {
                 guard !Library.isInUse(id),
                       var record = try db.queue.read({ try CaptureRecord.fetchOne($0, key: id) }),
                       record.aiState.acceptsName, record.status != .trashed, record.status != .sweeping else { return false }
@@ -39,7 +39,7 @@ extension Library {
                 let source = record.relPath
                 record.relPath = rel(target); record.aiState = aiState; record.summary = summary
                 try commit(FileOperation(op: "rename", source: source, record: record,
-                    sidecar: Sidecar.read(for: current), tags: tags.joined(separator: " ")))
+                    sidecar: nil, tags: tags.joined(separator: " ")))
                 return true
             }
         } catch {

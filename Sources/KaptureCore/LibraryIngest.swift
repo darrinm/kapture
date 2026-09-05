@@ -27,7 +27,7 @@ extension Library {
     }
 
     public func enqueueIngest(_ id: String, notBefore: Date) throws {
-        try withOperation {
+        try withOperation(for: id) {
             try db.queue.write { d in
                 guard let record = try CaptureRecord.fetchOne(d, key: id),
                       record.status != .trashed, record.status != .sweeping else { return }
@@ -38,7 +38,7 @@ extension Library {
 
     public func nextIngestJob() throws -> IngestJob? {
         try db.queue.read { d in
-            guard let row = try Row.fetchOne(d, sql: "SELECT * FROM ingest_jobs WHERE notBefore <= ? ORDER BY notBefore LIMIT 1",
+            guard let row = try Row.fetchOne(d, sql: "SELECT * FROM ingest_jobs WHERE notBefore <= ? AND NOT EXISTS (SELECT 1 FROM op_journal WHERE captureId = ingest_jobs.captureId AND recoveryError IS NOT NULL) ORDER BY notBefore LIMIT 1",
                                              arguments: [Date()]) else { return nil }
             return IngestJob(captureId: row["captureId"], revision: row["revision"], generation: row["generation"],
                              stage: row["stage"], attempts: row["attempts"])
@@ -54,7 +54,7 @@ extension Library {
     }
 
     public func ingestRecord(_ job: IngestJob) throws -> CaptureRecord? {
-        try withOperation {
+        try withOperation(for: job.captureId) {
             try db.queue.read { try Library.currentIngestRecord($0, job: job) }
         }
     }
@@ -63,7 +63,7 @@ extension Library {
     /// also takes the operation lock, so pixels cannot change between that check and the write.
     @discardableResult
     public func finishOCR(_ job: IngestJob, text: String, naming: Bool) throws -> Bool {
-        try withOperation {
+        try withOperation(for: job.captureId) {
             try db.queue.write { d in
                 guard let record = try Library.currentIngestRecord(d, job: job) else { return false }
                 try Library.indexText(d, id: job.captureId, ocr: String(text.prefix(20_000)))
@@ -71,7 +71,7 @@ extension Library {
                 let state: CaptureRecord.AIState = record.aiState.acceptsName ? .ocr : record.aiState
                 try d.execute(sql: "UPDATE captures SET aiState = ? WHERE id = ?",
                               arguments: [state.rawValue, job.captureId])
-                if naming {
+                if naming && record.aiState.acceptsName {
                     try d.execute(sql: "UPDATE ingest_jobs SET stage = 'name', attempts = 0, lastError = NULL WHERE captureId = ?",
                                   arguments: [job.captureId])
                 } else {
@@ -84,7 +84,7 @@ extension Library {
 
     public func clearIngestJob(_ job: IngestJob) throws {
         try db.queue.write { d in
-            try d.execute(sql: "DELETE FROM ingest_jobs WHERE captureId = ? AND generation = ?",
+            try d.execute(sql: "DELETE FROM ingest_jobs WHERE captureId = ? AND generation = ? AND NOT EXISTS (SELECT 1 FROM op_journal WHERE captureId = ingest_jobs.captureId AND recoveryError IS NOT NULL)",
                           arguments: [job.captureId, job.generation])
         }
     }

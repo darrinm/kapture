@@ -9,6 +9,40 @@ final class RevisionTests: XCTestCase {
         return (lib, record, dir)
     }
 
+    func testEditingNamedCaptureAllowsFreshTagsAndSkipsRedundantNaming() throws {
+        let (lib, record, dir) = try fixture()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        XCTAssertTrue(lib.applyName(record.id, baseName: "invoice", tags: ["oldtag"], summary: "old", aiState: .namedAPI))
+        try lib.enqueueIngest(record.id, notBefore: Date())
+        let redundant = try XCTUnwrap(lib.nextIngestJob())
+        XCTAssertTrue(try lib.finishOCR(redundant, text: "invoice", naming: true))
+        XCTAssertNil(try lib.nextIngestJob(), "An already named revision must not enqueue a paid naming call")
+        try lib.applyEdit(record.id, flattenedPNG: Data([9]), layersJSON: "[]", width: 1, height: 1)
+        let ocr = try XCTUnwrap(lib.nextIngestJob())
+        XCTAssertTrue(try lib.finishOCR(ocr, text: "invoice", naming: true))
+        let name = try XCTUnwrap(lib.nextIngestJob())
+        XCTAssertEqual(name.stage, "name")
+        XCTAssertTrue(lib.applyName(record.id, baseName: "new-invoice", tags: ["stripe"], summary: "invoice", aiState: .namedAPI, job: name))
+        XCTAssertEqual(lib.search("stripe").count, 1)
+        XCTAssertTrue(lib.search("oldtag").isEmpty)
+    }
+
+    func testSnapshotUsesAHardLinkAndSupportsFilesystemsWithoutLinks() throws {
+        let (lib, record, dir) = try fixture()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let linked = try lib.shareSnapshot(record.id)
+        defer { try? FileManager.default.removeItem(at: linked.file) }
+        let fm = FileManager.default
+        XCTAssertEqual(try fm.attributesOfItem(atPath: linked.file.path)[.systemFileNumber] as? NSNumber,
+                       try fm.attributesOfItem(atPath: lib.url(for: record).path)[.systemFileNumber] as? NSNumber)
+        XCTAssertEqual(linked.file.deletingLastPathComponent().lastPathComponent, ".pending")
+        let copied = try lib.shareSnapshot(record.id, linking: { _, _ in throw CocoaError(.featureUnsupported) })
+        defer { try? fm.removeItem(at: copied.file) }
+        try lib.applyEdit(record.id, flattenedPNG: Data([9]), layersJSON: "[]", width: 1, height: 1)
+        XCTAssertEqual(try Data(contentsOf: linked.file), Data([1, 2, 3]))
+        XCTAssertEqual(try Data(contentsOf: copied.file), Data([1, 2, 3]))
+    }
+
     func testOldOCRCannotRepopulateRedactedTextOrRemoveTheReplacementJob() throws {
         let (lib, record, dir) = try fixture()
         defer { try? FileManager.default.removeItem(at: dir) }

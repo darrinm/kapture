@@ -31,6 +31,15 @@ public struct Sidecar: Codable {
         return try? dec.decode(Sidecar.self, from: data)
     }
 
+    /// Mutation paths must distinguish a missing sidecar from one we cannot safely interpret.
+    public static func readIfPresent(for fileURL: URL) throws -> Sidecar? {
+        let data: Data
+        do { data = try Data(contentsOf: url(for: fileURL)) }
+        catch let error as CocoaError where error.code == .fileNoSuchFile || error.code == .fileReadNoSuchFile { return nil }
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(Sidecar.self, from: data)
+    }
+
     public static func url(for fileURL: URL) -> URL {
         fileURL.deletingPathExtension().appendingPathExtension("kapture")
     }
