@@ -9,6 +9,7 @@ import {
   newToken, saveOwners, sha256Hex,
 } from "./common";
 import { libraryEnabled, libraryLogFor, type OpEnvelope } from "./library";
+import { quotaFor } from "./quota";
 
 const DEVICE_ID = "[0-9A-HJKMNP-TV-Z]{26}";
 const BLINDED_ID = "[0-9A-Z]{1,64}";
@@ -210,6 +211,19 @@ export async function handleLibrary(
     if (request.method === "PUT") {
       if (writer !== deviceID) return json({ error: "a device writes only its own blobs" }, 403);
       const body = await request.arrayBuffer();
+
+      // F54, F87: a part of a multipart upload, staged under its own key and joined on
+      // completion. Parts are 32 MB because each one is held in memory by this invocation.
+      const part = url.searchParams.get("part");
+      if (part) {
+        const index = Number(part);
+        if (!Number.isInteger(index) || index < 1 || index > 10_000) {
+          return json({ error: "bad part number" }, 400);
+        }
+        await env.BUCKET.put(`${key}.part${index}`, body);
+        return json({ key, part: index, bytes: body.byteLength });
+      }
+
       const existing = await env.BUCKET.head(key);
       if (existing) {
         // F99: a PUT whose response was lost looks like a collision to the retrying client, and
@@ -220,11 +234,60 @@ export async function handleLibrary(
         if (stored && stored === digest) return json({ key, bytes: body.byteLength, retry: true });
         return json({ error: "blob already exists" }, 409);
       }
+
+      const quotaError = await quotaFor(env, owner).chargeLibrary(body.byteLength);
+      if (quotaError) return json({ error: quotaError }, 429);
+
       await env.BUCKET.put(key, body, {
         customMetadata: { digest: await sha256Hex(toBase64(body)) },
       });
       return json({ key, bytes: body.byteLength });
     }
+
+    if (request.method === "POST" && url.searchParams.has("complete")) {
+      if (writer !== deviceID) return json({ error: "a device writes only its own blobs" }, 403);
+      const parts = Number(url.searchParams.get("complete"));
+      if (!Number.isInteger(parts) || parts < 1) return json({ error: "bad part count" }, 400);
+
+      const chunks: Uint8Array[] = [];
+      let total = 0;
+      for (let index = 1; index <= parts; index++) {
+        const staged = await env.BUCKET.get(`${key}.part${index}`);
+        if (!staged) return json({ error: `missing part ${index}` }, 409);
+        const bytes = new Uint8Array(await staged.arrayBuffer());
+        chunks.push(bytes);
+        total += bytes.byteLength;
+      }
+      const quotaError = await quotaFor(env, owner).chargeLibrary(total);
+      if (quotaError) return json({ error: quotaError }, 429);
+
+      const joined = new Uint8Array(total);
+      let offset = 0;
+      for (const chunk of chunks) { joined.set(chunk, offset); offset += chunk.byteLength; }
+      await env.BUCKET.put(key, joined, {
+        customMetadata: { digest: await sha256Hex(toBase64(joined)) },
+      });
+      for (let index = 1; index <= parts; index++) {
+        await env.BUCKET.delete(`${key}.part${index}`);
+      }
+      return json({ key, bytes: total });
+    }
+
+    if (request.method === "DELETE") {
+      const head = await env.BUCKET.head(key);
+      if (!head) return json({ error: "not found" }, 404);
+      await env.BUCKET.delete(key);
+      await quotaFor(env, owner).creditLibrary(head.size);
+      return noContent();
+    }
+  }
+
+  // ---- storage usage, and the only supported repair for drift (F59, F76) ----
+  if (path === "/api/library/usage" && request.method === "GET") {
+    if (url.searchParams.get("reconcile") === "1") {
+      return json(await quotaFor(env, owner).reconcileStored(owner));
+    }
+    return json(await quotaFor(env, owner).storedUsage());
   }
 
   return json({ error: "not found" }, 404);

@@ -40,7 +40,7 @@ let package = Package(
         .executableTarget(
             name: "Kapture",
             dependencies: ["KaptureCore", "KaptureCapture", "KaptureDesign", "KaptureEditor",
-                           "KaptureRecording", "KaptureIntelligence",
+                           "KaptureRecording", "KaptureIntelligence", "KaptureSync",
                            .product(name: "Sparkle", package: "Sparkle")],
             path: "Sources/Kapture"),
         .testTarget(name: "KaptureCoreTests", dependencies: ["KaptureCore"], path: "Tests/KaptureCoreTests"),

@@ -79,6 +79,14 @@ struct FakeTransport: LibraryTransport {
     }
 
     func snapshotClaim(supportsV: Int, seq: Int64) async throws -> Bool { true }
+
+    // Blob and sweep traffic is exercised by BlobStoreTests and SweepTests; this fake carries
+    // rows only, so these are inert rather than absent.
+    func putBlob(_ data: Data, at locator: BlobLocatorRef) async throws {}
+    func getBlob(_ locator: BlobLocatorRef) async throws -> Data { Data() }
+    func putSnapshot(_ data: Data, seq: Int64) async throws {}
+    func getSnapshot(seq: Int64, writer: String) async throws -> Data { Data() }
+    func acquireSweepLease(windowMs: Int64) async throws -> SweepLease { SweepLease(granted: false) }
 }
 
 final class SyncEngineTests: XCTestCase {

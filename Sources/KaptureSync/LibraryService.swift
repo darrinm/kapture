@@ -19,6 +19,22 @@ public enum LibraryState: Sendable, Equatable {
     case ready
 }
 
+/// This Mac's `deviceID` (F3).
+///
+/// Generated once and kept in UserDefaults rather than the Keychain, deliberately: two Macs
+/// restoring the same Keychain must not become the same device, and a synchronized item is
+/// exactly how that would happen.
+public enum LibraryDeviceID {
+    static let key = "libraryDeviceID"
+
+    public static func current(defaults: UserDefaults = .standard) -> String {
+        if let existing = defaults.string(forKey: key), !existing.isEmpty { return existing }
+        let generated = ULID.generate()
+        defaults.set(generated, forKey: key)
+        return generated
+    }
+}
+
 public actor LibraryService {
     public static let shared = LibraryService()
 

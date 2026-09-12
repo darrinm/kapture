@@ -114,11 +114,18 @@ default.
 The updater asks kapture.sh once a day whether there is a newer version; that request carries
 nothing about you or your captures, and Settings can turn it off.
 
-Two things can send your *content* off the Mac, both opt-in and both visible:
+Three things can send your *content* off the Mac, all opt-in and all visible:
 
 - **AI naming**, if you add an Anthropic API key: the capture image and its recognized text go
   to the Anthropic API to produce a filename. Without a key, naming happens on-device.
 - **Sharing**, when you press ⌘U: that capture is uploaded to the endpoint you configured.
+- **A shared library**, if you turn it on: your captures sync between your own Macs. It is off
+  until enabled, and it needs a server you run yourself — kapture.sh does not store anyone
+  else's library. Everything is encrypted on your Mac first, so the server holds ciphertext and
+  cannot read a capture, its name, or its recognized text. The key lives in your iCloud
+  Keychain and never leaves it, which also means losing it makes the library unreadable to
+  everyone, including whoever runs the server. Keep the recovery code.
+  See [`docs/SHARED-LIBRARY.md`](docs/SHARED-LIBRARY.md).
 
 Text recognition, search indexing, and everything else happens locally. Both API keys live in
 the Keychain, never in preferences.

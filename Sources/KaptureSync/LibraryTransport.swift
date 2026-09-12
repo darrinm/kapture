@@ -64,6 +64,23 @@ public protocol LibraryTransport: Sendable {
     func changes(since: Int64, limit: Int) async throws -> ChangesPage
     func push(_ ops: [OutgoingOp]) async throws -> PushOutcome
     func snapshotClaim(supportsV: Int, seq: Int64) async throws -> Bool
+    /// Create-only (F22). An identical re-PUT is a retry, not a conflict (F99).
+    func putBlob(_ data: Data, at locator: BlobLocatorRef) async throws
+    func getBlob(_ locator: BlobLocatorRef) async throws -> Data
+    func putSnapshot(_ data: Data, seq: Int64) async throws
+    func getSnapshot(seq: Int64, writer: String) async throws -> Data
+    /// Take the sweep lease and learn which captures are eligible (F43, F45, F108).
+    func acquireSweepLease(windowMs: Int64) async throws -> SweepLease
+}
+
+public struct SweepLease: Codable, Sendable {
+    public var granted: Bool
+    public var until: Int64
+    public var eligible: [String]
+
+    public init(granted: Bool, until: Int64 = 0, eligible: [String] = []) {
+        self.granted = granted; self.until = until; self.eligible = eligible
+    }
 }
 
 public struct OutgoingOp: Codable, Sendable {
@@ -169,6 +186,80 @@ public struct HTTPTransport: LibraryTransport {
             token: json["token"] as? String ?? "",
             approved: json["approved"] as? Bool ?? false,
             fingerprint: json["fingerprint"] as? String ?? "")
+    }
+
+    // MARK: - Blobs (§8)
+
+    func blobPath(_ locator: BlobLocatorRef) -> String {
+        "api/library/blob/\(locator.purpose.rawValue)/\(locator.capture)/\(locator.revision)/\(locator.writer)"
+    }
+
+    public func putBlob(_ data: Data, at locator: BlobLocatorRef) async throws {
+        if data.count > HTTPTransport.multipartThreshold {
+            return try await putMultipart(data, at: locator)
+        }
+        var request = self.request(blobPath(locator), method: "PUT")
+        request.httpBody = data
+        let (body, response) = try await session.data(for: request)
+        try Self.check(response, body)
+    }
+
+    public func getBlob(_ locator: BlobLocatorRef) async throws -> Data {
+        let (data, response) = try await session.data(for: request(blobPath(locator)))
+        try Self.check(response, data)
+        return data
+    }
+
+    /// F54, F87: above the threshold the upload is split. Parts are 32 MB because each one
+    /// passes through a Worker invocation that must hold it in memory, and a Worker has a 128 MB
+    /// ceiling — 64 MB plus request and response overhead leaves too little headroom to rely on.
+    public static let multipartThreshold = 90 * 1024 * 1024
+    public static let partSize = 32 * 1024 * 1024
+
+    func putMultipart(_ data: Data, at locator: BlobLocatorRef) async throws {
+        var offset = 0
+        var part = 1
+        while offset < data.count {
+            let end = min(offset + Self.partSize, data.count)
+            var request = self.request("\(blobPath(locator))?part=\(part)", method: "PUT")
+            request.httpBody = data.subdata(in: offset..<end)
+            let (body, response) = try await session.data(for: request)
+            try Self.check(response, body)
+            offset = end
+            part += 1
+        }
+        var complete = self.request("\(blobPath(locator))?complete=\(part - 1)", method: "POST")
+        complete.setValue("application/json", forHTTPHeaderField: "content-type")
+        let (body, response) = try await session.data(for: complete)
+        try Self.check(response, body)
+    }
+
+    // MARK: - Snapshots (§6.4)
+
+    public func putSnapshot(_ data: Data, seq: Int64) async throws {
+        var request = self.request("api/library/snapshot/\(seq)", method: "PUT")
+        request.httpBody = data
+        let (body, response) = try await session.data(for: request)
+        try Self.check(response, body)
+    }
+
+    public func getSnapshot(seq: Int64, writer: String) async throws -> Data {
+        let (data, response) = try await session.data(
+            for: request("api/library/snapshot/\(seq)/\(writer)"))
+        try Self.check(response, data)
+        return data
+    }
+
+    // MARK: - Sweep (§7.4)
+
+    public func acquireSweepLease(windowMs: Int64) async throws -> SweepLease {
+        let request = self.request("api/library/lease/sweep?windowMs=\(windowMs)", method: "POST")
+        let (data, response) = try await session.data(for: request)
+        if let http = response as? HTTPURLResponse, http.statusCode == 409 {
+            return SweepLease(granted: false)
+        }
+        try Self.check(response, data)
+        return try JSONDecoder().decode(SweepLease.self, from: data)
     }
 
     static func check(_ response: URLResponse, _ data: Data) throws {

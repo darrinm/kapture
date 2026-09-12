@@ -440,6 +440,12 @@ public final class Library: @unchecked Sendable {
 
     /// Retry interrupted sweeps and retain the row/sidecar until every referenced file is gone.
     public func sweepTrash(olderThanDays days: Int = 7) {
+        // With the shared library on, deleting is the log's decision, not this process's
+        // (shared-library §7.4 F43, F44). Two Macs each running this timer against one logical
+        // library will delete bytes the other has just restored: the local `trashedAt` is not
+        // authoritative, the seven days are the server's to count, and only the lease holder may
+        // issue a delete. `SweepCoordinator` does that; this stays local and does nothing.
+        guard !Settings.shared.libraryEnabled else { return }
         sweepTrash(olderThanDays: days, removing: removeIfPresent)
     }
 

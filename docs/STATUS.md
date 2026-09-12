@@ -74,12 +74,21 @@ still 404.
 
 ## M6 status (It follows you)
 
-Proposed, not started: one library per person, shared by every Mac that person signs in on.
-Specified in [`SHARED-LIBRARY.md`](SHARED-LIBRARY.md) — a per-owner Durable Object log, R2 for
-blobs, client-side encryption with the key in iCloud Keychain, metadata and thumbnails on every
-Mac with originals fetched on demand. Staged M6a (metadata only) → M6b (blobs) → M6c (sweep
-lease, quotas, revocation), with a migration path for Macs that already hold a library and for
-merging two of them.
+Done: one library per person, shared by every Mac that person signs in on. Rows, names and
+recognized text sync through a per-owner Durable Object log; thumbnails and bytes follow, with
+originals fetched on open and a cache ceiling. Everything is encrypted on the Mac before it is
+uploaded — the server holds ciphertext and blinded ids, and can read nothing. Conflicts fork
+rather than discard, the trash sweep moves behind a server lease so two Macs cannot delete each
+other's restores, and a delete is conditional on the log. Enabled for one allowlisted owner;
+anyone else runs their own Worker.
+
+The design and its two adversarial reviews are in
+[`SHARED-LIBRARY.md`](SHARED-LIBRARY.md) — 139 numbered requirements, and a record of the twelve
+blocking errors the reviews found, because most of them read as perfectly reasonable rules.
+
+M6 remaining: the library grid does not yet badge a remote or forked capture, and the admin
+dashboard does not yet list devices for approval — enrolment approval works over the API but
+has no UI. Neither blocks syncing.
 
 Architecture and staging follow the implementation spec (v2.1); deviations: SwiftPM-only for
 now (no .xcodeproj — `scripts/bundle.sh` assembles the app), KeyboardShortcuts dep deferred

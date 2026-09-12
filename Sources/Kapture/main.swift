@@ -6,6 +6,7 @@ import KaptureDesign
 import KaptureEditor
 import KaptureRecording
 import KaptureIntelligence
+import KaptureSync
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
@@ -25,6 +26,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             Task {
                 await IngestQueue.shared.configure(library: library)
                 await IngestQueue.shared.resume()   // pick up jobs left by a previous run
+            }
+            // The shared library, off unless it has been enabled (G6). `start` returns without
+            // doing anything when the feature is off, so an install that never enables it pays
+            // nothing — including the sweep, which stays entirely local in that case.
+            Task {
+                let deviceID = LibraryDeviceID.current()
+                _ = await LibraryService.shared.start(db: db, deviceID: deviceID)
+                await LibraryService.shared.syncNow()
             }
             EditorController.shared.onFlattened = { id in
                 OverlayController.shared.showCard(recordID: id)
