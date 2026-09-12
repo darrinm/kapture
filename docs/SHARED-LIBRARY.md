@@ -45,7 +45,10 @@ transactional state in a Durable Object (`worker/src/quota.ts`).
 - Real-time collaboration. Two Macs editing one capture within seconds of each other is rare
   and is handled by forking (§7.1), not by merging.
 - Sharing a library between two people. "Same user" means one owner, several devices.
-- A web library. §4 rules it out: the server holds ciphertext and cannot render a grid.
+- A web library, and any client that is not a Mac. D1 rules both out and was re-confirmed on
+  that understanding (§14 Q9): the server holds ciphertext and cannot render a grid, and a
+  browser or a phone cannot hold a key that lives in the Mac's iCloud Keychain. This is a
+  permanent consequence of a decision taken twice, not a thing to revisit per milestone.
 - Syncing Settings, hotkeys, or window positions.
 - Replacing share links (M5). Those stay a separate, deliberate publish action on plaintext
   bytes.
@@ -66,11 +69,19 @@ history is the feature most able to make it false. The cost is real and is accep
 server-side thumbnailing, no server-side search, no web viewer for library items, no
 cross-user deduplication. §4 specifies the scheme and §13 states what the server still learns.
 
-D2 later narrowed the deployment to a single owner, which changes what this decision defends
-against — the operator and the only user became the same person. The threat it still answers is
-the infrastructure rather than the operator: Cloudflare, a compromised account, a misconfigured
-bucket, a subpoena served on the provider. That is a real threat and a weaker one than the
-decision was written against, so §14 Q9 reopens it rather than letting it stand unexamined.
+D2 later narrowed the deployment to a single owner, which changed what this decision defends
+against: the operator and the only user became the same person. It was re-examined on that basis
+and **kept** (§14 Q9). The threat it answers now is the infrastructure rather than the operator —
+Cloudflare, a compromised Cloudflare account, a misconfigured bucket, a subpoena served on the
+provider rather than on the person. A capture library is a record of everything its owner has
+looked at, which is worth protecting from the place it is stored even when that place is the
+owner's own account.
+
+What this costs is accepted a second time, with the price now known rather than estimated: the
+derivation in F12 and F95, the envelope split in F97 and F98, key recovery in F85, the locked
+state in F86, the `keyID` pinning in F117, and a browser or phone client forever (§1.3). Several
+of those were where the first review found blocking errors, and keeping D1 means keeping that
+complexity and testing it properly rather than hoping it is right.
 
 ### D2 — One owner, several devices
 
@@ -893,19 +904,11 @@ anything escaping the root.
   admin dashboard behind Cloudflare Access is always available as the escape, and it is reached
   from any browser rather than from a Mac. The recovery code stays a decryption key and does not
   become a credential.
-- **Q9** **Is D1 still worth its cost?** Its original justification was protecting users from the
-  operator. D2 removes the users: the only person with a library on `kapture.sh` is the person
-  running it. What client-side encryption still buys is protection from Cloudflare, from a
-  compromised Cloudflare account, from a misconfigured bucket, and from a subpoena served on the
-  provider rather than the person — all real, none of them the threat the decision was written
-  against.
-
-  What it costs is most of the machinery the first review found errors in: the derivation in F12
-  and F95, the envelope split in F97 and F98, key recovery in F85, the locked state in F86, the
-  `keyID` pinning in F117, and the permanent impossibility of a web library or a phone client.
-  Dropping D1 would remove roughly a third of this spec and make a browser-based library
-  straightforward. Keeping it is defensible; keeping it *by inertia*, now that its stated reason
-  no longer applies, is not. This should be settled before §12.1 starts.
+- **Q9** *Resolved: D1 is kept.* Asked because D2 removed the users that D1 was written to
+  protect, leaving operator and user as one person. Re-taken deliberately against the
+  infrastructure threat instead — see D1 for the justification that now applies and the cost
+  accepted with it. The consequences are no longer open questions: no web library, no phone
+  client, and the encryption machinery in §4 and §6.1 stays and gets tested rather than trimmed.
 
 ---
 
