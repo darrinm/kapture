@@ -155,6 +155,16 @@ personal guardrail: it exists to make a runaway sync fail loudly instead of arri
   the device cannot come back, or it means nothing.
 - **F114** Revoking the last device of an owner does not re-open silent enrolment. The gate is
   "this owner has ever had a device", not "has one now".
+- **F124** Approval happens in the admin dashboard, behind Cloudflare Access. A pending
+  enrolment is listed there with the device name and a short fingerprint of its credential, and
+  the enrolling Mac shows the same fingerprint, so the person approving can see they are
+  approving the Mac in front of them. The dashboard is the mechanism because it needs no
+  transport that does not already exist: there is no push channel (F28, §14 Q1), and requiring
+  an enrolled Mac to be awake and polling would make enrolment depend on a device that may be
+  the one that was lost. Under D2 the owner runs the deployment, so the dashboard is always
+  theirs to reach.
+- **F125** An enrolled Mac may also approve a pending enrolment when it notices one on its next
+  poll. That is a convenience and never the only path.
 - **F6** Enabling on a Mac with no library key requires the owner token pasted in
   Settings › Library, exactly as the share token is pasted today.
 - **F7** A device credential is stored in the local Keychain, not the iCloud Keychain. It is
@@ -519,6 +529,13 @@ delete bytes the other just restored.
 - **F107** Blob deletion follows the accepted `delete` op. Bytes are removed only after the DO
   has admitted the op, never in anticipation of it, so a rejected delete leaves the capture
   whole.
+- **F123** A rejected delete is not retried within the same sweep pass. The holder abandons that
+  capture, finishes the rest of the pass, and re-evaluates it next time with a fresh `observed`.
+  Retrying immediately against a capture that is actively receiving ops would spin, and the
+  rule the DO enforces is "any op since", which it must be: the DO cannot read a payload and so
+  cannot tell a restore from a thumbnail re-push (F68). Starvation is bounded in practice
+  because a capture eligible for sweep has been trash for seven days and backfill touches each
+  capture once, but the bound is a property of the workload, not of the rule.
 - **F108** Both ends of the 7-day window are server time. The eligible instant is the DO's `at`
   on the trash op (§5.1), and "now" is the DO's clock; no client timestamp enters the comparison.
   "Log time" otherwise names no particular clock, and a Mac with a skewed one would sweep early.
@@ -754,6 +771,13 @@ a payload change needs no Worker deploy.
   entry is re-fetched and applied when the client's supported payload version rises. Advancing
   the cursor past an op discards it otherwise: it sits behind the cursor forever, and upgrading
   never goes back for it.
+- **F122** A client whose `skipped_ops` name a `seq` the server no longer retains re-bootstraps
+  from the newest snapshot (F27) instead of trusting its cursor, then clears those entries.
+  F34 may have compacted the op away while the client sat at an old version, and F27's fallback
+  only fires for a cursor *behind* the retained window — an upgraded client's cursor is at head,
+  so without this it would silently keep the stale row it skipped and never correct it. F102
+  guarantees the snapshot contains the capture, because only a complete client could have
+  written it.
 - **F105** A client must not edit, trash, sweep, or snapshot a capture whose ops it has skipped,
   and must not rewrite a row it only partly understands. When it does write a row it received,
   it preserves every field it does not recognize and sends them back unchanged. A whole-row op
