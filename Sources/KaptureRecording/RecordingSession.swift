@@ -71,15 +71,8 @@ public final class RecordingSession: NSObject, SCStreamOutput, @unchecked Sendab
         config.showsCursor = true
         config.capturesAudio = captureSystemAudio
         config.excludesCurrentProcessAudio = true
-        // SCK mic capture is 15+; the deployment floor is 14, where mic is simply unavailable
-        // (AVCaptureSession fallback is spec'd for 14.x but deferred — Darrin's Macs run 15+).
-        let micEnabled: Bool
-        if #available(macOS 15.0, *), captureMic {
-            config.captureMicrophone = true
-            micEnabled = true
-        } else {
-            micEnabled = false
-        }
+        let micEnabled = captureMic
+        config.captureMicrophone = micEnabled
 
         outputURL = Library.tempURL(prefix: "kapture-recording", ext: "mp4")
         writer = try AVAssetWriter(outputURL: outputURL, fileType: .mp4)
@@ -105,7 +98,7 @@ public final class RecordingSession: NSObject, SCStreamOutput, @unchecked Sendab
         super.init()
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
         if captureSystemAudio { try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: queue) }
-        if #available(macOS 15.0, *), micEnabled {
+        if micEnabled {
             try stream.addStreamOutput(self, type: .microphone, sampleHandlerQueue: queue)
         }
     }

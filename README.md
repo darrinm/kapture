@@ -54,7 +54,7 @@ Download the latest DMG from [kapture.sh/download](https://kapture.sh/download) 
 is signed with a Developer ID and notarized, so it opens without a Gatekeeper detour. After
 that it updates itself.
 
-Requires macOS 14 or later on Apple silicon.
+Requires macOS 26 (Tahoe) or later on Apple silicon.
 
 To build it yourself instead:
 

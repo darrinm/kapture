@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "Kapture",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS("26.0")],
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "6.29.0"),
         // in-app updates: the appcast lives at kapture.sh/appcast.xml and points at GitHub releases

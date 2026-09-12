@@ -132,7 +132,7 @@ final class OverlayController {
         let url = library.url(for: record)
         // decoding the flattened PNG is slow for big captures — keep it off the main actor
         Task.detached(priority: .userInitiated) {
-            guard let image = OverlayController.poster(for: url) else { return }
+            guard let image = await OverlayController.poster(for: url) else { return }
             await MainActor.run {
                 OverlayController.shared.show(record: record, fileURL: url, image: image)
             }
@@ -141,13 +141,13 @@ final class OverlayController {
 
     /// Card pixels for any library file: decoded stills, first frame for movies.
     /// NSImage returns nil for .mp4, so a movie needs the asset generator (post-trim cards).
-    nonisolated static func poster(for url: URL) -> CGImage? {
+    nonisolated static func poster(for url: URL) async -> CGImage? {
         if let still = NSImage(contentsOf: url)?.cgImage(forProposedRect: nil, context: nil, hints: nil) {
             return still
         }
         let generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
         generator.appliesPreferredTrackTransform = true
-        return try? generator.copyCGImage(at: .zero, actualTime: nil)
+        return try? await generator.image(at: .zero).image
     }
 
     // MARK: tuck — swipe down puts the stack out of the way without closing anything

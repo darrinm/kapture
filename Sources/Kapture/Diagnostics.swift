@@ -64,7 +64,7 @@ enum Diagnostics {
             // only decode when the API engine will actually use the pixels
             var jpeg: Data?
             if key != nil {
-                guard let image = OverlayPosterDecoder.decode(library.url(for: r)) else {
+                guard let image = await OverlayPosterDecoder.decode(library.url(for: r)) else {
                     print("\(old) → (undecodable)"); continue
                 }
                 jpeg = ImageEncoding.jpegData(image)
