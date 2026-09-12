@@ -72,6 +72,14 @@ M5 remaining: no release has been cut yet — that needs a Developer ID certific
 notarization secrets listed in [`RELEASING.md`](RELEASING.md), so `/download` and the appcast
 still 404.
 
+## M6 status (It follows you)
+
+Proposed, not started: one library per person, shared by every Mac that person signs in on.
+Specified in [`SHARED-LIBRARY.md`](SHARED-LIBRARY.md) — a per-owner Durable Object log, R2 for
+blobs, client-side encryption with the key in iCloud Keychain, metadata and thumbnails on every
+Mac with originals fetched on demand. Staged M6a (metadata only) → M6b (blobs) → M6c (sweep
+lease, quotas, revocation).
+
 Architecture and staging follow the implementation spec (v2.1); deviations: SwiftPM-only for
 now (no .xcodeproj — `scripts/bundle.sh` assembles the app), KeyboardShortcuts dep deferred
 until the Settings UI lands (Carbon direct in the meantime).
