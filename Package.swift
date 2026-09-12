@@ -31,6 +31,12 @@ let package = Package(
             name: "KaptureRecording",
             dependencies: ["KaptureCore", "KaptureCapture"],
             path: "Sources/KaptureRecording"),
+        // The shared library (docs/SHARED-LIBRARY.md §10.5 F89). Separate from Core because sync
+        // adds CryptoKit and URLSession, and Core stays testable without a network stack.
+        .target(
+            name: "KaptureSync",
+            dependencies: ["KaptureCore"],
+            path: "Sources/KaptureSync"),
         .executableTarget(
             name: "Kapture",
             dependencies: ["KaptureCore", "KaptureCapture", "KaptureDesign", "KaptureEditor",
@@ -38,6 +44,8 @@ let package = Package(
                            .product(name: "Sparkle", package: "Sparkle")],
             path: "Sources/Kapture"),
         .testTarget(name: "KaptureCoreTests", dependencies: ["KaptureCore"], path: "Tests/KaptureCoreTests"),
+        .testTarget(name: "KaptureSyncTests", dependencies: ["KaptureSync"],
+                    path: "Tests/KaptureSyncTests"),
         .testTarget(name: "KaptureEditorTests", dependencies: ["KaptureEditor"],
                     path: "Tests/KaptureEditorTests"),
         .testTarget(name: "KaptureDesignTests", dependencies: ["KaptureDesign"],

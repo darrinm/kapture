@@ -542,8 +542,14 @@ It becomes the sync rule.
 
 ### 7.2 Status
 
-- **F38** `status` resolves by §7 ordering, with one exception: `trashed` from any device beats a
-  concurrent `kept`. An accidental keep is a nuisance; an unintended delete is data loss.
+- **F38** `status` resolves by §7 ordering, with one exception: `trashed` beats `kept` when the
+  two are **concurrent** — equal `lamport`, neither having seen the other. An accidental keep is
+  a nuisance; an unintended delete is data loss, so a genuine tie breaks toward the recoverable
+  outcome.
+- **F137** "Concurrent" is load-bearing in F38 and was missing from its first statement. A write
+  with a strictly greater `lamport` decides on its own, whatever its status. Making `trashed`
+  absorbing instead means F39's restore can never win: the capture is re-trashed on the next
+  sync, on every Mac, forever. Implementing §7 surfaced this immediately.
 - **F39** A `restore` carries a strictly greater `lamport` than the `trash` it undoes, by
   construction (F29), so a restore always wins over the trash it follows.
 - **F109** A `restore` names the `seq` of the trash it undoes, in the envelope's `observed`. A
@@ -808,6 +814,16 @@ empty-client bootstrap of F27.
   bytes are not necessarily a duplicate — the same screenshot taken deliberately twice is two
   captures — and collapsing a pair would discard one row's annotations, name and share link.
   §14 Q6 tracks a user-driven duplicate finder.
+- **F138** Every row carries `parentHash`: the `contentHash` the revision was derived from, nil
+  for an original. F112 cannot be implemented without it. A divergent lineage and an ordinary
+  sequential edit present the identical signature — a higher revision with a different hash — so
+  a rule keyed on that alone forks every edit in the library. The parent is the evidence: a row
+  whose parent is not the other side's content did not descend from it.
+- **F139** Absent a `parentHash` on either side, the answer is "not divergent". A false fork
+  splits a capture nobody edited twice; a missed one still converges on the higher revision.
+  Where the evidence is ambiguous — a multi-step descendant whose intermediate revisions this
+  Mac never saw — the merge keeps both sides rather than dropping one, which is F37 applied to a
+  case it did not anticipate.
 - **F72** A merge is confirmed before it happens. Settings states how many local captures are
   about to be added to the library, and nothing is pushed until the person agrees. Adding 4,000
   captures to a shared library is not obviously what someone enabling a checkbox intended.
