@@ -118,8 +118,16 @@ and a shared library changes nothing about that.
 ### 3.2 Enrolment
 
 - **F5** Enabling the library on a Mac that already has the library key in its Keychain enrols
-  silently: the client generates a `deviceID`, posts it with the owner credential once, and
-  receives a device credential.
+  silently **only when the owner has no devices yet**. That is the first Mac, creating the
+  library. Every later enrolment is approved (F113) before it receives a device credential.
+- **F113** Once an owner has one device, enrolling another requires approval from an already
+  enrolled device or from the admin dashboard, and the approval names the new device. Silent
+  enrolment on a still-valid owner token would undo every revocation: a stolen Mac holds the
+  owner token too — iCloud Keychain put it there (§1.1) — so after F8 revokes its device
+  credential it could generate a fresh `deviceID` and enrol again. Revoking a device has to mean
+  the device cannot come back, or it means nothing.
+- **F114** Revoking the last device of an owner does not re-open silent enrolment. The gate is
+  "this owner has ever had a device", not "has one now".
 - **F6** Enabling on a Mac with no library key requires the owner token pasted in
   Settings › Library, exactly as the share token is pasted today.
 - **F7** A device credential is stored in the local Keychain, not the iCloud Keychain. It is
@@ -152,15 +160,35 @@ and a shared library changes nothing about that.
 - **F11** The library key is 256 bits from `SecRandomCopyBytes`, generated once, stored in
   iCloud Keychain with `kSecAttrSynchronizable` beside the share token
   (`Sources/KaptureCore/Keychain.swift`). It is never sent anywhere.
-- **F12** Per-object keys are derived, never reused:
-  `HKDF-SHA256(libraryKey, salt = deviceID, info = "kapture/v1/" + purpose + "/" + captureID +
-  "/" + revision)`, where `purpose` is `blob`, `thumb`, `orig` or `row`.
+- **F12** Per-object keys are derived from values the reader already has before it decrypts
+  anything:
+  `HKDF-SHA256(libraryKey, salt = keyID, info = "kapture/v1/" + purpose + "/" + blindedID +
+  "/" + revision + "/" + writer)`, where `purpose` is `row`, `blob`, `thumb`, `orig` or `snap`,
+  and `writer` is the `deviceID` that produced the object. Every one of those appears in the
+  plaintext envelope (§6.1) or in the object's own key path (§5.2). For `snap`, `blindedID` is
+  replaced by the snapshot's `seq`.
+- **F95** The derivation must never depend on a value carried inside the ciphertext. Deriving
+  from `captureID` cannot work: a device receiving an unfamiliar capture holds only the
+  `blindedID`, and F15 is an HMAC, which does not invert. `blindedID` is what every holder of
+  the library key can compute and every reader already has, so it is what the derivation uses.
+- **F96** The salt is the `keyID` (F14), not a `deviceID`. A per-device salt would make an
+  object decryptable only by a reader that knew which device wrote it, which is not always
+  recoverable — a row re-pushed by a second device (F68) names blobs a first device encrypted.
+  `writer` stays in `info` so two devices writing the same logical object derive different keys.
 - **F13** Encryption is AES-256-GCM with a fresh random 96-bit nonce per object, the nonce
-  prefixed to the ciphertext. Deriving by revision (F12) means a re-encrypted revision never
-  reuses a key/nonce pair even if the RNG repeats.
+  prefixed to the ciphertext. Two objects may share a derived key — a rename re-encrypts a row
+  at an unchanged revision — so uniqueness rests on the nonce, not on the derivation. At 96 bits
+  and this volume the repetition risk is negligible, and F13 is the only thing standing between
+  the scheme and a nonce-reuse failure: it is not an incidental detail.
 - **F14** The key carries a `keyID` — the first 8 bytes of `SHA-256(libraryKey)` — stored with
   every object. A client holding the wrong key reports "this library was made with a different
   key" instead of decryption noise.
+- **F117** The owner's `keyID` is fixed by the first enrolment and recorded by the DO. A device
+  presenting a different `keyID` is refused, and told the owner already has a library under
+  another key; entering the recovery code (F85) is how it joins. Two Macs enabling before iCloud
+  Keychain converges would otherwise each generate a key under F11 and write two unreadable
+  halves of one log. The `keyID` is a hash, so recording it tells the server nothing it could use
+  and costs none of D1.
 
 ### 4.2 Blinded identifiers
 
@@ -198,11 +226,14 @@ One instance per owner, addressed by `idFromName(owner)` — the pattern `quotaF
 CREATE TABLE ops (
   seq        INTEGER PRIMARY KEY AUTOINCREMENT,
   opID       TEXT NOT NULL UNIQUE,   -- client ULID, for idempotent retry
-  deviceID   TEXT NOT NULL,
+  deviceID   TEXT NOT NULL,          -- the writer, and part of the key derivation (F12)
   blindedID  TEXT NOT NULL,
+  v          INTEGER NOT NULL,       -- payload version, so the server can police F100
+  requires   TEXT NOT NULL,          -- JSON [{purpose, revision, writer}], for F32
+  observed   INTEGER NOT NULL,       -- the seq this device had applied when it wrote the op
   ciphertext BLOB NOT NULL,
   bytes      INTEGER NOT NULL,
-  at         TEXT NOT NULL
+  at         TEXT NOT NULL           -- assigned by the DO, never by a client (F103)
 );
 CREATE INDEX ops_by_capture ON ops(blindedID, seq);
 
@@ -235,12 +266,19 @@ CREATE TABLE leases (
 ### 5.2 R2 layout
 
 ```
-shares/<id>                              M5, unchanged, plaintext
-lib/<owner>/blob/<blindedID>/<revision>  encrypted full-resolution bytes
-lib/<owner>/thumb/<blindedID>/<revision> encrypted thumbnail
-lib/<owner>/orig/<blindedID>/<revision>  encrypted pre-edit original
-lib/<owner>/snap/<seq>                   encrypted row-set snapshot
+shares/<id>                                       M5, unchanged, plaintext
+lib/<owner>/blob/<blindedID>/<revision>/<writer>  encrypted full-resolution bytes
+lib/<owner>/thumb/<blindedID>/<revision>/<writer> encrypted thumbnail
+lib/<owner>/orig/<blindedID>/<revision>/<writer>  encrypted pre-edit original
+lib/<owner>/snap/<seq>/<writer>                   encrypted row-set snapshot
 ```
+
+- **F100** The writing `deviceID` is part of every blob key. Two devices that edit the same
+  capture concurrently therefore write two different keys, and neither upload fails. Without the
+  writer in the path, both would target one key, the second would take a 409, and upload order —
+  which is network timing — would decide a question §7.1 settles by log order. The two answers
+  disagree whenever the device that uploads first is not the device that wins the log, which is
+  ordinary rather than rare.
 
 - **F19** Blob objects are immutable. A new revision writes a new key and never overwrites one.
   That is what makes a fork (§7.1) recoverable and a cache coherent.
@@ -253,7 +291,7 @@ lib/<owner>/snap/<seq>                   encrypted row-set snapshot
 POST   /api/library/enroll                   owner credential → { deviceID, token }
 GET    /api/library/changes?since=&limit=    → { ops[], snapshot?, head }
 POST   /api/library/ops                      batch → { assigned: [{opID, seq}], head }
-POST   /api/library/snapshot                 → { uploadURL, seq }
+POST   /api/library/snapshot   { supportsV }  → { uploadURL, seq } | 409 if behind (F102)
 GET    /api/library/blob/:blindedID/:rev     → ciphertext
 PUT    /api/library/blob/:blindedID/:rev     → stores ciphertext, charges quota
 POST   /api/library/multipart/…              → R2 multipart, §8.4
@@ -272,8 +310,19 @@ DELETE /api/library/devices/:deviceID        → revoke
 
 ### 6.1 Operations
 
-An op is one encrypted row payload for one capture at one Lamport time. The server stores the
-ciphertext and never parses it. Decrypted, an op is:
+An op has two parts: a plaintext **envelope** the server acts on, and an encrypted **payload** it
+never parses.
+
+- **F97** The envelope is exactly the non-ciphertext columns of §5.1: `opID`, `deviceID`,
+  `blindedID`, `v`, `requires`, `observed`. Nothing may be put there that is not already implied
+  by the R2 layout or needed by a rule the server enforces, and every server-side rule must be
+  expressible over the envelope alone. A requirement the server cannot check from the envelope is
+  not a requirement, it is a wish.
+- **F98** `requires` lists the blob revisions this op names, as `{purpose, revision, writer}`.
+  It leaks nothing: the server already sees every blob key it stores (§5.2), so the list is a
+  restatement of what is in front of it. It is what makes F32 enforceable.
+
+Decrypted, the payload is:
 
 ```json
 {
@@ -311,8 +360,14 @@ ciphertext and never parses it. Decrypted, an op is:
   page, plus `head`. The client applies a page in one local transaction and advances `cursor`
   only when that transaction commits.
 - **F27** A client whose `cursor` is older than the oldest retained op receives the newest
-  snapshot instead, applies it wholesale, and continues from its `seq`. This is also how a new
-  Mac bootstraps (G3).
+  snapshot instead, applies it, and continues from its `seq`. This is also how a new Mac
+  bootstraps (G3).
+- **F110** A snapshot is merged into the local row set, never substituted for it. A local row the
+  snapshot does not mention is kept and seeded (F62). Replacing the row set would destroy exactly
+  the rows F70's merge exists to preserve, and it would do so before the seeding step meant to
+  contribute them.
+- **F111** A device with a non-empty outbox pushes before it snapshots. A snapshot claims to be
+  the library at seq N, so it may not contain local state the log has never seen.
 - **F28** Pull runs on enable, on app foreground, every 5 minutes while running, and on demand.
   There is no push channel in v1; §14 Q1 tracks it.
 
@@ -326,15 +381,32 @@ ciphertext and never parses it. Decrypted, an op is:
   them.
 - **F31** `opID` is a client-generated ULID and is unique on the server (§5.1), so a batch
   retried after a lost response is idempotent.
-- **F32** Blobs upload before the op that names them. An op naming a revision the server does not
-  hold is rejected with 409, because another Mac would otherwise pull a row pointing at nothing.
+- **F32** Blobs upload before the op that names them. The server checks every entry in the
+  envelope's `requires` (F98) against R2 and rejects the op with 409 if any is absent, because
+  another Mac would otherwise pull a row pointing at nothing. The check is on the envelope, not
+  the payload: the server cannot read the payload's `blobs` map, and a rule stated over
+  ciphertext would be unenforceable.
+- **F99** A `PUT /blob` whose key exists is idempotent when the bytes match. The server compares
+  the stored object's ciphertext digest with the one the client presents and answers 200, not
+  409, when they agree. Without this, a PUT whose response was lost looks to the retrying client
+  like a collision, and F81 would read that as a fork against itself.
 
 ### 6.4 Compaction
 
 - **F33** A client that pulls to `head` and finds more than 10,000 ops since the newest snapshot
   uploads a fresh encrypted snapshot of its full row set at that `seq`.
+- **F102** Only a complete client may snapshot. A device that skipped any op (F78) or that holds
+  a non-empty outbox must not publish one, and the server refuses a snapshot from a device whose
+  declared payload version is below the highest `v` in the log (F97). An incomplete snapshot
+  followed by F34's deletion is silent, permanent data loss: an old client that cannot read a new
+  capture would otherwise write a row set omitting it, and compaction would then delete the only
+  op that carried it. A snapshot asserts "this is the whole library at seq N", and a device that
+  cannot read the whole library cannot assert it.
 - **F34** The server retains the two newest snapshots and every op after the older of them.
   Everything before that is deleted.
+- **F103** `opID` deduplication (F31) outlives compaction. The server keeps every `opID` for 30
+  days regardless of whether its op has been compacted away, so a retry arriving after
+  compaction is still recognized rather than applied twice.
 
 ---
 
@@ -359,11 +431,14 @@ It becomes the sync rule.
 - **F35** Two devices that replace the content of one capture from the same parent revision
   **fork**. The loser by §7 ordering becomes a new capture row with a new ULID,
   `forkedFrom = <original id>`, and the same `createdAt`.
-- **F82** A fork re-keys its blobs. The losing device's `PUT` to
-  `blob/<blindedID>/<revision>` is refused with a 409 by F22, which is the same collision seen
-  at the blob layer. That device then uploads under the forked capture's own `blindedID` (F15)
-  and pushes the fork row. The fork stays local until that upload succeeds, so no row ever names
-  bytes the server does not hold (F32).
+- **F82** The log is the only authority on which side forks. Both devices upload successfully,
+  to keys that differ by writer (F100), and both ops reach the log; F81 detects the collision and
+  the §7 ordering names the loser. The loser then pushes a fork row whose `blobs` map points at
+  the bytes it already uploaded. No re-upload happens, and nothing is decided by which PUT landed
+  first.
+- **F101** A 409 from `PUT /blob` therefore no longer means a fork. After F99 and F100 it means
+  only that this device already wrote these exact bytes, which is a retry, not a conflict. A
+  client must not infer anything about forks from a blob response.
 - **F36** A fork is never silent. The library window shows both, badged, with the device name and
   time that produced each.
 - **F37** Pixels are never discarded to resolve a conflict. The editor already preserves pre-edit
@@ -375,6 +450,11 @@ It becomes the sync rule.
   concurrent `kept`. An accidental keep is a nuisance; an unintended delete is data loss.
 - **F39** A `restore` carries a strictly greater `lamport` than the `trash` it undoes, by
   construction (F29), so a restore always wins over the trash it follows.
+- **F109** A `restore` names the `seq` of the trash it undoes, in the envelope's `observed`. A
+  larger `lamport` alone cannot distinguish a restore that saw a particular trash from one
+  answering an earlier trash it happened to observe, and F38 makes that distinction decisive:
+  without it, a stale restore can outrank a trash it never saw and resurrect a capture the person
+  deliberately discarded afterwards.
 - **F40** `sweeping` is local and never leaves the device. It describes a file operation in
   progress, not a state of the library.
 
@@ -403,6 +483,18 @@ delete bytes the other just restored.
   re-fetch. It never deletes a row, a remote blob, or an `.originals/` file.
 - **F45** The lease holder may delete a capture only after pulling to `head`. A row trashed more
   than 7 days ago by log time is eligible; a local `trashedAt` is not authoritative.
+- **F106** A `delete` op names in its envelope the `observed` seq at which the holder last saw
+  that capture as trash, and the DO rejects it if any op for that `blindedID` has landed since.
+  Pulling to `head` is not sufficient on its own: a restore pushed between the holder's pull and
+  its delete satisfies every other precondition in §7.4, and the lease excludes other sweepers,
+  not other writers. The delete has to be conditional on the log rather than on a snapshot of it
+  the holder took a moment ago.
+- **F107** Blob deletion follows the accepted `delete` op. Bytes are removed only after the DO
+  has admitted the op, never in anticipation of it, so a rejected delete leaves the capture
+  whole.
+- **F108** Both ends of the 7-day window are server time. The eligible instant is the DO's `at`
+  on the trash op (§5.1), and "now" is the DO's clock; no client timestamp enters the comparison.
+  "Log time" otherwise names no particular clock, and a Mac with a skewed one would sweep early.
 - **F46** `scanOriginalReferents` (`Sources/KaptureCore/Library.swift:552`) answers only for
   locally known rows. Under sync it runs over the full synced row set, and only under the lease.
 
@@ -479,8 +571,9 @@ sync_state:    deviceID TEXT, cursor INTEGER, keyID TEXT, enabledAt DATETIME
 sync_outbox:   opID TEXT PRIMARY KEY, captureID TEXT, payload BLOB,
                blobsPending TEXT, attempts INTEGER, nextAttemptAt DATETIME,
                lastError TEXT
-blob_cache:    captureID TEXT, purpose TEXT, revision INTEGER,
+blob_cache:    captureID TEXT, purpose TEXT, revision INTEGER, writer TEXT,
                bytes INTEGER, lastOpenedAt DATETIME
+skipped_ops:   seq INTEGER PRIMARY KEY, v INTEGER, kind TEXT, noticedAt DATETIME
 ```
 
 `sync_outbox` carries the same retry columns `op_journal` gained in `v6-recovery-backoff`
@@ -582,8 +675,16 @@ Two Macs each used for a year, then both enabled, is the normal case. It is not 
 empty-client bootstrap of F27.
 
 - **F70** A Mac with local captures enrolling into a non-empty log applies the snapshot and every
-  op (F27), then seeds its own rows (F62). The result is the union of both libraries. ULIDs do
-  not collide, so no id reconciliation is required.
+  op (F27, F110), then seeds its own rows (F62). The result is the union of both libraries.
+  Independently generated ULIDs do not collide, so captures taken on each Mac need no id
+  reconciliation.
+- **F112** Shared ids are possible anyway, and are handled rather than assumed away. Copying a
+  library folder to a second Mac, or restoring one backup onto two, gives both the same capture
+  ids with no randomness involved; after independent use those ids carry divergent histories.
+  Where one id arrives with two lineages, the rule is F81's, generalized: compare `contentHash`
+  at the highest revision both sides hold, and if they differ, the lower by §7 ordering forks
+  with a fresh ULID. Equal revisions are the F81 case; unequal ones are this case, and neither
+  may be resolved by taking the higher revision, which would discard the other lineage.
 - **F71** A merge does not deduplicate. Two Macs that captured the same screen hold two captures
   with two ids, and they stay two. `contentHash` (F61) identifies identical bytes, but identical
   bytes are not necessarily a duplicate — the same screenshot taken deliberately twice is two
@@ -622,15 +723,35 @@ a payload change needs no Worker deploy.
   is flagged in the library as needing a newer Kapture, and its row is left unmodified. Holding
   the cursor back would let one Mac on an old version stall behind a newer one indefinitely,
   which is worse than one stale row.
+- **F104** A skipped op is recorded in a local `skipped_ops` table with its `seq`, and every
+  entry is re-fetched and applied when the client's supported payload version rises. Advancing
+  the cursor past an op discards it otherwise: it sits behind the cursor forever, and upgrading
+  never goes back for it.
+- **F105** A client must not edit, trash, sweep, or snapshot a capture whose ops it has skipped,
+  and must not rewrite a row it only partly understands. When it does write a row it received,
+  it preserves every field it does not recognize and sends them back unchanged. A whole-row op
+  (F24) written by a client that silently dropped unknown fields would erase a newer client's
+  work on the next push.
 
 ### 11.6 Downgrade and disabling
 
 - **F79** `v7-shared-library` is additive: new tables, and new columns that are nullable or
-  defaulted. A build predating it opens the database, ignores what it does not know, and keeps
-  working, because `Database.migrate()` does not set `eraseDatabaseOnSchemaChange` — the only
-  condition under which GRDB erases a database that holds an unregistered migration. Not setting
-  it is therefore a requirement rather than an accident. `hasBeenSuperseded(_:)` is available if
-  a downgraded build should say so out loud.
+  defaulted. A build predating it opens the database without erasing it, because
+  `Database.migrate()` does not set `eraseDatabaseOnSchemaChange` — the only condition under
+  which GRDB erases a database holding an unregistered migration. Not setting it is a
+  requirement, not an accident.
+- **F115** Opening is not the same as operating, and F79 claims only the former. A pre-sync build
+  writes rows without an outbox entry (F29) and without advancing `lamport`, and its trash sweep
+  deletes rows and `.originals/` files with no regard for the lease (F44). Those edits are
+  invisible to the log and those deletions are unrecoverable from it. Downgrading a Mac whose
+  library is synced is therefore **not supported**, and the spec says so rather than implying
+  that a readable schema makes it safe.
+- **F116** A build that finds a `v7` database with `hasBeenSuperseded(_:)` false but a version
+  marker newer than its own runs a reconciliation scan before syncing: rows whose file content no
+  longer matches their recorded `contentHash` are re-seeded as local edits with a fresh
+  `lamport`, and rows whose files are gone are reported rather than propagated as deletions. This
+  is best-effort recovery from an unsupported state, not a supported round trip. It cannot
+  recover an `.originals/` file a downgraded sweep removed.
 - **F80** Disabling the library stops push and pull and keeps every local file. It does not
   delete the remote library and does not silently fetch what is missing: captures that were
   `remote` become unavailable on that Mac and the UI says so. Settings offers to download
@@ -688,17 +809,21 @@ than hidden.
 **What the server operator does not learn.** Capture contents, names, recognized text, source
 app, window titles, file paths, or creation times (F15 blinds the ULID).
 
-**A stolen unlocked Mac** holds the library key and its cache: everything. That is true today for
-local captures, and worse here because it also reaches the rest of the library. F8 revokes the
-device's server access. It cannot revoke what the Mac already holds, and the Settings copy says
-so.
+**A stolen unlocked Mac** holds the library key, the owner token and its cache: everything. That
+is true today for local captures, and worse here because it also reaches the rest of the library.
+F8 revokes the device credential and F113 stops the Mac enrolling a fresh one, which together end
+its access to *future* library data. Neither revokes what the Mac already holds, and neither
+re-encrypts the library — F9 leaves the key in the thief's Keychain, so every byte already
+downloaded stays readable. The Settings copy says all of this.
 
 **A leaked device credential** reads and writes the log and blobs but decrypts nothing. It can
 push garbage ops and burn quota. F8 is the response; F56's daily counters bound the damage.
 
-**A malicious server** can withhold ops, replay old ones, or delete blobs. It cannot forge a row,
-because it cannot produce valid GCM ciphertext. Ordering attacks are detectable but not prevented
-in v1; §14 Q2 tracks signing the log.
+**A malicious server** can withhold ops, replay old ones, reorder them, or delete blobs. It
+cannot forge a row, because it cannot produce valid GCM ciphertext. Ordering attacks are
+**neither prevented nor detected** in v1: nothing authenticates `seq`, and a client has no way to
+tell a withheld op from one that was never written. Claiming detection would need the per-device
+signatures §14 Q2 tracks. The earlier draft of this section claimed detection; it was wrong.
 
 **Injection paths.** Decrypted rows reach the local database, filenames and the library grid. A
 row is attacker-controlled if a device credential leaks. No op carries a path (F83), so the
@@ -731,3 +856,32 @@ anything escaping the root.
 - **Q7** Presigned upload straight to R2, rejected for v1 by F88. If 32 MB parts through a
   Worker prove too slow for a library of recordings, this is the way out, and the question
   becomes whether scoped temporary credentials on the client are acceptable under D1.
+- **Q8** F113 requires an existing device to approve a new one, which is right for a second Mac
+  and wrong for someone whose only Mac was stolen. The admin dashboard is the escape on
+  `kapture.sh`; a self-hosted deployment has the same dashboard, but a person locked out of both
+  has nothing. Whether the recovery code should also authorize enrolment — turning it into a
+  full credential rather than only a decryption key — is unresolved.
+
+---
+
+## 15. Review history
+
+The first draft was reviewed adversarially before implementation. Five findings were blocking and
+are recorded here because each was a rule that read as reasonable and could not work:
+
+1. Row keys were derived from `captureID`, which is only inside the ciphertext the key opens
+   (F95). Fixed by deriving from `blindedID`.
+2. F32 required the server to reject ops naming missing blobs, over a `blobs` map the server
+   cannot read (F98). Fixed by putting the dependency list in the plaintext envelope.
+3. Fork ownership was settled by log order in F35 and by upload order in F82, which disagree
+   whenever the first uploader is not the log winner (F100). Fixed by putting the writer in the
+   blob key so uploads never race.
+4. An old client could skip an op it could not parse, then publish a snapshot omitting that
+   capture, and compaction would delete the only copy (F102). Fixed by refusing snapshots from
+   incomplete clients.
+5. A sweep could delete a capture restored between its head pull and its delete (F106). Fixed by
+   making the delete conditional on the log.
+
+Three further findings — snapshot application order, re-enrolment after revocation, and the
+downgrade claim — are addressed by F110, F113 and F115. Two claims in §13 were overstated and
+have been corrected rather than defended.
