@@ -78,7 +78,8 @@ Proposed, not started: one library per person, shared by every Mac that person s
 Specified in [`SHARED-LIBRARY.md`](SHARED-LIBRARY.md) — a per-owner Durable Object log, R2 for
 blobs, client-side encryption with the key in iCloud Keychain, metadata and thumbnails on every
 Mac with originals fetched on demand. Staged M6a (metadata only) → M6b (blobs) → M6c (sweep
-lease, quotas, revocation).
+lease, quotas, revocation), with a migration path for Macs that already hold a library and for
+merging two of them.
 
 Architecture and staging follow the implementation spec (v2.1); deviations: SwiftPM-only for
 now (no .xcodeproj — `scripts/bundle.sh` assembles the app), KeyboardShortcuts dep deferred

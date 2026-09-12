@@ -62,7 +62,7 @@ Keychain and never leaves it, which is how the share token already reaches a sec
 Taken because the README's privacy claim is currently literal, and a cloud copy of a capture
 history is the feature most able to make it false. The cost is real and is accepted: no
 server-side thumbnailing, no server-side search, no web viewer for library items, no
-cross-user deduplication. §4 specifies the scheme and §12 states what the server still learns.
+cross-user deduplication. §4 specifies the scheme and §13 states what the server still learns.
 
 ### D2 — An owner, several devices; no signup
 
@@ -72,7 +72,7 @@ per-device credentials (§3). There is no email, no password, and no self-serve 
 same.
 
 This is not an account, but it is close enough that the README must stop saying "Everything
-lives on your Mac" without qualification. §11.4 lists the copy changes.
+lives on your Mac" without qualification. §12.4 lists the copy changes.
 
 ### D3 — Metadata everywhere, thumbnails everywhere, originals on demand
 
@@ -81,7 +81,7 @@ recordings are fetched when opened and cached under a ceiling (§8.3).
 
 Full replication was rejected: a recording library is tens to hundreds of gigabytes and a
 laptop should not need all of it. Metadata-only was rejected as an end state, but is the first
-shipping stage (§11.1) because it forces identity and conflict resolution to be solved before
+shipping stage (§12.1) because it forces identity and conflict resolution to be solved before
 any byte moves.
 
 ### D4 — Stored bytes are quota'd, and someone pays for them
@@ -129,7 +129,7 @@ and a shared library changes nothing about that.
   credential stops working immediately; its cached local files are untouched, because the server
   cannot reach them and must not pretend otherwise.
 - **F9** Revoking a device does not rotate the library key. A revoked device that kept its
-  Keychain can still decrypt what it already holds. Re-keying is out of scope for v1; §13 Q3
+  Keychain can still decrypt what it already holds. Re-keying is out of scope for v1; §14 Q3
   tracks it.
 - **F10** Revoking the owner credential revokes every device under it.
 
@@ -171,7 +171,7 @@ Everything with content in it: the row payload (name, `relPath`, `sourceApp`, `w
 `.originals/` files.
 
 Not encrypted, because the server needs them to function: owner name, device id and name,
-sequence numbers, blinded capture ids, ciphertext lengths, and op timestamps. §12 states what
+sequence numbers, blinded capture ids, ciphertext lengths, and op timestamps. §13 states what
 that leaks.
 
 ---
@@ -292,7 +292,7 @@ ciphertext and never parses it. Decrypted, an op is:
   snapshot instead, applies it wholesale, and continues from its `seq`. This is also how a new
   Mac bootstraps (G3).
 - **F28** Pull runs on enable, on app foreground, every 5 minutes while running, and on demand.
-  There is no push channel in v1; §13 Q1 tracks it.
+  There is no push channel in v1; §14 Q1 tracks it.
 
 ### 6.3 Push
 
@@ -479,9 +479,104 @@ on another machine.
 
 ---
 
-## 11. Staging
+## 11. Migration
 
-### 11.1 M6a — metadata only
+Everything above describes the end state. This section describes reaching it from a Mac that
+already holds a library and a deployment that already serves M5.
+
+### 11.1 Seeding the log
+
+- **F62** Seeding is an ordinary outbox fill, not a second protocol. Enabling the library writes
+  one `upsert` op per live capture into `sync_outbox` in a single transaction, and the push loop
+  (F30) drains it. There is no separate endpoint and no separate failure mode.
+- **F63** Seeding is resumable because the outbox is durable. An interrupted seed continues on
+  the next launch, and F31's `opID` uniqueness means a row enqueued twice is stored once.
+- **F64** Trashed captures seed with their `trashedAt`, so the sweep (F45) sees a complete
+  picture. Captures in `sweeping` do not seed: F40 keeps that state local to the device.
+- **F65** Rows first, blobs newest-first. Metadata for 10,000 captures is a few megabytes and
+  goes up in minutes; blobs take hours, and the captures wanted on the second Mac are the recent
+  ones.
+- **F66** A seed that exhausts quota (F58) stops and leaves the library coherent rather than
+  truncated. F32 means an op names only blob revisions the server already holds, so the other Mac
+  sees a row with no blob and a placeholder, never a row pointing at nothing.
+
+### 11.2 Thumbnail backfill
+
+- **F67** Every capture made before M6 has no thumbnail, because F47 generates one at capture
+  time. Backfill runs through the existing ingest queue at the lowest priority, newest-first, and
+  does not block seeding.
+- **F68** A row may be pushed before its thumbnail exists. Its `blobs` map (F23) omits `thumb`
+  until the thumbnail uploads, at which point the row is re-pushed as an `upsert` with
+  `lamport + 1`. A seeded library is searchable immediately and gains thumbnails over the
+  following hours.
+- **F69** The cost is one extra op per pre-M6 capture. Compaction (F33) absorbs it.
+
+### 11.3 Merging two existing libraries
+
+Two Macs each used for a year, then both enabled, is the normal case. It is not the
+empty-client bootstrap of F27.
+
+- **F70** A Mac with local captures enrolling into a non-empty log applies the snapshot and every
+  op (F27), then seeds its own rows (F62). The result is the union of both libraries. ULIDs do
+  not collide, so no id reconciliation is required.
+- **F71** A merge does not deduplicate. Two Macs that captured the same screen hold two captures
+  with two ids, and they stay two. `contentHash` (F61) identifies identical bytes, but identical
+  bytes are not necessarily a duplicate — the same screenshot taken deliberately twice is two
+  captures — and collapsing a pair would discard one row's annotations, name and share link.
+  §14 Q6 tracks a user-driven duplicate finder.
+- **F72** A merge is confirmed before it happens. Settings states how many local captures are
+  about to be added to the library, and nothing is pushed until the person agrees. Adding 4,000
+  captures to a shared library is not obviously what someone enabling a checkbox intended.
+- **F73** An empty Mac joining a non-empty log is the F27 bootstrap. It is not a merge and needs
+  no confirmation.
+
+### 11.4 Server-side shape changes
+
+- **F74** `loadOwners` reads an owner record written before M6 as having `devices: {}`,
+  respecting the presence check at `worker/src/common.ts:97`. Such an owner keeps working on the
+  M5 share routes and must enrol (F5, F6) before any library route answers.
+- **F75** `QuotaCounter` needs no carry-forward for the stored counters. The `lib/` prefix does
+  not exist before M6, so every owner's stored bytes are genuinely zero on the deployment day.
+  The daily counters and their existing legacy migration (`worker/src/quota.ts:16`) are
+  untouched.
+- **F76** Stored counters drift when a delete or a multipart upload fails partway. The admin
+  dashboard recomputes an owner's stored bytes by listing `lib/<owner>/`, and that is the only
+  supported repair.
+
+### 11.5 Version skew
+
+Two Macs on different Kapture versions share one log, and the older one will pull ops the newer
+one wrote. The server never parses an op (§5.1, §6.1), so this is entirely a client concern and
+a payload change needs no Worker deploy.
+
+- **F77** An op payload carries `v`, and a client ignores fields it does not recognize rather
+  than failing the row. This extends the stance `AIState`'s decoder already takes
+  (`Sources/KaptureCore/CaptureRecord.swift:22`), for the same reason: a row written by a newer
+  build must degrade, not make a capture vanish.
+- **F78** An op whose `kind` or `v` a client cannot apply advances the cursor anyway. The capture
+  is flagged in the library as needing a newer Kapture, and its row is left unmodified. Holding
+  the cursor back would let one Mac on an old version stall behind a newer one indefinitely,
+  which is worse than one stale row.
+
+### 11.6 Downgrade and disabling
+
+- **F79** `v7-shared-library` is additive: new tables, and new columns that are nullable or
+  defaulted. A build predating it opens the database, ignores what it does not know, and keeps
+  working, because `Database.migrate()` does not set `eraseDatabaseOnSchemaChange` — the only
+  condition under which GRDB erases a database that holds an unregistered migration. Not setting
+  it is therefore a requirement rather than an accident. `hasBeenSuperseded(_:)` is available if
+  a downgraded build should say so out loud.
+- **F80** Disabling the library stops push and pull and keeps every local file. It does not
+  delete the remote library and does not silently fetch what is missing: captures that were
+  `remote` become unavailable on that Mac and the UI says so. Settings offers to download
+  everything first, which can take hours and is therefore offered rather than imposed. §14 Q5
+  asks whether it should be the default.
+
+---
+
+## 12. Staging
+
+### 12.1 M6a — metadata only
 
 Rows, sidecars, OCR text and share links sync. No blobs. A capture whose bytes are on another Mac
 shows a placeholder card naming that device, and opening it explains why it cannot open.
@@ -492,7 +587,7 @@ Acceptance: two Macs, 500 captures each. After sync both search all 1,000. Annot
 renaming on B produces exactly one fork and one pinned name, with no lost row. Killing the app
 mid-push loses nothing and duplicates nothing.
 
-### 11.2 M6b — blobs
+### 12.2 M6b — blobs
 
 Thumbnails eager, originals on demand, cache with eviction, multipart upload.
 
@@ -500,7 +595,7 @@ Acceptance: a 4 GB recording library syncs to a second Mac with a 1 GB cache cei
 capture opens; the cache stays under the ceiling; no capture becomes unrecoverable from the
 server.
 
-### 11.3 M6c — lifecycle
+### 12.3 M6c — lifecycle
 
 Sweep lease, delete, stored-byte quota, device revocation, snapshot compaction.
 
@@ -508,16 +603,16 @@ Acceptance: a trashed capture disappears from both Macs after 7 days and from R2
 revoked device is refused within one request. A log of 50,000 ops compacts, and a third Mac
 bootstraps from the snapshot.
 
-### 11.4 Copy changes
+### 12.4 Copy changes
 
 The README's "Free, no account, no subscription", "Everything lives on your Mac", and the Privacy
 section's "Two things can send your content off the Mac" all become false the moment this ships
 enabled. They are edited in the same release, not after it. The Privacy section gains the shared
-library as a third opt-in path and states D1 and §12 plainly.
+library as a third opt-in path and states D1 and §13 plainly.
 
 ---
 
-## 12. Security review
+## 13. Security review
 
 **What the server operator learns anyway.** Owner name. Device ids, names and platforms. How many
 captures exist, when each op was pushed, which device pushed it, and how large each ciphertext
@@ -538,7 +633,7 @@ push garbage ops and burn quota. F8 is the response; F56's daily counters bound 
 
 **A malicious server** can withhold ops, replay old ones, or delete blobs. It cannot forge a row,
 because it cannot produce valid GCM ciphertext. Ordering attacks are detectable but not prevented
-in v1; §13 Q2 tracks signing the log.
+in v1; §14 Q2 tracks signing the log.
 
 **Injection paths.** Decrypted rows reach the local database, filenames and the library grid. A
 row is attacker-controlled if a device credential leaks. `relPath` from an op is re-derived
@@ -548,7 +643,7 @@ the way `checkedOriginalURL` already guards `.originals/` paths
 
 ---
 
-## 13. Open questions
+## 14. Open questions
 
 - **Q1** Push delivery. v1 polls every 5 minutes (F28). A WebSocket to the `LibraryLog` DO would
   make an edit on one Mac appear on another within a second. Worth doing, not worth blocking on.
@@ -560,5 +655,9 @@ the way `checkedOriginalURL` already guards `.originals/` paths
 - **Q4** Does the local root stay the truth when sync is on, or does the log? This spec keeps
   files as truth and treats the log as a second derived copy. The alternative — log as truth,
   files as a cache — makes eviction simpler and makes "where did my file go" much worse.
-- **Q5** What happens when sync is turned off. Keep the local cache and stop, or fetch everything
-  down first? The second is honest and can take a day.
+- **Q5** F80 makes the full download an offer at disable time. Should it instead be the default,
+  with opting out the deliberate act? It is the honest order, and it can take a day.
+- **Q6** A duplicate finder. F71 keeps a merge from collapsing identical captures, which is the
+  safe choice and leaves real duplicates behind. A tool that lists same-`contentHash` pairs and
+  lets a person merge or delete them is the user-driven version. Worth building only if merges
+  turn out to produce many.
