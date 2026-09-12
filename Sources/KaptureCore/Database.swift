@@ -114,6 +114,63 @@ public final class Database: Sendable {
             // drift between five pasted copies.
             try db.execute(sql: "CREATE VIEW blocked_captures AS SELECT DISTINCT captureId FROM op_journal")
         }
+        // The shared library (docs/SHARED-LIBRARY.md §10.1). Additive only — new tables, and new
+        // columns that are nullable or defaulted — which is what lets a build predating it open
+        // the database without erasing anything (F79). `eraseDatabaseOnSchemaChange` is never
+        // set here, and F79 makes that a requirement rather than an accident.
+        migrator.registerMigration("v7-shared-library") { db in
+            try db.alter(table: "captures") {
+                $0.add(column: "lamport", .integer).notNull().defaults(to: 0)
+                $0.add(column: "syncDeviceID", .text)
+                $0.add(column: "forkedFrom", .text)
+                $0.add(column: "blobState", .text).notNull().defaults(to: "local")
+                $0.add(column: "parentHash", .text)
+                // F130: whether the log has ever acknowledged this row. Absence from a later
+                // snapshot means deletion for an acknowledged row and only-local for the rest.
+                $0.add(column: "acknowledged", .boolean).notNull().defaults(to: false)
+            }
+            try db.create(table: "sync_state") { t in
+                t.column("id", .integer).primaryKey()       // single row
+                t.column("deviceID", .text).notNull()
+                t.column("cursor", .integer).notNull().defaults(to: 0)
+                t.column("keyID", .text)
+                t.column("enabledAt", .datetime)
+                t.column("capabilities", .text).notNull().defaults(to: "")
+            }
+            // F29: an op is written here in the same transaction as the row it describes. This
+            // is the local durability boundary, the way op_journal is for file operations, and
+            // it carries the same retry columns v6 gave op_journal.
+            try db.create(table: "sync_outbox") { t in
+                t.column("opID", .text).primaryKey()
+                t.column("captureId", .text).notNull()
+                t.column("kind", .text).notNull()
+                t.column("payload", .blob).notNull()
+                t.column("requires", .text).notNull().defaults(to: "[]")
+                t.column("observed", .integer).notNull().defaults(to: 0)
+                t.column("v", .integer).notNull().defaults(to: 1)
+                t.column("queuedAt", .datetime).notNull()
+                t.column("attempts", .integer).notNull().defaults(to: 0)
+                t.column("nextAttemptAt", .datetime)
+                t.column("lastError", .text)
+            }
+            // F104, F135: ops this build could not apply, replayed when its capabilities widen.
+            try db.create(table: "skipped_ops") { t in
+                t.column("seq", .integer).primaryKey()
+                t.column("v", .integer).notNull()
+                t.column("kind", .text).notNull()
+                t.column("noticedAt", .datetime).notNull()
+            }
+            try db.create(table: "blob_cache") { t in
+                t.column("captureId", .text).notNull()
+                t.column("purpose", .text).notNull()
+                t.column("revision", .integer).notNull()
+                t.column("writer", .text).notNull()
+                t.column("owningCapture", .text).notNull()
+                t.column("bytes", .integer).notNull().defaults(to: 0)
+                t.column("lastOpenedAt", .datetime)
+                t.primaryKey(["captureId", "purpose"])
+            }
+        }
         try migrator.migrate(queue)
     }
 }

@@ -44,6 +44,32 @@ export interface Owner {
   hash: string;
   createdAt: string;
   note?: string;
+  /**
+   * Per-device credentials for the shared library (§3.1 F1). Absent on owner records written
+   * before M6, which F74 reads as an empty set: such an owner keeps working on the M5 share
+   * routes and must enrol before any library route answers.
+   */
+  devices?: Record<string, Device>;
+  /**
+   * The library's keyID, fixed by the first enrolment (F117). A device presenting a different
+   * one is refused rather than allowed to write a second, unreadable half of the log.
+   */
+  keyID?: string;
+  /** True once this owner has ever had a device, which closes silent enrolment (F114). */
+  hadDevice?: boolean;
+}
+
+export interface Device {
+  /** sha256 hex of the device credential. */
+  hash: string;
+  name: string;
+  platform: string;
+  createdAt: string;
+  lastSeenAt?: string;
+  /** Devices past the first are approved before they receive a credential (F113). */
+  approved: boolean;
+  /** Shown on both screens so the person approving can see which Mac they are approving (F124). */
+  fingerprint: string;
 }
 
 export type OwnerTable = Record<string, Owner>;
@@ -143,9 +169,39 @@ export async function ownerForToken(token: string, env: Env): Promise<string | n
 
 /** The owner named by an Authorization header, or null. */
 export async function authorize(request: Request, env: Env): Promise<string | null> {
+  return ownerForToken(bearerToken(request), env);
+}
+
+export function bearerToken(request: Request): string {
   const header = request.headers.get("authorization") ?? "";
-  const token = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
-  return ownerForToken(token, env);
+  return header.startsWith("Bearer ") ? header.slice(7).trim() : "";
+}
+
+export interface DeviceIdentity {
+  owner: string;
+  deviceID: string;
+  device: Device;
+}
+
+/**
+ * The device named by an Authorization header (F2). The owner credential is deliberately not
+ * accepted here: it authorizes enrolment and the M5 share routes, and nothing else.
+ */
+export async function authorizeDevice(
+  request: Request, env: Env,
+): Promise<DeviceIdentity | null> {
+  const token = bearerToken(request);
+  if (!token) return null;
+  const presented = await sha256Hex(token);
+  const owners = await loadOwners(env);
+  for (const [owner, record] of Object.entries(owners)) {
+    for (const [deviceID, device] of Object.entries(record.devices ?? {})) {
+      if (device.approved && timingSafeEqual(presented, device.hash)) {
+        return { owner, deviceID, device };
+      }
+    }
+  }
+  return null;
 }
 
 /** Owner names are used in URLs, HTML and KV keys, so keep them boring. */

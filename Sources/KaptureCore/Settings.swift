@@ -127,6 +127,28 @@ public struct Settings {
         set { d.set(newValue.absoluteString, forKey: "shareEndpoint") }
     }
 
+    /// Where the shared library syncs (docs/SHARED-LIBRARY.md §12.4 F120, F121).
+    ///
+    /// Defaults to the share endpoint, because the same Worker serves both. It is a separate
+    /// setting because the library is self-hosted for everyone but the author (F118), and
+    /// Settings states which endpoint it will upload to before the feature is enabled.
+    public var libraryEndpoint: URL {
+        get {
+            guard let raw = d.string(forKey: "libraryEndpoint"), let url = URL(string: raw),
+                  url.scheme == "https"
+            else { return shareEndpoint }
+            return url
+        }
+        set { d.set(newValue.absoluteString, forKey: "libraryEndpoint") }
+    }
+
+    /// Off until deliberately enabled (G6). A library that is never enabled behaves exactly as
+    /// it does today, including the flock and the local sweep.
+    public var libraryEnabled: Bool {
+        get { d.bool(forKey: "libraryEnabled") }
+        set { d.set(newValue, forKey: "libraryEnabled") }
+    }
+
     /// Put the link on the clipboard as soon as a share finishes — the reason to share is almost
     /// always to paste it somewhere.
     public var copyShareLinkAutomatically: Bool {

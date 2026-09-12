@@ -13,6 +13,7 @@ import {
   Env, SECURITY_HEADERS, THEME_CSS, authorize, escapeHTML, json, notFound,
 } from "./common";
 import { handleAdmin } from "./admin";
+import { handleLibrary } from "./libraryRoutes";
 
 export type { Env };
 export { QuotaCounter } from "./quota";
@@ -105,6 +106,9 @@ export default {
 
     const adminResponse = await handleAdmin(request, env, url);
     if (adminResponse) return adminResponse;
+
+    const libraryResponse = await handleLibrary(request, env, url);
+    if (libraryResponse) return libraryResponse;
 
     // ---- upload -----------------------------------------------------------
     if (path === "/api/upload" && request.method === "POST") {
