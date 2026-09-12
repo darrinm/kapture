@@ -8,7 +8,9 @@ laptop are searchable from the desktop; a capture annotated on either is annotat
 implementation spec — `shared-library §7.1 F35`.
 
 Requirements are numbered `F1`…; decisions are numbered `D1`…. Unnumbered text is context, not
-a commitment.
+a commitment. A requirement number is a stable identifier assigned when the requirement is
+written, so numbers run in order of addition rather than in document order. They are never
+reused and never renumbered.
 
 ---
 
@@ -122,6 +124,14 @@ and a shared library changes nothing about that.
   Settings › Library, exactly as the share token is pasted today.
 - **F7** A device credential is stored in the local Keychain, not the iCloud Keychain. It is
   per-Mac by definition.
+- **F85** The library key has a recovery code: the 256-bit key in Crockford base32 with a
+  checksum, shown once when the library is created and re-displayable in Settings on any Mac
+  that holds the key. It is the only way into a library from a Mac that cannot get the key from
+  iCloud Keychain, and the only backup if iCloud Keychain loses it.
+- **F86** An owner token does not carry the library key, so F6's path enrols a device that can
+  decrypt nothing. Such a Mac shows the library as **locked** and applies no ops until the
+  recovery code is entered. It must not show an empty library: empty and locked are
+  indistinguishable to a worried person, and one of them means their captures are gone.
 
 ### 3.3 Revocation
 
@@ -161,8 +171,9 @@ would hand the server a timeline.
   `blindedID = base32(HMAC-SHA256(libraryKey, captureID))[0..25]`. The client keeps the mapping;
   the server never sees a raw capture id.
 - **F16** Ops and blobs are keyed by `blindedID`. A client that loses the key loses the mapping,
-  and the library is unrecoverable. This is an intended property of D1, and Settings must say so
-  before the first byte is uploaded.
+  and the library is unrecoverable by anyone, the operator included. This is an intended property
+  of D1. The recovery code (F85) is the only mitigation, and Settings must say both things before
+  the first byte is uploaded.
 
 ### 4.3 What is encrypted
 
@@ -270,7 +281,8 @@ ciphertext and never parses it. Decrypted, an op is:
   "lamport": 412,
   "deviceID": "01J…",
   "kind": "upsert | trash | restore | delete",
-  "row": { "…every CaptureRecord field…" },
+  "row": { "…CaptureRecord, less the device-local fields of F83…" },
+  "name": "what the file is called, without a path",
   "sidecar": { "…": "…" },
   "ocr": "recognized text",
   "blobs": { "blob": 3, "thumb": 3, "orig": 1 }
@@ -281,6 +293,16 @@ ciphertext and never parses it. Decrypted, an op is:
   lacks marks the capture `blobState = remote` and fetches on demand (§8.2).
 - **F24** An op is a whole row, not a field delta. Rows are small, the conflict rules (§7) are
   stated per field anyway, and a whole row makes snapshotting trivial.
+- **F83** `relPath` is device-local and is never carried in an op. Each Mac has its own root,
+  its own shard directories and its own history of filename collisions, so one capture
+  legitimately sits at a different path on each. The op carries the capture's `name`; the
+  receiving device derives its own path through `availableURL`
+  (`Sources/KaptureCore/Library.swift:160`). This is also what keeps the `UNIQUE` constraint on
+  `captures.relPath` (`Sources/KaptureCore/Database.swift:29`) satisfiable when a remote row
+  arrives at a path this Mac has already used.
+- **F84** The device-local fields are `relPath`, `fastID` (F60), `blobState`, `thumbRevision`
+  and everything in `blob_cache`. They are excluded from the op payload and from snapshots, and
+  each device computes its own.
 
 ### 6.2 Pull
 
@@ -328,9 +350,20 @@ That gives a total order without clock sync.
 `contentRevision` and invalidates the hash, the share link, the summary and `aiState` together.
 It becomes the sync rule.
 
+- **F81** A fork is detected by revision collision, not by the §7 ordering. Two ops naming the
+  same `(captureID, contentRevision)` with different `contentHash` are concurrent by
+  construction, because revision N+1 always descends from N. The `(lamport, deviceID)` order
+  then decides which of the two keeps the original id. Ordering alone cannot tell a fork from a
+  sequential edit — it linearizes, which is its purpose — so resolving content by order alone
+  would discard an annotation.
 - **F35** Two devices that replace the content of one capture from the same parent revision
   **fork**. The loser by §7 ordering becomes a new capture row with a new ULID,
   `forkedFrom = <original id>`, and the same `createdAt`.
+- **F82** A fork re-keys its blobs. The losing device's `PUT` to
+  `blob/<blindedID>/<revision>` is refused with a 409 by F22, which is the same collision seen
+  at the blob layer. That device then uploads under the forked capture's own `blindedID` (F15)
+  and pushes the fork row. The fork stays local until that upload succeeds, so no row ever names
+  bytes the server does not hold (F32).
 - **F36** A fork is never silent. The library window shows both, badged, with the device name and
   time that produced each.
 - **F37** Pixels are never discarded to resolve a conflict. The editor already preserves pre-edit
@@ -352,6 +385,11 @@ It becomes the sync rule.
   only its own.
 - **F42** A device must not run AI naming on a capture whose row it received from another device
   with `aiState` already at `named:api` or `named:local`.
+- **F94** OCR and naming run only on the device that captured the item. A device holding a row
+  with `aiState = none` and no local blob leaves it alone rather than pulling bytes back to index
+  them; otherwise every Mac downloads every capture to re-derive the same text. A capture whose
+  Mac never finishes stays unindexed, which search shows, and any Mac can be asked to index it
+  explicitly from the library window.
 
 ### 7.4 Deletion and the sweep
 
@@ -398,8 +436,15 @@ delete bytes the other just restored.
 
 ### 8.4 Large files
 
-- **F54** Above 90 MB the client uses R2 multipart upload through the Worker, in 64 MB parts.
-  `MAX_SINGLE_UPLOAD` (`worker/src/index.ts:21`) stays as it is for the M5 share route.
+- **F54** Above 90 MB the client uses R2 multipart upload through the Worker, in parts sized by
+  F87. `MAX_SINGLE_UPLOAD` (`worker/src/index.ts:21`) stays as it is for the M5 share route.
+- **F87** Parts are 32 MB. Each part passes through a Worker invocation that holds it in memory,
+  and a Worker has a 128 MB ceiling; a larger part plus request and response overhead leaves too
+  little headroom to rely on.
+- **F88** Uploading straight to R2 with presigned URLs was considered and rejected for v1. It
+  takes the Worker out of the byte path, but it puts time-scoped S3-compatible credentials on the
+  client and moves the transfer off the path that charges quota (F56). §14 Q7 keeps it as the
+  answer if 32 MB parts prove too slow.
 - **F55** A multipart upload interrupted by quit or network loss resumes from its recorded part
   list. The upload id is stored in `sync_outbox` beside the op that waits on it.
 
@@ -476,6 +521,26 @@ on another machine.
 - Library window: a badge for `remote` captures, a fork badge (F36), and a sync status line that
   names the failure when there is one.
 - Settings › Sharing is untouched.
+
+### 10.5 Where the code goes, and how it is tested
+
+- **F89** Sync lives in a new `KaptureSync` target, depending on `KaptureCore`. Core depends on
+  GRDB alone today (`Package.swift`); sync adds CryptoKit and `URLSession`, and putting those
+  inside Core would make the library layer impossible to test without a network stack.
+- **F90** The merge is a pure function from `(local rows, incoming ops)` to
+  `(new rows, outbox ops, blob work)`. It refers to no `URLSession`, no GRDB and no filesystem.
+  Transport and persistence call it; they are not inside it.
+- **F91** The conflict rules are tested by driving two simulated devices through interleaved op
+  streams, covering both orders of every pair of concurrent edits, a fork and its blob re-key
+  (F81, F82), and every skew case in §11.5. §7 is the part of this spec most likely to be wrong
+  and the part hardest to exercise on two real Macs, which is what F90 exists to make possible.
+  `KaptureSyncTests` sits beside the existing `Tests/KaptureCoreTests`; the Worker routes are
+  tested where the quota and access tests already run, against a real Workers runtime.
+- **F92** CryptoKit supplies both primitives — `AES.GCM` for F13, `HKDF` for F12. No
+  third-party crypto dependency is added.
+- **F93** M6 targets macOS 26 Tahoe and does not carry compatibility with anything older.
+  `Package.swift:6` and the README's requirement line both still say macOS 14; they move with
+  this work, not after it.
 
 ---
 
@@ -636,10 +701,12 @@ because it cannot produce valid GCM ciphertext. Ordering attacks are detectable 
 in v1; §14 Q2 tracks signing the log.
 
 **Injection paths.** Decrypted rows reach the local database, filenames and the library grid. A
-row is attacker-controlled if a device credential leaks. `relPath` from an op is re-derived
-locally and never trusted verbatim: a path escaping the root is rejected and the op quarantined,
-the way `checkedOriginalURL` already guards `.originals/` paths
-(`Sources/KaptureCore/LibraryRecovery.swift:424`).
+row is attacker-controlled if a device credential leaks. No op carries a path (F83), so the
+exposed value is `name`: it is sanitized to a single path component before it is used to build
+one, and a name containing a separator or a parent reference is rejected and the op
+quarantined. Paths that do arrive — the `original` inside a synced sidecar — keep going through
+`checkedOriginalURL` (`Sources/KaptureCore/LibraryRecovery.swift:424`), which already refuses
+anything escaping the root.
 
 ---
 
@@ -661,3 +728,6 @@ the way `checkedOriginalURL` already guards `.originals/` paths
   safe choice and leaves real duplicates behind. A tool that lists same-`contentHash` pairs and
   lets a person merge or delete them is the user-driven version. Worth building only if merges
   turn out to produce many.
+- **Q7** Presigned upload straight to R2, rejected for v1 by F88. If 32 MB parts through a
+  Worker prove too slow for a library of recordings, this is the way out, and the question
+  becomes whether scoped temporary credentials on the client are acceptable under D1.
