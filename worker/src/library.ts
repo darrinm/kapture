@@ -31,6 +31,12 @@ export interface BlobRef {
   purpose: "blob" | "thumb" | "orig";
   revision: number;
   writer: string;
+  /**
+   * The blindedID the bytes are filed under, defaulting to the op's own (F98, F128). A fork
+   * gets a fresh blindedID but re-uploads nothing, so its dependency has to name the capture it
+   * forked from or it would resolve to a key nobody ever wrote.
+   */
+  capture?: string;
 }
 
 /** One op as the log stores it: the envelope, plus the ciphertext the server never opens. */
@@ -98,6 +104,30 @@ CREATE TABLE IF NOT EXISTS leases (
   holder TEXT NOT NULL,
   until  INTEGER NOT NULL
 );
+
+-- Below this line: state that must outlive compaction, because a rule depends on it.
+
+-- F132: a delete is final when it is admitted, not when the bytes are removed. Without this,
+-- a write accepted in between is destroyed by F20's prefix delete.
+CREATE TABLE IF NOT EXISTS tombstones (
+  blindedID TEXT PRIMARY KEY,
+  seq       INTEGER NOT NULL,
+  expires   INTEGER NOT NULL
+);
+
+-- F134: F108 dates sweep eligibility from the server's trash time and F45 forbids trusting the
+-- client's. Compaction would otherwise erase the only admissible evidence.
+CREATE TABLE IF NOT EXISTS trash_marks (
+  blindedID TEXT PRIMARY KEY,
+  at        INTEGER NOT NULL
+);
+
+-- F136: a high-water mark that only rises. MAX(v) over surviving ops falls when compaction
+-- removes the op that raised it.
+CREATE TABLE IF NOT EXISTS log_meta (
+  key   TEXT PRIMARY KEY,
+  value INTEGER NOT NULL
+);
 `;
 
 export class LibraryLog extends DurableObject<Env> {
@@ -115,10 +145,23 @@ export class LibraryLog extends DurableObject<Env> {
     return row.head ?? 0;
   }
 
-  /** The highest payload version anyone has written. A snapshot from below this is refused. */
+  /**
+   * The highest payload version ever written (F136). Read from the high-water mark rather than
+   * computed from surviving ops: compaction can remove the op that raised it, which would lower
+   * the gate and let an old client overwrite a library it cannot fully read.
+   */
   private maxVersion(): number {
-    const row = this.sql().exec<{ v: number | null }>("SELECT MAX(v) AS v FROM ops").one();
-    return row.v ?? 0;
+    const rows = this.sql()
+      .exec<{ value: number }>("SELECT value FROM log_meta WHERE key = 'maxVersion'")
+      .toArray();
+    return rows[0]?.value ?? 0;
+  }
+
+  private raiseMaxVersion(v: number): void {
+    if (v <= this.maxVersion()) return;
+    this.sql().exec(
+      "INSERT OR REPLACE INTO log_meta (key, value) VALUES ('maxVersion', ?)", v,
+    );
   }
 
   /**
@@ -133,7 +176,10 @@ export class LibraryLog extends DurableObject<Env> {
     const missing = new Map<string, string>();
     for (const op of ops) {
       for (const ref of op.requires ?? []) {
-        const key = `lib/${owner}/${ref.purpose}/${op.blindedID}/${ref.revision}/${ref.writer}`;
+        // `capture` defaults to this op's own, and differs for a fork inheriting bytes it
+        // already uploaded under the capture it forked from (F128).
+        const capture = ref.capture ?? op.blindedID;
+        const key = `lib/${owner}/${ref.purpose}/${capture}/${ref.revision}/${ref.writer}`;
         if (!(await this.env.BUCKET.head(key))) {
           missing.set(op.opID, `missing blob ${ref.purpose}/${ref.revision}`);
           break;
@@ -147,6 +193,7 @@ export class LibraryLog extends DurableObject<Env> {
 
     this.ctx.storage.transactionSync(() => {
       this.sql().exec("DELETE FROM seen_ops WHERE expires < ?", now);
+      this.sql().exec("DELETE FROM tombstones WHERE expires < ?", now);
 
       for (const op of ops) {
         // An opID we have already admitted is a retry whose response was lost (F31). Answer with
@@ -156,6 +203,17 @@ export class LibraryLog extends DurableObject<Env> {
           .toArray();
         if (seen.length > 0) {
           assigned.push({ opID: op.opID, seq: seen[0].seq });
+          continue;
+        }
+
+        // F132: a capture with a tombstone is closed. A write admitted after the delete was
+        // accepted would be destroyed by F20's prefix cleanup, so it is refused up front rather
+        // than acknowledged and then silently removed.
+        const tombstoned = this.sql()
+          .exec<{ seq: number }>("SELECT seq FROM tombstones WHERE blindedID = ?", op.blindedID)
+          .toArray();
+        if (tombstoned.length > 0) {
+          rejected.push({ opID: op.opID, reason: `capture deleted at ${tombstoned[0].seq}` });
           continue;
         }
 
@@ -194,6 +252,23 @@ export class LibraryLog extends DurableObject<Env> {
           "INSERT INTO seen_ops (opID, seq, expires) VALUES (?, ?, ?)",
           op.opID, seq, now + OPID_RETENTION_MS,
         );
+        this.raiseMaxVersion(op.v);
+
+        // F134: the trash time the sweep will date eligibility from, kept where compaction
+        // cannot reach it. A restore or a delete settles the question and clears the mark.
+        if (op.kind === "trash") {
+          this.sql().exec(
+            "INSERT OR REPLACE INTO trash_marks (blindedID, at) VALUES (?, ?)", op.blindedID, now,
+          );
+        } else if (op.kind === "restore") {
+          this.sql().exec("DELETE FROM trash_marks WHERE blindedID = ?", op.blindedID);
+        } else if (op.kind === "delete") {
+          this.sql().exec("DELETE FROM trash_marks WHERE blindedID = ?", op.blindedID);
+          this.sql().exec(
+            "INSERT OR REPLACE INTO tombstones (blindedID, seq, expires) VALUES (?, ?, ?)",
+            op.blindedID, seq, now + OPID_RETENTION_MS,
+          );
+        }
         assigned.push({ opID: op.opID, seq });
       }
     });
@@ -258,6 +333,20 @@ export class LibraryLog extends DurableObject<Env> {
     return { granted, until };
   }
 
+  /**
+   * Captures whose trash mark is older than the window (F45, F108, F134). Both ends are server
+   * time: the mark the DO wrote, and the DO's clock. No client timestamp enters the comparison,
+   * and no answer depends on an op that compaction may have removed.
+   */
+  async sweepEligible(windowMs: number, now = Date.now()): Promise<string[]> {
+    return this.sql()
+      .exec<{ blindedID: string }>(
+        "SELECT blindedID FROM trash_marks WHERE at <= ? ORDER BY at", now - windowMs,
+      )
+      .toArray()
+      .map((row) => row.blindedID);
+  }
+
   async noteDevice(deviceID: string, cursor: number) {
     this.ctx.storage.transactionSync(() => {
       this.sql().exec(
@@ -265,6 +354,16 @@ export class LibraryLog extends DurableObject<Env> {
          ON CONFLICT(deviceID) DO UPDATE SET cursor = excluded.cursor, lastSeenAt = excluded.lastSeenAt`,
         deviceID, cursor, new Date().toISOString(),
       );
+    });
+  }
+
+  /**
+   * Drop ops at or below `through`, as F34's compaction will. Exposed so a test can prove the
+   * state that must outlive compaction actually does; the real compaction path is M6c.
+   */
+  async forgetOpsForTest(through: number) {
+    this.ctx.storage.transactionSync(() => {
+      this.sql().exec("DELETE FROM ops WHERE seq <= ?", through);
     });
   }
 

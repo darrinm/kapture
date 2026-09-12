@@ -185,6 +185,88 @@ describe("F26 — pull is ordered and paged", () => {
   });
 });
 
+describe("F132 — an admitted delete is final at admission, not at cleanup", () => {
+  it("refuses a write that arrives after the delete was accepted", async () => {
+    const name = owner();
+    const log = libraryLogFor(env, name);
+    const trash = await log.append(name, [op({ kind: "trash" })]);
+    await log.append(name, [op({ kind: "delete", observed: trash.head })]);
+    // B uploads from a stale local copy and pushes. Without the tombstone this is accepted,
+    // and F20's prefix delete then destroys bytes the log had just acknowledged.
+    await env.BUCKET.put(`lib/${name}/blob/CAPTURE1/9/device-b`, bytes());
+    const late = await log.append(name, [op({
+      deviceID: "device-b",
+      requires: [{ purpose: "blob", revision: 9, writer: "device-b" }],
+    })]);
+    expect(late.assigned).toHaveLength(0);
+    expect(late.rejected[0].reason).toContain("deleted");
+  });
+
+  it("fences only the deleted capture", async () => {
+    const name = owner();
+    const log = libraryLogFor(env, name);
+    const trash = await log.append(name, [op({ kind: "trash", blindedID: "GONE" })]);
+    await log.append(name, [op({ kind: "delete", blindedID: "GONE", observed: trash.head })]);
+    const other = await log.append(name, [op({ blindedID: "ALIVE" })]);
+    expect(other.rejected).toHaveLength(0);
+  });
+});
+
+describe("F134 — sweep eligibility survives compaction of the trash op", () => {
+  it("dates eligibility from the retained server mark", async () => {
+    const name = owner();
+    const log = libraryLogFor(env, name);
+    await log.append(name, [op({ kind: "trash", blindedID: "OLD" })]);
+    expect(await log.sweepEligible(0)).toContain("OLD");
+    // Nothing is eligible while the window has not elapsed.
+    expect(await log.sweepEligible(7 * 24 * 60 * 60 * 1000)).toHaveLength(0);
+  });
+
+  it("clears the mark on restore, so a restored capture never becomes eligible", async () => {
+    const name = owner();
+    const log = libraryLogFor(env, name);
+    await log.append(name, [op({ kind: "trash", blindedID: "BACK" })]);
+    await log.append(name, [op({ kind: "restore", blindedID: "BACK" })]);
+    expect(await log.sweepEligible(0)).toHaveLength(0);
+  });
+});
+
+describe("F136 — the version gate is a high-water mark", () => {
+  it("does not fall when the op that raised it is gone", async () => {
+    const name = owner();
+    const log = libraryLogFor(env, name);
+    await log.append(name, [op({ v: 2 })]);
+    await log.append(name, [op({ v: 1 })]);
+    // Simulate compaction removing the v2 op. A MAX(v) over survivors would now read 1 and let
+    // a v1-only client write the library back down.
+    await log.forgetOpsForTest(1);
+    expect((await log.claimSnapshot("old", 1, 2)).granted).toBe(false);
+  });
+});
+
+describe("F128 — a fork names the bytes it already uploaded", () => {
+  it("resolves a dependency against the capture the blob is filed under", async () => {
+    const name = owner();
+    const log = libraryLogFor(env, name);
+    await env.BUCKET.put(`lib/${name}/blob/ORIGINAL/2/device-b`, bytes());
+    const fork = await log.append(name, [op({
+      blindedID: "FORKED",
+      requires: [{ purpose: "blob", revision: 2, writer: "device-b", capture: "ORIGINAL" }],
+    })]);
+    expect(fork.rejected).toHaveLength(0);
+  });
+
+  it("still refuses a dependency that names no existing object", async () => {
+    const name = owner();
+    const log = libraryLogFor(env, name);
+    const fork = await log.append(name, [op({
+      blindedID: "FORKED",
+      requires: [{ purpose: "blob", revision: 2, writer: "device-b", capture: "NOWHERE" }],
+    })]);
+    expect(fork.rejected[0].reason).toContain("missing blob");
+  });
+});
+
 describe("F118 — the library is off unless an owner is allowlisted", () => {
   it("is disabled when the allowlist is unset", () => {
     expect(libraryEnabled({ ...env, LIBRARY_OWNERS: undefined }, "darrin")).toBe(false);

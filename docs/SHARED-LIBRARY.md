@@ -198,12 +198,22 @@ personal guardrail: it exists to make a runaway sync fail loudly instead of arri
   iCloud Keychain with `kSecAttrSynchronizable` beside the share token
   (`Sources/KaptureCore/Keychain.swift`). It is never sent anywhere.
 - **F12** Per-object keys are derived from values the reader already has before it decrypts
-  anything:
-  `HKDF-SHA256(libraryKey, salt = keyID, info = "kapture/v1/" + purpose + "/" + blindedID +
-  "/" + revision + "/" + writer)`, where `purpose` is `row`, `blob`, `thumb`, `orig` or `snap`,
-  and `writer` is the `deviceID` that produced the object. Every one of those appears in the
-  plaintext envelope (§6.1) or in the object's own key path (§5.2). For `snap`, `blindedID` is
-  replaced by the snapshot's `seq`.
+  anything: `HKDF-SHA256(libraryKey, salt = keyID, info = "kapture/v1/" + purpose + "/" +
+  scope + "/" + writer)`, where `writer` is the `deviceID` that produced the object and `scope`
+  is fixed per purpose:
+
+  | purpose | scope | where the reader gets it |
+  | --- | --- | --- |
+  | `row` | `opID` | the plaintext envelope (F97) |
+  | `blob`, `thumb`, `orig` | `<owningBlindedID>/<revision>` | the blob's own key path (§5.2), named by `requires` (F98) |
+  | `snap` | the snapshot's `seq` | the snapshot's key path (§5.2) |
+
+- **F126** `revision` is not an input for `row`, and `blindedID` is not one either. A row's
+  revision lives inside the payload, so deriving from it repeats the F95 mistake one layer
+  down: the reader would need the plaintext to find the key to the plaintext. `opID` is unique
+  per op, is in the envelope, and identifies exactly one ciphertext, which is everything the
+  derivation needs. A rename that re-encrypts a row at an unchanged revision gets a distinct key
+  for free, because it is a distinct op.
 - **F95** The derivation must never depend on a value carried inside the ciphertext. Deriving
   from `captureID` cannot work: a device receiving an unfamiliar capture holds only the
   `blindedID`, and F15 is an HMAC, which does not invert. `blindedID` is what every holder of
@@ -292,6 +302,21 @@ CREATE TABLE leases (
   holder TEXT NOT NULL,              -- deviceID
   until  TEXT NOT NULL
 );
+
+-- State that must outlive compaction, because a rule depends on it (F133, F134, F136).
+CREATE TABLE tombstones (                  -- F132: a delete is final at admission
+  blindedID TEXT PRIMARY KEY,
+  seq       INTEGER NOT NULL,
+  expires   INTEGER NOT NULL
+);
+CREATE TABLE trash_marks (                 -- F134: the authoritative trash time
+  blindedID TEXT PRIMARY KEY,
+  at        INTEGER NOT NULL
+);
+CREATE TABLE log_meta (                    -- F136: a high-water mark, never recomputed
+  key   TEXT PRIMARY KEY,
+  value INTEGER NOT NULL
+);
 ```
 
 - **F17** `seq` is assigned by the DO inside the write transaction. It is the total order every
@@ -351,13 +376,26 @@ An op has two parts: a plaintext **envelope** the server acts on, and an encrypt
 never parses.
 
 - **F97** The envelope is exactly the non-ciphertext columns of §5.1: `opID`, `deviceID`,
-  `blindedID`, `v`, `requires`, `observed`. Nothing may be put there that is not already implied
-  by the R2 layout or needed by a rule the server enforces, and every server-side rule must be
-  expressible over the envelope alone. A requirement the server cannot check from the envelope is
-  not a requirement, it is a wish.
-- **F98** `requires` lists the blob revisions this op names, as `{purpose, revision, writer}`.
-  It leaks nothing: the server already sees every blob key it stores (§5.2), so the list is a
-  restatement of what is in front of it. It is what makes F32 enforceable.
+  `blindedID`, `v`, `kind`, `requires`, `observed`. Nothing may be put there that is not already
+  implied by the R2 layout or needed by a rule the server enforces, and every server-side rule
+  must be expressible over the envelope alone. A requirement the server cannot check from the
+  envelope is not a requirement, it is a wish.
+- **F127** `kind` is in the envelope because three rules need it and none of them can read the
+  payload: F106 rejects only a `delete`, F43 gates only a `delete` on the lease, and F108 dates
+  eligibility from a `trash`. Applied to every op those checks would refuse ordinary writes;
+  applied selectively they need exactly this field. It tells the server that a capture was
+  trashed and when, which §13 records as part of what the operator learns.
+- **F98** `requires` lists the blob revisions this op names, as
+  `{purpose, revision, writer, capture}`, where `capture` is the `blindedID` the bytes are
+  filed under and defaults to the op's own. It leaks nothing: the server already sees every blob
+  key it stores (§5.2), so the list is a restatement of what is in front of it. It is what makes
+  F32 enforceable.
+- **F128** `capture` exists so a fork can name bytes filed under the capture it forked from.
+  F35 gives the fork a fresh ULID and therefore a fresh `blindedID`, while F82 promises it
+  re-uploads nothing — and without this field its dependency would resolve to a key nobody ever
+  wrote, so F32 would refuse the fork forever. The same field carries into F12: the key derives
+  from the blob's owning capture, so substituting the fork's `blindedID` would derive a key that
+  decrypts nothing.
 
 Decrypted, the payload is:
 
@@ -375,8 +413,14 @@ Decrypted, the payload is:
 }
 ```
 
-- **F23** `blobs` names the revision available for each purpose. A client that sees a revision it
-  lacks marks the capture `blobState = remote` and fetches on demand (§8.2).
+- **F23** `blobs` names, for each purpose, the `{revision, writer, capture}` triple that locates
+  the bytes — the same shape as a `requires` entry (F98). A client that sees a revision it lacks
+  marks the capture `blobState = remote` and fetches on demand (§8.2).
+- **F129** The triple lives in the row payload, not only in the envelope, because the payload is
+  what a snapshot carries. F100 put the writer in the key path and F84 excludes `blob_cache`
+  from what syncs, so a row recording only a revision would leave a bootstrapping client unable
+  to build the R2 path or derive the key (F12) once compaction had removed the envelopes that
+  once named it. A row must be sufficient on its own to reach its own bytes.
 - **F24** An op is a whole row, not a field delta. Rows are small, the conflict rules (§7) are
   stated per field anyway, and a whole row makes snapshotting trivial.
 - **F83** `relPath` is device-local and is never carried in an op. Each Mac has its own root,
@@ -400,9 +444,19 @@ Decrypted, the payload is:
   snapshot instead, applies it, and continues from its `seq`. This is also how a new Mac
   bootstraps (G3).
 - **F110** A snapshot is merged into the local row set, never substituted for it. A local row the
-  snapshot does not mention is kept and seeded (F62). Replacing the row set would destroy exactly
-  the rows F70's merge exists to preserve, and it would do so before the seeding step meant to
-  contribute them.
+  snapshot does not mention is kept and seeded (F62) **only if the log has never acknowledged
+  it**. Replacing the row set wholesale would destroy exactly the rows F70's merge exists to
+  preserve; seeding indiscriminately resurrects the dead.
+- **F130** Every row records whether the log has acknowledged it — set when its op is assigned a
+  `seq` (F30) and carried in `sync_outbox`'s absence rather than in the payload. A row the log
+  once knew, missing from a snapshot at a later `seq`, was deleted while this device was away:
+  it is removed locally, not pushed back. A row the log has never seen is genuinely local and is
+  seeded.
+- **F131** Without F130 a deletion is undone by legal operations. A capture trashed and swept on
+  one Mac, with its `delete` compacted away under F34, is simply absent from the snapshot an
+  offline Mac later receives; F32 accepts the reseeded row because a metadata-only capture
+  requires no blobs, and the capture returns from the dead with nothing having gone wrong
+  anywhere.
 - **F111** A device with a non-empty outbox pushes before it snapshots. A snapshot claims to be
   the library at seq N, so it may not contain local state the log has never seen.
 - **F28** Pull runs on enable, on app foreground, every 5 minutes while running, and on demand.
@@ -439,6 +493,11 @@ Decrypted, the payload is:
   capture would otherwise write a row set omitting it, and compaction would then delete the only
   op that carried it. A snapshot asserts "this is the whole library at seq N", and a device that
   cannot read the whole library cannot assert it.
+- **F136** The highest payload version ever written is stored by the DO, not computed from the
+  ops that happen to survive. Deriving it with `MAX(v)` over the op table lets compaction lower
+  it: the surviving ops could all be `v1` while a compacted `v2` op is still represented in a
+  snapshot, and F102's gate would then admit a `v1`-only client to write the library back down.
+  A high-water mark only rises.
 - **F34** The server retains the two newest snapshots and every op after the older of them.
   Everything before that is deleted.
 - **F103** `opID` deduplication (F31) outlives compaction. The server keeps every `opID` for 30
@@ -529,6 +588,21 @@ delete bytes the other just restored.
 - **F107** Blob deletion follows the accepted `delete` op. Bytes are removed only after the DO
   has admitted the op, never in anticipation of it, so a rejected delete leaves the capture
   whole.
+- **F132** An admitted `delete` leaves a tombstone, and the DO refuses every later op naming that
+  `blindedID`. F106 checks the log only at the moment of admission, and F107 removes bytes after
+  it: in between, another Mac can upload a new revision from a stale copy and push an upsert that
+  F32 accepts, and F20's prefix delete then removes bytes the log had just acknowledged. The
+  writing device may afterwards evict its own copy under F52, so the capture is gone from
+  everywhere while every step was legal. The tombstone closes the window by making the delete
+  final at admission rather than at cleanup.
+- **F133** A tombstone is checked against `blindedID`, which is in the envelope, so the DO can
+  enforce it without reading anything. Tombstones are retained for as long as `seen_ops` (F103),
+  which outlives compaction for the same reason.
+- **F134** The DO keeps the server time of the most recent `trash` per capture, in its own
+  storage rather than only in the op. F108 dates eligibility from that timestamp and F45 forbids
+  trusting a local `trashedAt`, but F34 deletes old ops — so a capture trashed and left alone for
+  seven days can have its own trash op compacted away, leaving no admissible evidence that it is
+  eligible and no way to ever sweep it. The mark is cleared by a `restore` or a `delete`.
 - **F123** A rejected delete is not retried within the same sweep pass. The holder abandons that
   capture, finishes the rest of the pass, and re-evaluates it next time with a fresh `observed`.
   Retrying immediately against a capture that is actively receiving ops would spin, and the
@@ -771,6 +845,12 @@ a payload change needs no Worker deploy.
   entry is re-fetched and applied when the client's supported payload version rises. Advancing
   the cursor past an op discards it otherwise: it sits behind the cursor forever, and upgrading
   never goes back for it.
+- **F135** Replay is triggered by any widening of what the client can apply, not by the payload
+  version alone. A client records a capability generation covering both the versions and the
+  `kind`s it understands, and replays `skipped_ops` whenever that generation changes. F78 skips
+  an op for an unsupported `kind` *or* an unsupported `v`, so a release that adds a `kind`
+  without bumping `v` would otherwise leave the op behind a cursor that has already passed it,
+  with the capture stale and restricted by F105 forever.
 - **F122** A client whose `skipped_ops` name a `seq` the server no longer retains re-bootstraps
   from the newest snapshot (F27) instead of trusting its cursor, then clears those entries.
   F34 may have compacted the op away while the client sat at an old version, and F27's fallback
@@ -870,8 +950,9 @@ who serves it with a subpoena.
 **What the operator learns anyway.** Owner name. Device ids, names and platforms. How many
 captures exist, when each op was pushed, which device pushed it, and how large each ciphertext
 is. Blob sizes leak capture sizes, which distinguishes a screenshot from a recording. Op timing
-leaks working hours. This is the residue of D1. It is not fixable in v1, and it is stated rather
-than hidden.
+leaks working hours. From `kind` (F127) it also learns that a particular capture was trashed,
+restored or deleted, and when — the price of F106 and F108 being enforceable at all. This is the
+residue of D1. It is not fixable in v1, and it is stated rather than hidden.
 
 **What the operator does not learn.** Capture contents, names, recognized text, source
 app, window titles, file paths, or creation times (F15 blinds the ULID).
@@ -957,3 +1038,23 @@ are recorded here because each was a rule that read as reasonable and could not 
 Three further findings — snapshot application order, re-enrolment after revocation, and the
 downgrade claim — are addressed by F110, F113 and F115. Two claims in §13 were overstated and
 have been corrected rather than defended.
+
+A second pass reviewed those fixes, because a fix written in one sitting is the least-examined
+text in a spec. It found seven more, and they are recorded for the same reason:
+
+6. F12 still derived a row key from `revision`, which is inside the payload — the first
+   finding's mistake one layer down (F126). Rows now derive from `opID`.
+7. `kind` was needed by three server-side rules and was not in the envelope (F127). The
+   implementation had already added it; the spec had not.
+8. A fork could not name the bytes F82 promised it would not re-upload, because its new
+   `blindedID` addressed a key nobody wrote (F128). This was created by the fix for finding 3.
+9. Merging a snapshot resurrected captures deleted while a device was offline (F130, F131).
+10. Snapshots lost the blob writer that F100 had just made part of the key path (F129).
+11. An admitted delete did not fence later writes, so F20's cleanup destroyed acknowledged
+    bytes (F132).
+12. Compaction could erase the trash timestamp F108 dates eligibility from, leaving a capture
+    permanently unsweepable (F134).
+
+Findings 6, 8 and 10 are all D1's shape: a value the reader needs, placed where the reader
+cannot reach it. That is the standing cost of the encryption decision (§14 Q9), and it is the
+reason a third review pass is expected rather than optional.
