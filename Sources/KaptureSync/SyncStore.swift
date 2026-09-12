@@ -61,6 +61,20 @@ public struct SyncStore: Sendable {
     public static let capabilityGeneration = "v1;upsert,trash,restore,delete"
     public static let payloadVersion = 1
 
+    /// Built once: constructing a coder costs far more than using one, and `enqueue` runs in a
+    /// loop over a merge result.
+    private static let encoder = JSONEncoder()
+    private static let decoder = JSONDecoder()
+
+    /// `Library` carries the same note on its own shard formatter: creation is expensive,
+    /// formatting through a shared instance is thread-safe. `derivedRelPath` runs per row on a
+    /// bootstrap, so a per-call formatter is a second of pure allocation over 10k rows.
+    private static let shardFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy/MM"
+        return f
+    }()
+
     // MARK: - Identity
 
     public func identity() throws -> SyncIdentity? {
@@ -93,25 +107,32 @@ public struct SyncStore: Sendable {
 
     /// A capture as the log carries it (F83, F84): no `relPath`, no `fastID`, no cache columns.
     public func row(for record: CaptureRecord, in d: GRDB.Database) throws -> SyncedRow {
-        let extra = try Row.fetchOne(d, sql: """
-            SELECT lamport, syncDeviceID, forkedFrom, parentHash FROM captures WHERE id = ?
-            """, arguments: [record.id])
         let ocr = try String.fetchOne(d, sql: "SELECT ocr FROM fts_source WHERE captureId = ?",
                                       arguments: [record.id])
-        // F23, F129: the row must be enough on its own to reach its own bytes, because a
-        // snapshot carries the row and not the envelopes that once named them.
+        return row(for: record, ocr: ocr, blobs: try blobLocators(for: record.id, in: d))
+    }
+
+    /// F23, F129: the row must be enough on its own to reach its own bytes, because a snapshot
+    /// carries the row and not the envelopes that once named them.
+    func blobLocators(for captureID: String, in d: GRDB.Database) throws
+        -> [BlobPurpose: BlobLocator] {
         var blobs: [BlobPurpose: BlobLocator] = [:]
         for entry in try Row.fetchAll(d, sql: """
             SELECT purpose, revision, writer, owningCapture FROM blob_cache WHERE captureId = ?
-            """, arguments: [record.id]) {
+            """, arguments: [captureID]) {
             guard let purpose = BlobPurpose(rawValue: entry["purpose"]) else { continue }
             blobs[purpose] = BlobLocator(revision: entry["revision"], writer: entry["writer"],
                                          capture: entry["owningCapture"])
         }
-        return SyncedRow(
+        return blobs
+    }
+
+    func row(for record: CaptureRecord, ocr: String?,
+             blobs: [BlobPurpose: BlobLocator]) -> SyncedRow {
+        SyncedRow(
             captureID: record.id,
-            lamport: extra?["lamport"] ?? 0,
-            deviceID: extra?["syncDeviceID"] ?? "",
+            lamport: record.lamport,
+            deviceID: record.syncDeviceID ?? "",
             kind: record.kind,
             status: record.status,
             createdAt: record.createdAt,
@@ -124,7 +145,7 @@ public struct SyncStore: Sendable {
             windowTitle: record.windowTitle,
             contentRevision: record.contentRevision,
             contentHash: record.contentHash,
-            parentHash: extra?["parentHash"],
+            parentHash: record.parentHash,
             aiState: record.aiState,
             summary: record.summary,
             ocr: ocr,
@@ -143,15 +164,31 @@ public struct SyncStore: Sendable {
         }
     }
 
+    /// Every local row, as three table scans rather than four queries per capture.
+    ///
+    /// `pull` calls this once per page, so the per-row form was ~40,000 statements per call on a
+    /// ten-thousand capture library and twenty times that during a bootstrap.
     public func localRows() throws -> [String: LocalRow] {
         try db.queue.read { d in
+            var ocr: [String: String] = [:]
+            for entry in try Row.fetchAll(d, sql: "SELECT captureId, ocr FROM fts_source") {
+                ocr[entry["captureId"]] = entry["ocr"]
+            }
+            var blobs: [String: [BlobPurpose: BlobLocator]] = [:]
+            for entry in try Row.fetchAll(d, sql: """
+                SELECT captureId, purpose, revision, writer, owningCapture FROM blob_cache
+                """) {
+                guard let purpose = BlobPurpose(rawValue: entry["purpose"]) else { continue }
+                let captureID: String = entry["captureId"]
+                blobs[captureID, default: [:]][purpose] = BlobLocator(
+                    revision: entry["revision"], writer: entry["writer"],
+                    capture: entry["owningCapture"])
+            }
             var rows: [String: LocalRow] = [:]
             for record in try CaptureRecord.fetchAll(d) {
-                let acknowledged = try Bool.fetchOne(
-                    d, sql: "SELECT acknowledged FROM captures WHERE id = ?",
-                    arguments: [record.id]) ?? false
-                rows[record.id] = LocalRow(row: try row(for: record, in: d),
-                                           acknowledged: acknowledged)
+                rows[record.id] = LocalRow(
+                    row: row(for: record, ocr: ocr[record.id], blobs: blobs[record.id] ?? [:]),
+                    acknowledged: record.acknowledged)
             }
             return rows
         }
@@ -168,11 +205,11 @@ public struct SyncStore: Sendable {
     ///
     /// The payload is sealed here rather than at send time so the outbox holds ciphertext at
     /// rest: a queued op is no more readable on disk than it is on the server.
-    public func enqueue(_ row: SyncedRow, kind: OpKind, requires: [BlobLocatorRef]? = nil,
+    public func enqueue(_ row: SyncedRow, kind: OpKind,
                         observed: Int64, deviceID: String, in d: GRDB.Database) throws {
         let opID = ULID.generate()
         let payload = try crypto.seal(row, scope: .row(opID: opID), writer: deviceID)
-        let encoded = try JSONEncoder().encode(requires ?? Self.requires(for: row))
+        let encoded = try Self.encoder.encode(Self.requires(for: row))
         try d.execute(sql: """
             INSERT INTO sync_outbox (opID, captureId, kind, payload, requires, observed, v, queuedAt)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -208,8 +245,8 @@ public struct SyncStore: Sendable {
                 """, arguments: [now, limit])
             return rows.map { row in
                 let raw: String = row["requires"]
-                let refs = (try? JSONDecoder().decode([BlobLocatorRef].self,
-                                                      from: Data(raw.utf8))) ?? []
+                    let refs = (try? Self.decoder.decode([BlobLocatorRef].self,
+                                                    from: Data(raw.utf8))) ?? []
                 return OutboxEntry(
                     opID: row["opID"], captureID: row["captureId"],
                     kind: OpKind(rawValue: row["kind"]) ?? .upsert,
@@ -282,6 +319,29 @@ public struct SyncStore: Sendable {
     /// Whether this build's capabilities have widened since the skipped ops were recorded
     /// (F135). Replay is keyed on the whole capability string, not the payload version alone: a
     /// release that adds a `kind` without bumping `v` would otherwise never go back for them.
+    /// Rewind past what this build skipped, forget it, and record the new generation — in one
+    /// transaction (F135).
+    ///
+    /// Spelled out inline in the lifecycle method, this was four separate `try?` calls: a crash
+    /// between the rewind and the clear left a rewound cursor with the skipped rows still in
+    /// place, and each `try?` threw away the error that would have said so.
+    @discardableResult
+    public func replaySkippedIfCapabilitiesWidened() throws -> Bool {
+        try db.queue.write { d in
+            let current = try String.fetchOne(
+                d, sql: "SELECT capabilities FROM sync_state WHERE id = 1")
+            guard let current, current != Self.capabilityGeneration else { return false }
+            if let oldest = try Int64.fetchOne(d, sql: "SELECT MIN(seq) FROM skipped_ops") {
+                try d.execute(sql: "UPDATE sync_state SET cursor = ? WHERE id = 1",
+                              arguments: [max(0, oldest - 1)])
+            }
+            try d.execute(sql: "DELETE FROM skipped_ops")
+            try d.execute(sql: "UPDATE sync_state SET capabilities = ? WHERE id = 1",
+                          arguments: [Self.capabilityGeneration])
+            return true
+        }
+    }
+
     public func capabilitiesWidened() throws -> Bool {
         guard let identity = try identity() else { return false }
         return identity.capabilities != Self.capabilityGeneration
@@ -331,40 +391,47 @@ public struct SyncStore: Sendable {
     /// Write one synced row into `captures`, deriving the device-local fields rather than
     /// taking them from the log (F83): `relPath` is this Mac's, not the sender's.
     func upsert(_ row: SyncedRow, in d: GRDB.Database, acknowledged: Bool) throws {
-        let existing = try Row.fetchOne(d, sql: "SELECT relPath, blobState FROM captures WHERE id = ?",
-                                        arguments: [row.captureID])
-        let relPath: String = existing?["relPath"] ?? Self.derivedRelPath(for: row)
-        // A row this Mac already holds keeps the state it has: it made the capture, or it has
-        // already fetched it, and the log has no opinion about where the bytes are on this
-        // machine (F83, F84). Only a genuinely new row starts as `remote`, and only when the
-        // log says bytes exist for it.
-        let blobState: String = existing?["blobState"]
-            ?? (row.blobs.isEmpty ? BlobState.local.rawValue : BlobState.remote.rawValue)
+        // Fetch the whole record and write the whole record. The hand-written INSERT this
+        // replaces named 26 columns in three lists that had to stay aligned by eye, and it
+        // duplicated a schema `CaptureRecord` already describes.
+        var record = try CaptureRecord.fetchOne(d, key: row.captureID)
+            ?? CaptureRecord(id: row.captureID, kind: row.kind, status: row.status,
+                             createdAt: row.createdAt, width: row.width, height: row.height,
+                             bytes: row.bytes, relPath: Self.derivedRelPath(for: row),
+                             sourceApp: row.sourceApp, windowTitle: row.windowTitle,
+                             fastID: "")
 
-        try d.execute(sql: """
-            INSERT INTO captures
-              (id, kind, status, createdAt, trashedAt, width, height, bytes, relPath, sourceApp,
-               windowTitle, screenID, fastID, contentHash, aiState, summary, shareURL, shareStale,
-               durationS, contentRevision, lamport, syncDeviceID, forkedFrom, blobState,
-               parentHash, acknowledged)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '', ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-              status = excluded.status, trashedAt = excluded.trashedAt, width = excluded.width,
-              height = excluded.height, bytes = excluded.bytes, sourceApp = excluded.sourceApp,
-              windowTitle = excluded.windowTitle, contentHash = excluded.contentHash,
-              aiState = excluded.aiState, summary = excluded.summary,
-              shareURL = excluded.shareURL, durationS = excluded.durationS,
-              contentRevision = excluded.contentRevision, lamport = excluded.lamport,
-              syncDeviceID = excluded.syncDeviceID, forkedFrom = excluded.forkedFrom,
-              parentHash = excluded.parentHash, acknowledged = excluded.acknowledged
-            """, arguments: [
-                row.captureID, row.kind.rawValue, row.status.rawValue, row.createdAt,
-                row.trashedAt, row.width, row.height, row.bytes, relPath, row.sourceApp,
-                row.windowTitle, row.contentHash, row.aiState.rawValue, row.summary,
-                row.shareURL, row.durationS, row.contentRevision, row.lamport, row.deviceID,
-                row.forkedFrom, blobState, row.parentHash,
-                acknowledged,
-            ])
+        // The log's fields. `relPath` and `fastID` are deliberately absent: they are
+        // device-local (F83, F84), so a row that already exists keeps this Mac's.
+        record.kind = row.kind
+        record.status = row.status
+        record.createdAt = row.createdAt
+        record.trashedAt = row.trashedAt
+        record.width = row.width
+        record.height = row.height
+        record.bytes = row.bytes
+        record.sourceApp = row.sourceApp
+        record.windowTitle = row.windowTitle
+        record.contentRevision = row.contentRevision
+        record.contentHash = row.contentHash
+        record.aiState = row.aiState
+        record.summary = row.summary
+        record.shareURL = row.shareURL
+        record.durationS = row.durationS
+        record.lamport = row.lamport
+        record.syncDeviceID = row.deviceID
+        record.forkedFrom = row.forkedFrom
+        record.parentHash = row.parentHash
+        record.acknowledged = acknowledged
+
+        // A row this Mac already holds keeps the blob state it has: it made the capture, or has
+        // already fetched it, and the log has no opinion about where the bytes sit here. Only a
+        // genuinely new row starts `remote`, and only when the log says bytes exist for it.
+        if try !CaptureRecord.exists(d, key: row.captureID) {
+            record.blobState = row.blobs.isEmpty ? BlobState.local.rawValue
+                                                 : BlobState.remote.rawValue
+        }
+        try record.save(d)
 
         try d.execute(sql: """
             INSERT INTO fts_source (captureId, name, summary, tags, ocr) VALUES (?, ?, ?, '', ?)
@@ -376,18 +443,12 @@ public struct SyncStore: Sendable {
     /// This Mac's path for a capture it has never held: the sharded directory its date implies,
     /// with the log's name. F83 keeps paths local, so nothing here consults the sender's.
     static func derivedRelPath(for row: SyncedRow) -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy/MM"
         // The name is sanitized to a single component: an op is attacker-controlled if a device
         // credential leaks (§13), and a name carrying a separator would escape the shard.
         let safe = row.name
             .replacingOccurrences(of: "/", with: "-")
             .replacingOccurrences(of: "\\", with: "-")
             .replacingOccurrences(of: "..", with: "-")
-        return "\(formatter.string(from: row.createdAt))/\(safe)"
+        return "\(shardFormatter.string(from: row.createdAt))/\(safe)"
     }
-}
-
-func databaseQuestionMarks(count: Int) -> String {
-    Array(repeating: "?", count: count).joined(separator: ", ")
 }

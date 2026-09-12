@@ -51,6 +51,17 @@ public struct CaptureRecord: Codable, Sendable, FetchableRecord, PersistableReco
     public var shareStale: Bool
     public var durationS: Double?   // recordings
 
+    // The shared library's columns (migration v7). They live here rather than in raw SQL in
+    // KaptureSync so one fetch reads a whole capture: without them every read of a synced row
+    // needed a second query against the row it had just loaded.
+    public var lamport: Int64 = 0
+    public var syncDeviceID: String?
+    public var forkedFrom: String?
+    public var blobState: String = "local"
+    public var parentHash: String?
+    /// Whether the log has ever acknowledged this row (F130).
+    public var acknowledged: Bool = false
+
     public init(id: String = ULID.generate(), kind: CaptureKind, status: CaptureStatus = .staged,
                 createdAt: Date = Date(), width: Int, height: Int, bytes: Int, relPath: String,
                 sourceApp: String? = nil, windowTitle: String? = nil, screenID: Int? = nil,

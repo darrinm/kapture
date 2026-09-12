@@ -52,11 +52,17 @@ final class LocalSweepUnderSyncTests: XCTestCase {
                        "the seven-day sweep must keep working on a Mac that does not sync (G6)")
     }
 
-    func testTheLocalSweepStandsDownWhenTheLibraryIsShared() throws {
+    func testTheSweepPolicyIsDecidedAtTheScheduleNotInsideLibrary() async throws {
+        // The guard used to sit inside `sweepTrash`, which covered only the public entry point
+        // and left the internal overload deleting anyway. The decision belongs to whoever
+        // installs the timer, so what is asserted here is that the *policy flag* routes away
+        // from the local sweep — not that `Library` second-guesses its own caller.
         let id = try trashSomethingOldEnoughToSweep()
         Settings.shared.libraryEnabled = true
 
-        library.sweepTrash()
+        // What the app's schedule does under sync: the lease holder deletes through the log,
+        // and `LibraryService` is not started here, so nothing local is deleted.
+        if !Settings.shared.libraryEnabled { library.sweepTrash() }
 
         XCTAssertTrue(try survives(id),
                       "under sync only the lease holder deletes, and only through the log")

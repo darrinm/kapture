@@ -149,6 +149,12 @@ public struct Settings {
         set { d.set(newValue, forKey: "libraryEnabled") }
     }
 
+    /// How much of the library this Mac keeps on disk (F51). Zero means keep everything.
+    public var libraryCacheBytes: Int {
+        let gb = d.object(forKey: "libraryCacheGB") as? Int ?? 20
+        return gb <= 0 ? .max : gb * 1024 * 1024 * 1024
+    }
+
     /// Put the link on the clipboard as soon as a share finishes — the reason to share is almost
     /// always to paste it somewhere.
     public var copyShareLinkAutomatically: Bool {

@@ -55,8 +55,10 @@ public struct SweepCoordinator: Sendable {
 
         let rows = try store.localRows()
         for (captureID, local) in rows {
-            guard eligible.contains(store.crypto.blind(captureID)) else { continue }
+            // Status first: `blind` is an HMAC, and the trashed set is a handful of rows where
+            // the library is thousands.
             guard local.row.status == .trashed else { continue }
+            guard eligible.contains(store.crypto.blind(captureID)) else { continue }
             // F106: the delete names the seq at which this device last saw the capture as
             // trash, and the log refuses it if anything has happened since.
             try enqueueDelete(local.row, observed: identity.cursor)

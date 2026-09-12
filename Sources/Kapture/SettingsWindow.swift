@@ -365,8 +365,9 @@ struct SettingsView: View {
     /// library for everyone including whoever runs the server (F16).
     var sharedLibrary: some View {
         Form {
+            // @AppStorage writes the same UserDefaults key `Settings.libraryEnabled` reads, so
+            // an onChange mirroring it would write the value twice.
             Toggle("Sync this library across my Macs", isOn: $librarySync)
-                .onChange(of: librarySync) { _, v in Settings.shared.libraryEnabled = v }
 
             LabeledContent("Endpoint") {
                 Text(Settings.shared.libraryEndpoint.host ?? "—")

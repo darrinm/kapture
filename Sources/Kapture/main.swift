@@ -80,11 +80,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         Onboarding.shared.showIfNeeded()
         ShortcutConflictWatch.shared.start()
 
-        // trash sweep at launch + every 6h (7-day retention)
+        // Trash sweep at launch + every 6h (7-day retention).
+        //
+        // One decision, made here rather than inside either sweeper: with the shared library on,
+        // deleting belongs to the log — only the lease holder may issue a delete, and the seven
+        // days are the server's to count (F43, F44, F45). Two Macs both running the local sweep
+        // against one library would delete captures the other had just restored.
         let library = CaptureCoordinator.shared.library
-        Task.detached(priority: .utility) { library?.sweepTrash() }
+        Task.detached(priority: .utility) { await AppDelegate.sweep(library) }
         Timer.scheduledTimer(withTimeInterval: 6 * 3600, repeats: true) { _ in
-            Task.detached(priority: .utility) { library?.sweepTrash() }
+            Task.detached(priority: .utility) { await AppDelegate.sweep(library) }
+        }
+    }
+
+    /// Sweep once, through whichever mechanism owns deletion right now.
+    nonisolated static func sweep(_ library: Library?) async {
+        if Settings.shared.libraryEnabled {
+            await LibraryService.shared.sweepNow()
+        } else {
+            library?.sweepTrash()
         }
     }
 

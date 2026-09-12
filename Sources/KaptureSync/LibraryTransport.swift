@@ -46,7 +46,21 @@ public struct ChangesPage: Codable, Sendable {
 
 public struct PushOutcome: Codable, Sendable {
     public struct Assigned: Codable, Sendable { public var opID: String; public var seq: Int64 }
-    public struct Rejected: Codable, Sendable { public var opID: String; public var reason: String }
+
+    public struct Rejected: Codable, Sendable {
+        public var opID: String
+        /// Why, as a value rather than a sentence.
+        ///
+        /// This used to be decided by matching substrings of `reason`, which meant rewording a
+        /// server message silently changed client behaviour — and classifying a permanent
+        /// rejection as retryable re-pushes it every minute forever, which also blocks every
+        /// snapshot, because a backing-off op still counts as pending.
+        public var code: String?
+        public var reason: String
+
+        /// Retrying can never help: the log has already moved past this op.
+        public var isPermanent: Bool { code == "tombstoned" || code == "stale-delete" }
+    }
     public var assigned: [Assigned]
     public var rejected: [Rejected]
     public var head: Int64
@@ -131,16 +145,8 @@ public struct HTTPTransport: LibraryTransport {
     }
 
     public func changes(since: Int64, limit: Int = 500) async throws -> ChangesPage {
-        var components = URLComponents(
-            url: endpoint.appendingPathComponent("api/library/changes"),
-            resolvingAgainstBaseURL: false)!
-        components.queryItems = [
-            URLQueryItem(name: "since", value: String(since)),
-            URLQueryItem(name: "limit", value: String(limit)),
-        ]
-        var request = URLRequest(url: components.url!)
-        request.timeoutInterval = 60
-        request.setValue("Bearer \(deviceToken)", forHTTPHeaderField: "authorization")
+        let request = self.request("api/library/changes",
+                                   query: ["since": String(since), "limit": String(limit)])
         let (data, response) = try await session.data(for: request)
         try Self.check(response, data)
         return try JSONDecoder().decode(ChangesPage.self, from: data)
@@ -152,10 +158,7 @@ public struct HTTPTransport: LibraryTransport {
         request.httpBody = try JSONEncoder().encode(["ops": ops])
         let (data, response) = try await session.data(for: request)
         // 409 carries a usable body: some ops were admitted and some refused.
-        if let http = response as? HTTPURLResponse, http.statusCode == 409 {
-            return try JSONDecoder().decode(PushOutcome.self, from: data)
-        }
-        try Self.check(response, data)
+        if (response as? HTTPURLResponse)?.statusCode != 409 { try Self.check(response, data) }
         return try JSONDecoder().decode(PushOutcome.self, from: data)
     }
 
@@ -185,12 +188,9 @@ public struct HTTPTransport: LibraryTransport {
             "deviceID": deviceID, "name": name, "platform": "macOS", "keyID": keyID,
         ])
         let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse else { throw SyncFailure("no response") }
+        // 202 means enrolled but awaiting approval (F113), which is a success here.
+        if (response as? HTTPURLResponse)?.statusCode != 202 { try Self.check(response, data) }
         let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
-        guard http.statusCode == 200 || http.statusCode == 202 else {
-            throw SyncFailure(json["error"] as? String ?? "http \(http.statusCode)",
-                              isAuthFailure: http.statusCode == 401)
-        }
         return EnrolmentResult(
             deviceID: json["deviceID"] as? String ?? deviceID,
             token: json["token"] as? String ?? "",
@@ -233,7 +233,7 @@ public struct HTTPTransport: LibraryTransport {
             let end = min(offset + Self.partSize, data.count)
             var request = self.request(blobPath(locator), method: "PUT",
                                        query: ["part": String(part)])
-            request.httpBody = data.subdata(in: offset..<end)
+            request.httpBody = data[offset..<end]
             let (body, response) = try await session.data(for: request)
             try Self.check(response, body)
             offset = end

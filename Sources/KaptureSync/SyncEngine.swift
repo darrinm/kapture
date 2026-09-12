@@ -7,6 +7,9 @@ import Foundation
 import KaptureCore
 
 public actor SyncEngine {
+    /// F26 caps a page at 500; the loop below uses it to tell a short page from a full one.
+    static let pageSize = 500
+
     private let store: SyncStore
     private let transport: any LibraryTransport
     private let crypto: LibraryCrypto
@@ -40,38 +43,17 @@ public actor SyncEngine {
         var summary = PullSummary()
 
         while true {
-            let page = try await transport.changes(since: cursor, limit: 500)
+            let page = try await transport.changes(since: cursor, limit: Self.pageSize)
             if page.ops.isEmpty { break }
 
             var ops: [SyncOp] = []
             for wire in page.ops {
-                // F78, F104: an op this build cannot apply advances the cursor anyway — holding
-                // it back would stall this Mac behind a newer one indefinitely — but it is
-                // recorded so F135 can replay it once the build's capabilities widen.
-                guard wire.v <= SyncStore.payloadVersion,
-                      let kind = OpKind(rawValue: wire.kind) else {
+                guard let op = decode(wire) else {
                     try store.noteSkipped(seq: wire.seq, v: wire.v, kind: wire.kind)
                     summary.skipped += 1
                     continue
                 }
-                guard let ciphertext = Data(base64Encoded: wire.ciphertext) else {
-                    try store.noteSkipped(seq: wire.seq, v: wire.v, kind: wire.kind)
-                    summary.skipped += 1
-                    continue
-                }
-                // The key derives from the envelope alone (F12, F95): opID and the writing
-                // device, both in front of us before anything is decrypted. An op that will not
-                // open — a corrupt payload, or one written under a key this Mac does not hold —
-                // is skipped like any other unreadable op. Throwing here would leave the cursor
-                // where it is and every later sync would stop at the same op, forever.
-                guard let row = try? crypto.open(SyncedRow.self, from: ciphertext,
-                                                 scope: .row(opID: wire.opID),
-                                                 writer: wire.deviceID) else {
-                    try store.noteSkipped(seq: wire.seq, v: wire.v, kind: wire.kind)
-                    summary.skipped += 1
-                    continue
-                }
-                ops.append(SyncOp(seq: wire.seq, kind: kind, row: row, observed: wire.observed))
+                ops.append(op)
             }
 
             let local = try store.localRows()
@@ -81,10 +63,29 @@ public actor SyncEngine {
 
             summary.applied += result.upserts.count + result.deletions.count
             summary.forks += result.forks.count
-            if page.ops.count < 500 || cursor >= page.head { break }
+            if page.ops.count < Self.pageSize || cursor >= page.head { break }
         }
 
         return summary
+    }
+
+    /// One wire op, or nil when this build cannot apply it.
+    ///
+    /// Three ways that happens and all are handled the same way: a payload version or an op kind
+    /// from a newer build (F78), and a payload that will not open — corrupt, or written under a
+    /// key this Mac does not hold. The caller records the seq so F135 can replay it, and
+    /// advances the cursor regardless: holding it back would stall this Mac behind a newer one
+    /// forever, and throwing would stop every later sync at the same op.
+    private func decode(_ wire: WireOp) -> SyncOp? {
+        guard wire.v <= SyncStore.payloadVersion,
+              let kind = OpKind(rawValue: wire.kind),
+              let ciphertext = Data(base64Encoded: wire.ciphertext),
+              // The key derives from the envelope alone (F12, F95): opID and the writing device,
+              // both in front of us before anything is decrypted.
+              let row = try? crypto.open(SyncedRow.self, from: ciphertext,
+                                         scope: .row(opID: wire.opID), writer: wire.deviceID)
+        else { return nil }
+        return SyncOp(seq: wire.seq, kind: kind, row: row, observed: wire.observed)
     }
 
     // MARK: - Push (F30, F31, F32)
@@ -108,9 +109,10 @@ public actor SyncEngine {
         try store.acknowledge(outcome.assigned.map(\.opID))
 
         for rejection in outcome.rejected {
-            // A stale delete (F106) or a tombstoned capture (F132) will never succeed on retry,
-            // so it is dropped rather than left to spin. Anything else backs off.
-            if rejection.reason.contains("stale delete") || rejection.reason.contains("deleted at") {
+            // A stale delete (F106) or a tombstoned capture (F132) can never succeed on retry, so
+            // it is dropped rather than left to spin. An unrecognized code backs off, which is
+            // the safe direction: a retry costs a request, a wrong drop loses the op.
+            if rejection.isPermanent {
                 try store.drop(rejection.opID)
             } else {
                 try store.deferEntry(rejection.opID, error: rejection.reason, after: 60)

@@ -59,6 +59,7 @@ describe("F32/F98 — blob dependencies are checked from the envelope", () => {
       requires: [{ purpose: "blob", revision: 3, writer: "device-a" }],
     })]);
     expect(result.assigned).toHaveLength(0);
+    expect(result.rejected[0].code).toBe("missing-blob");
     expect(result.rejected[0].reason).toContain("missing blob");
   });
 
@@ -99,6 +100,7 @@ describe("F106 — a delete is conditional on the log, not on a past pull", () =
     // ...and the delete, which satisfied every other precondition in §7.4, is refused.
     const result = await log.append(name, [op({ kind: "delete", observed })]);
     expect(result.assigned).toHaveLength(0);
+    expect(result.rejected[0].code).toBe("stale-delete");
     expect(result.rejected[0].reason).toContain("stale delete");
   });
 
@@ -127,7 +129,7 @@ describe("F102 — only a complete client may snapshot", () => {
     const name = owner();
     const log = libraryLogFor(env, name);
     await log.append(name, [op({ v: 2 })]);
-    const claim = await log.claimSnapshot("old-device", 1, 1);
+    const claim = await log.claimSnapshot(1, 1);
     expect(claim.granted).toBe(false);
     expect(claim.required).toBe(2);
   });
@@ -136,7 +138,7 @@ describe("F102 — only a complete client may snapshot", () => {
     const name = owner();
     const log = libraryLogFor(env, name);
     await log.append(name, [op({ v: 2 })]);
-    const claim = await log.claimSnapshot("current", 2, 1);
+    const claim = await log.claimSnapshot(2, 1);
     expect(claim.granted).toBe(true);
   });
 
@@ -145,7 +147,7 @@ describe("F102 — only a complete client may snapshot", () => {
     const log = libraryLogFor(env, name);
     await log.append(name, [op()]);
     await log.append(name, [op()]);
-    expect((await log.claimSnapshot("current", 1, 1)).granted).toBe(false);
+    expect((await log.claimSnapshot(1, 1)).granted).toBe(false);
   });
 });
 
@@ -199,6 +201,8 @@ describe("F132 — an admitted delete is final at admission, not at cleanup", ()
       requires: [{ purpose: "blob", revision: 9, writer: "device-b" }],
     })]);
     expect(late.assigned).toHaveLength(0);
+    // The code is what the client branches on; the sentence is for logs (F132).
+    expect(late.rejected[0].code).toBe("tombstoned");
     expect(late.rejected[0].reason).toContain("deleted");
   });
 
@@ -240,7 +244,7 @@ describe("F136 — the version gate is a high-water mark", () => {
     // Simulate compaction removing the v2 op. A MAX(v) over survivors would now read 1 and let
     // a v1-only client write the library back down.
     await log.forgetOpsForTest(1);
-    expect((await log.claimSnapshot("old", 1, 2)).granted).toBe(false);
+    expect((await log.claimSnapshot(1, 2)).granted).toBe(false);
   });
 });
 

@@ -153,7 +153,9 @@ public struct BlobStore: Sendable {
     public func upload(_ captureID: String, from file: URL, revision: Int64,
                        writer: String, using transport: any LibraryTransport) async throws
         -> BlobLocatorRef {
-        let plaintext = try Data(contentsOf: file)
+        // Mapped rather than copied: a recording can be hundreds of megabytes and sealing
+        // already produces a second full-size buffer.
+        let plaintext = try Data(contentsOf: file, options: .mappedIfSafe)
         let capture = crypto.blind(captureID)
         let locator = BlobLocatorRef(purpose: .blob, revision: revision,
                                      writer: writer, capture: capture)
@@ -213,14 +215,6 @@ public struct BlobStore: Sendable {
                 try? FileManager.default.removeItem(at: url)
             }
             try setState(.remote, for: captureID)
-        }
-    }
-
-    public func localBytes() throws -> Int {
-        try db.queue.read { d in
-            try Int.fetchOne(d, sql: """
-                SELECT COALESCE(SUM(bytes), 0) FROM captures WHERE blobState = 'local'
-                """) ?? 0
         }
     }
 }

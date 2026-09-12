@@ -41,6 +41,8 @@ public actor LibraryService {
     private var engine: SyncEngine?
     private var store: SyncStore?
     private var blobs: BlobStore?
+    private var transport: (any LibraryTransport)?
+    private var sweeper: SweepCoordinator?
     private var timer: Task<Void, Never>?
     private(set) public var state: LibraryState = .disabled
     private(set) public var lastSync: Date?
@@ -117,24 +119,20 @@ public actor LibraryService {
         if ((try? store.identity()) ?? nil) == nil {
             _ = try? store.enable(deviceID: deviceID)
         }
-        // F135: a build whose capabilities widened goes back for what it skipped. Clearing the
-        // table alone forgets them — the cursor has already passed those seqs — so the cursor is
-        // rewound to just before the oldest skipped op first, and the page is pulled again.
-        if (try? store.capabilitiesWidened()) == true {
-            if let oldest = (try? store.skippedSeqs())?.first {
-                try? store.advanceCursor(to: max(0, oldest - 1))
-            }
-            try? store.clearSkipped()
-            try? store.recordCapabilities()
-        }
+        // F135: a build whose capabilities widened goes back for what it skipped.
+        _ = try? store.replaySkippedIfCapabilitiesWidened()
         self.store = store
-        self.blobs = BlobStore(db: db, root: Settings.shared.libraryRoot, crypto: crypto,
-                               thumbnailDirectory: Self.thumbnailDirectory())
-        self.engine = SyncEngine(
-            store: store,
-            transport: HTTPTransport(endpoint: Settings.shared.libraryEndpoint,
-                                     deviceToken: token),
-            deviceID: deviceID)
+        let blobs = BlobStore(db: db, root: Settings.shared.libraryRoot, crypto: crypto,
+                              thumbnailDirectory: Self.thumbnailDirectory())
+        self.blobs = blobs
+        // One transport for the whole session. Rebuilding it per call read the Keychain again
+        // and gave uploads and ops two sources of truth for the endpoint and the credential,
+        // which can disagree within a session after a re-enrolment.
+        let transport = HTTPTransport(endpoint: Settings.shared.libraryEndpoint,
+                                      deviceToken: token)
+        self.transport = transport
+        self.sweeper = SweepCoordinator(store: store, blobs: blobs, deviceID: deviceID)
+        self.engine = SyncEngine(store: store, transport: transport, deviceID: deviceID)
         state = .ready
         startTimer()
         return state
@@ -146,6 +144,8 @@ public actor LibraryService {
         engine = nil
         store = nil
         blobs = nil
+        transport = nil
+        sweeper = nil
         state = .disabled
     }
 
@@ -178,14 +178,14 @@ public actor LibraryService {
     /// whose pixels it can never fetch. Bytes go first, because F32 refuses an op naming a
     /// revision the server does not yet hold.
     public func publish(captureID: String, file: URL, revision: Int64) async {
-        guard state == .ready, let store, let blobs else { return }
+        guard state == .ready, let store, let blobs, let transport else { return }
         let identity = try? store.identity()
         guard let deviceID = identity?.deviceID else { return }
 
         do {
             if FileManager.default.fileExists(atPath: file.path) {
                 _ = try await blobs.upload(captureID, from: file, revision: revision,
-                                           writer: deviceID, using: transportForUploads())
+                                           writer: deviceID, using: transport)
             }
             // The row is read *after* the upload so it carries the locator the upload recorded
             // (F23, F129), and `enqueue` derives `requires` from it (F98).
@@ -213,16 +213,34 @@ public actor LibraryService {
         }
     }
 
-    private func transportForUploads() -> any LibraryTransport {
-        HTTPTransport(endpoint: Settings.shared.libraryEndpoint,
-                      deviceToken: Keychain.libraryDeviceToken ?? "")
-    }
-
     /// Bring a capture's bytes down on demand (F48).
     @discardableResult
     public func materialize(captureID: String) async throws -> URL? {
-        guard state == .ready, let blobs else { return nil }
-        return try await blobs.fetch(captureID, using: transportForUploads())
+        guard state == .ready, let blobs, let transport else { return nil }
+        return try await blobs.fetch(captureID, using: transport)
+    }
+
+    /// One sweep pass (§7.4).
+    ///
+    /// This is the whole of the trash sweep while the library is shared: `Library.sweepTrash`
+    /// stands down (F44), because deleting is the log's decision and only the lease holder may
+    /// make it. Without this call nothing sweeps at all once sync is on.
+    @discardableResult
+    public func sweepNow() async -> SweepCoordinator.SweepOutcome? {
+        guard state == .ready, let sweeper, let transport else { return nil }
+        do {
+            let outcome = try await sweeper.sweep(using: transport,
+                                                  cacheCeiling: Settings.shared.libraryCacheBytes)
+            if let cursor = try? store?.identity()?.cursor {
+                _ = try? await sweeper.snapshotIfNeeded(using: transport,
+                                                        opsSinceSnapshot: Int(cursor))
+            }
+            return outcome
+        } catch {
+            lastError = String(describing: error)
+            Log.store.error("library sweep failed: \(error)")
+            return nil
+        }
     }
 
     @discardableResult

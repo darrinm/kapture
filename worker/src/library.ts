@@ -53,10 +53,39 @@ export type StoredOp = {
   [key: string]: SqlStorageValue;
 };
 
+/**
+ * Why an op was refused.
+ *
+ * The code, not the prose, is what a client branches on: `tombstoned` and `stale-delete` can
+ * never succeed on retry and `missing-blob` can, and a client that told them apart by matching
+ * substrings of `reason` would change behaviour the next time either sentence was reworded.
+ */
+export type RejectionCode = "tombstoned" | "stale-delete" | "missing-blob";
+
 export interface AppendOutcome {
   assigned: { opID: string; seq: number }[];
-  rejected: { opID: string; reason: string }[];
+  rejected: { opID: string; code: RejectionCode; reason: string }[];
   head: number;
+}
+
+/**
+ * The R2 key layout, in one place (§5.2).
+ *
+ * `append`'s F32 dependency check and the blob route both build these. Spelled out twice they
+ * can drift, and the failure is silent in the worst direction: `append` rejects every op with
+ * "missing blob" while the bytes are sitting in the bucket.
+ */
+export function blobKey(owner: string, purpose: string, capture: string,
+                        revision: number, writer: string): string {
+  return `${ownerPrefix(owner)}${purpose}/${capture}/${revision}/${writer}`;
+}
+
+export function snapshotKey(owner: string, seq: number, writer: string): string {
+  return `${ownerPrefix(owner)}snap/${seq}/${writer}`;
+}
+
+export function ownerPrefix(owner: string): string {
+  return `lib/${owner}/`;
 }
 
 /** opIDs outlive their ops so a retry after compaction is still recognized (F103). */
@@ -157,11 +186,12 @@ export class LibraryLog extends DurableObject<Env> {
     return rows[0]?.value ?? 0;
   }
 
-  private raiseMaxVersion(v: number): void {
-    if (v <= this.maxVersion()) return;
+  private raiseMaxVersion(v: number, known: number): number {
+    if (v <= known) return known;
     this.sql().exec(
       "INSERT OR REPLACE INTO log_meta (key, value) VALUES ('maxVersion', ?)", v,
     );
+    return v;
   }
 
   /**
@@ -173,27 +203,38 @@ export class LibraryLog extends DurableObject<Env> {
    * (F43, F107), so nothing in the specified flow deletes a blob an in-flight op names.
    */
   async append(owner: string, ops: OpEnvelope[]): Promise<AppendOutcome> {
-    const missing = new Map<string, string>();
+    // One round trip's latency rather than one per reference: the checks are independent, a
+    // batch carries up to 100 ops, and several ops naming one blob (ordinary after a fork)
+    // would otherwise head the same key repeatedly.
+    const wanted = new Map<string, { opID: string; label: string }[]>();
     for (const op of ops) {
       for (const ref of op.requires ?? []) {
         // `capture` defaults to this op's own, and differs for a fork inheriting bytes it
         // already uploaded under the capture it forked from (F128).
-        const capture = ref.capture ?? op.blindedID;
-        const key = `lib/${owner}/${ref.purpose}/${capture}/${ref.revision}/${ref.writer}`;
-        if (!(await this.env.BUCKET.head(key))) {
-          missing.set(op.opID, `missing blob ${ref.purpose}/${ref.revision}`);
-          break;
-        }
+        const key = blobKey(owner, ref.purpose, ref.capture ?? op.blindedID,
+                            ref.revision, ref.writer);
+        const label = `missing blob ${ref.purpose}/${ref.revision}`;
+        wanted.set(key, [...(wanted.get(key) ?? []), { opID: op.opID, label }]);
       }
     }
+    const keys = [...wanted.keys()];
+    const present = await Promise.all(keys.map((key) => this.env.BUCKET.head(key)));
+    const missing = new Map<string, string>();
+    keys.forEach((key, index) => {
+      if (present[index]) return;
+      for (const { opID, label } of wanted.get(key)!) {
+        if (!missing.has(opID)) missing.set(opID, label);
+      }
+    });
 
     const assigned: { opID: string; seq: number }[] = [];
-    const rejected: { opID: string; reason: string }[] = [];
+    const rejected: { opID: string; code: RejectionCode; reason: string }[] = [];
     const now = Date.now();
 
     this.ctx.storage.transactionSync(() => {
       this.sql().exec("DELETE FROM seen_ops WHERE expires < ?", now);
       this.sql().exec("DELETE FROM tombstones WHERE expires < ?", now);
+      let highestVersion = this.maxVersion();
 
       for (const op of ops) {
         // An opID we have already admitted is a retry whose response was lost (F31). Answer with
@@ -213,13 +254,14 @@ export class LibraryLog extends DurableObject<Env> {
           .exec<{ seq: number }>("SELECT seq FROM tombstones WHERE blindedID = ?", op.blindedID)
           .toArray();
         if (tombstoned.length > 0) {
-          rejected.push({ opID: op.opID, reason: `capture deleted at ${tombstoned[0].seq}` });
+          rejected.push({ opID: op.opID, code: "tombstoned",
+                          reason: `capture deleted at ${tombstoned[0].seq}` });
           continue;
         }
 
         const reason = missing.get(op.opID);
         if (reason) {
-          rejected.push({ opID: op.opID, reason });
+          rejected.push({ opID: op.opID, code: "missing-blob", reason });
           continue;
         }
 
@@ -232,14 +274,13 @@ export class LibraryLog extends DurableObject<Env> {
               "SELECT MAX(seq) AS seq FROM ops WHERE blindedID = ?", op.blindedID,
             ).one().seq ?? 0;
           if (latest > op.observed) {
-            rejected.push({ opID: op.opID, reason: `stale delete: capture changed at ${latest}` });
+            rejected.push({ opID: op.opID, code: "stale-delete",
+                            reason: `stale delete: capture changed at ${latest}` });
             continue;
           }
         }
 
-        const bytes = op.ciphertext instanceof Uint8Array
-          ? op.ciphertext.byteLength
-          : op.ciphertext.byteLength;
+        const bytes = op.ciphertext.byteLength;
         this.sql().exec(
           `INSERT INTO ops (opID, deviceID, blindedID, v, kind, observed, ciphertext, bytes, at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -252,7 +293,7 @@ export class LibraryLog extends DurableObject<Env> {
           "INSERT INTO seen_ops (opID, seq, expires) VALUES (?, ?, ?)",
           op.opID, seq, now + OPID_RETENTION_MS,
         );
-        this.raiseMaxVersion(op.v);
+        highestVersion = this.raiseMaxVersion(op.v, highestVersion);
 
         // F134: the trash time the sweep will date eligibility from, kept where compaction
         // cannot reach it. A restore or a delete settles the question and clears the mark.
@@ -293,7 +334,7 @@ export class LibraryLog extends DurableObject<Env> {
    * it could not parse cannot make that assertion, and if it did, F34's compaction would delete
    * the only copy of the capture it omitted. Version is the part the server can check.
    */
-  async claimSnapshot(deviceID: string, supportsV: number, seq: number) {
+  async claimSnapshot(supportsV: number, seq: number) {
     const required = this.maxVersion();
     if (supportsV < required) {
       return { granted: false as const, reason: `log contains v${required} ops`, required };
@@ -305,12 +346,10 @@ export class LibraryLog extends DurableObject<Env> {
   }
 
   async recordSnapshot(seq: number, key: string, bytes: number) {
-    this.ctx.storage.transactionSync(() => {
-      this.sql().exec(
-        "INSERT OR REPLACE INTO snapshots (seq, key, bytes, at) VALUES (?, ?, ?, ?)",
-        seq, key, bytes, new Date().toISOString(),
-      );
-    });
+    this.sql().exec(
+      "INSERT OR REPLACE INTO snapshots (seq, key, bytes, at) VALUES (?, ?, ?, ?)",
+      seq, key, bytes, new Date().toISOString(),
+    );
   }
 
   /** F43: one sweeper at a time, for a bounded window, not renewable within a pass. */
@@ -362,9 +401,7 @@ export class LibraryLog extends DurableObject<Env> {
    * state that must outlive compaction actually does; the real compaction path is M6c.
    */
   async forgetOpsForTest(through: number) {
-    this.ctx.storage.transactionSync(() => {
-      this.sql().exec("DELETE FROM ops WHERE seq <= ?", through);
-    });
+    this.sql().exec("DELETE FROM ops WHERE seq <= ?", through);
   }
 
   /** Test/diagnostic view. Never routed. */

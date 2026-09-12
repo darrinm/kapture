@@ -8,11 +8,24 @@ import {
   Device, Env, SECURITY_HEADERS, authorize, authorizeDevice, bearerToken, json, loadOwners,
   newToken, saveOwners, sha256Hex,
 } from "./common";
-import { libraryEnabled, libraryLogFor, type OpEnvelope } from "./library";
+import {
+  blobKey, libraryEnabled, libraryLogFor, ownerPrefix, snapshotKey, type OpEnvelope,
+} from "./library";
 import { quotaFor } from "./quota";
 
 const DEVICE_ID = "[0-9A-HJKMNP-TV-Z]{26}";
 const BLINDED_ID = "[0-9A-Z]{1,64}";
+
+// Built once. These were compiled from the two strings above on every request, and two of them
+// per `requires` entry — two hundred regex compilations for a full push.
+const DEVICE_ID_RE = new RegExp(`^${DEVICE_ID}$`);
+const BLINDED_ID_RE = new RegExp(`^${BLINDED_ID}$`);
+const APPROVE_RE = new RegExp(`^/api/library/devices/(${DEVICE_ID})/approve$`);
+const REVOKE_RE = new RegExp(`^/api/library/devices/(${DEVICE_ID})$`);
+const BLOB_RE = new RegExp(
+  `^/api/library/blob/(blob|thumb|orig)/(${BLINDED_ID})/(\\d+)/(${DEVICE_ID})$`);
+const SNAPSHOT_PUT_RE = /^\/api\/library\/snapshot\/(\d+)$/;
+const SNAPSHOT_GET_RE = new RegExp(`^/api/library/snapshot/(\\d+)/(${DEVICE_ID})$`);
 
 /** The shortest trash window the server will sweep against, whatever a client asks for (F45). */
 const MIN_TRASH_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
@@ -43,7 +56,7 @@ export async function handleLibrary(
       deviceID?: string; name?: string; platform?: string; keyID?: string;
     } | null;
     const deviceID = (body?.deviceID ?? "").trim();
-    if (!new RegExp(`^${DEVICE_ID}$`).test(deviceID)) {
+    if (!DEVICE_ID_RE.test(deviceID)) {
       return json({ error: "deviceID must be a ULID" }, 400);
     }
 
@@ -107,7 +120,7 @@ export async function handleLibrary(
     });
   }
 
-  const approveMatch = path.match(new RegExp(`^/api/library/devices/(${DEVICE_ID})/approve$`));
+  const approveMatch = path.match(APPROVE_RE);
   if (approveMatch && request.method === "POST") {
     // F125: an enrolled Mac may approve, as a convenience. F124's dashboard is the mechanism.
     const owners = await loadOwners(env);
@@ -119,7 +132,7 @@ export async function handleLibrary(
     return noContent();
   }
 
-  const revokeMatch = path.match(new RegExp(`^/api/library/devices/(${DEVICE_ID})$`));
+  const revokeMatch = path.match(REVOKE_RE);
   if (revokeMatch && request.method === "DELETE") {
     const owners = await loadOwners(env);
     const record = owners[owner];
@@ -168,17 +181,16 @@ export async function handleLibrary(
   if (path === "/api/library/snapshot" && request.method === "POST") {
     const body = await request.json().catch(() => null) as
       { supportsV?: number; seq?: number } | null;
-    const claim = await log.claimSnapshot(
-      deviceID, Number(body?.supportsV ?? 0), Number(body?.seq ?? 0));
+    const claim = await log.claimSnapshot(Number(body?.supportsV ?? 0), Number(body?.seq ?? 0));
     if (!claim.granted) return json(claim, 409);
     return json(claim);
   }
 
-  const snapshotPut = path.match(/^\/api\/library\/snapshot\/(\d+)$/);
+  const snapshotPut = path.match(SNAPSHOT_PUT_RE);
   if (snapshotPut && request.method === "PUT") {
     const seq = Number(snapshotPut[1]);
     const bytes = await request.arrayBuffer();
-    const key = `lib/${owner}/snap/${seq}/${deviceID}`;
+    const key = snapshotKey(owner, seq, deviceID);
     // A snapshot is bytes under `lib/`, so it is charged like any other (F56, F57). Left
     // unmetered, repeated snapshots are the one write that can grow the bucket without limit.
     const quotaError = await quotaFor(env, owner).chargeLibrary(bytes.byteLength);
@@ -188,9 +200,10 @@ export async function handleLibrary(
     return json({ key, seq, bytes: bytes.byteLength });
   }
 
-  const snapshotGet = path.match(/^\/api\/library\/snapshot\/(\d+)\/([0-9A-HJKMNP-TV-Z]{26})$/);
+  const snapshotGet = path.match(SNAPSHOT_GET_RE);
   if (snapshotGet && request.method === "GET") {
-    const object = await env.BUCKET.get(`lib/${owner}/snap/${snapshotGet[1]}/${snapshotGet[2]}`);
+    const object = await env.BUCKET.get(
+      snapshotKey(owner, Number(snapshotGet[1]), snapshotGet[2]));
     if (!object) return json({ error: "not found" }, 404);
     return new Response(object.body, { headers: SECURITY_HEADERS });
   }
@@ -209,11 +222,10 @@ export async function handleLibrary(
   }
 
   // ---- blobs (F19, F22, F99, F100) ---------------------------------------
-  const blobMatch = path.match(
-    new RegExp(`^/api/library/blob/(blob|thumb|orig)/(${BLINDED_ID})/(\\d+)/(${DEVICE_ID})$`));
+  const blobMatch = path.match(BLOB_RE);
   if (blobMatch) {
     const [, purpose, blinded, revision, writer] = blobMatch;
-    const key = `lib/${owner}/${purpose}/${blinded}/${revision}/${writer}`;
+    const key = blobKey(owner, purpose, blinded, Number(revision), writer);
 
     if (request.method === "GET") {
       const object = await env.BUCKET.get(key);
@@ -223,8 +235,11 @@ export async function handleLibrary(
       });
     }
 
+    if (request.method !== "GET" && writer !== deviceID) {
+      return json({ error: "a device writes only its own blobs" }, 403);
+    }
+
     if (request.method === "PUT") {
-      if (writer !== deviceID) return json({ error: "a device writes only its own blobs" }, 403);
       const body = await request.arrayBuffer();
 
       // F54, F87: a part of a multipart upload, staged under its own key and joined on
@@ -249,7 +264,7 @@ export async function handleLibrary(
         // F99: a PUT whose response was lost looks like a collision to the retrying client, and
         // F81 would read that as a fork against itself. Identical bytes are a retry, not a
         // conflict, so answer 200 rather than 409.
-        const digest = await sha256Hex(toBase64(body));
+        const digest = await digestOf(body);
         const stored = existing.customMetadata?.digest;
         if (stored && stored === digest) return json({ key, bytes: body.byteLength, retry: true });
         return json({ error: "blob already exists" }, 409);
@@ -259,13 +274,12 @@ export async function handleLibrary(
       if (quotaError) return json({ error: quotaError }, 429);
 
       await env.BUCKET.put(key, body, {
-        customMetadata: { digest: await sha256Hex(toBase64(body)) },
+        customMetadata: { digest: await digestOf(body) },
       });
       return json({ key, bytes: body.byteLength });
     }
 
     if (request.method === "POST" && url.searchParams.has("complete")) {
-      if (writer !== deviceID) return json({ error: "a device writes only its own blobs" }, 403);
       const parts = Number(url.searchParams.get("complete"));
       if (!Number.isInteger(parts) || parts < 1) return json({ error: "bad part count" }, 400);
 
@@ -285,7 +299,7 @@ export async function handleLibrary(
       let offset = 0;
       for (const chunk of chunks) { joined.set(chunk, offset); offset += chunk.byteLength; }
       await env.BUCKET.put(key, joined, {
-        customMetadata: { digest: await sha256Hex(toBase64(joined)) },
+        customMetadata: { digest: await digestOf(joined) },
       });
       for (let index = 1; index <= parts; index++) {
         await env.BUCKET.delete(`${key}.part${index}`);
@@ -345,14 +359,26 @@ function parseEnvelope(entry: unknown, deviceID: string): OpEnvelope | null {
       const revision = Number(entry.revision);
       if (!Number.isSafeInteger(revision) || revision < 0) return [];
       const writer = String(entry.writer ?? deviceID);
-      if (!new RegExp(`^${DEVICE_ID}$`).test(writer)) return [];
+      if (!DEVICE_ID_RE.test(writer)) return [];
       const capture = entry.capture === undefined ? undefined : String(entry.capture);
-      if (capture !== undefined && !new RegExp(`^${BLINDED_ID}$`).test(capture)) return [];
+      if (capture !== undefined && !BLINDED_ID_RE.test(capture)) return [];
       return [{ purpose, revision, writer, capture }];
     }),
     observed: Number.isFinite(Number(op.observed)) ? Number(op.observed) : 0,
     ciphertext: fromBase64(op.ciphertext),
   };
+}
+
+/**
+ * SHA-256 of the bytes themselves.
+ *
+ * This used to hash `toBase64(body)`, which built a string a third larger than the blob and then
+ * re-encoded it to bytes — roughly 240 MB of transient allocation for a 90 MB upload, inside a
+ * 128 MB limit. The digest is only ever compared against another digest from this same function.
+ */
+export async function digestOf(body: ArrayBuffer | Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", body);
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 export function toBase64(buffer: ArrayBuffer | Uint8Array): string {
