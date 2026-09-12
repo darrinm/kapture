@@ -2,11 +2,19 @@
 // import the other, and so there is exactly one definition of how a token is checked.
 
 import type { QuotaCounter } from "./quota";
+import type { LibraryLog } from "./library";
 
 export interface Env {
   QUOTA_COUNTERS: DurableObjectNamespace<QuotaCounter>;
+  LIBRARY_LOGS: DurableObjectNamespace<LibraryLog>;
   BUCKET: R2Bucket;
   QUOTAS: KVNamespace;
+  /**
+   * Comma-separated owners allowed to use the shared-library routes, empty by default
+   * (shared-library §2 D2 F118). The author pays for the bytes, so the hosted deployment serves
+   * exactly one owner; anyone else runs their own Worker.
+   */
+  LIBRARY_OWNERS?: string;
   /**
    * Seed only: JSON of `{ "<owner>": "<sha256 hex of token>" }`.
    *

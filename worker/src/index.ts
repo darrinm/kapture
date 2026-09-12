@@ -16,6 +16,7 @@ import { handleAdmin } from "./admin";
 
 export type { Env };
 export { QuotaCounter } from "./quota";
+export { LibraryLog } from "./library";
 import { quotaFor } from "./quota";
 
 const MAX_SINGLE_UPLOAD = 95 * 1024 * 1024; // Workers' request body ceiling is 100MB

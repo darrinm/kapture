@@ -13,9 +13,15 @@
   "r2_buckets": [{ "binding": "BUCKET", "bucket_name": "kapture-shares" }],
   "kv_namespaces": [{ "binding": "QUOTAS", "id": "7b8c352113924566884294c22a72a659" }],
   "durable_objects": {
-    "bindings": [{ "name": "QUOTA_COUNTERS", "class_name": "QuotaCounter" }]
+    "bindings": [
+      { "name": "QUOTA_COUNTERS", "class_name": "QuotaCounter" },
+      { "name": "LIBRARY_LOGS", "class_name": "LibraryLog" }
+    ]
   },
-  "migrations": [{ "tag": "v1-quota-counter", "new_sqlite_classes": ["QuotaCounter"] }],
+  "migrations": [
+    { "tag": "v1-quota-counter", "new_sqlite_classes": ["QuotaCounter"] },
+    { "tag": "v2-library-log", "new_sqlite_classes": ["LibraryLog"] }
+  ],
   "vars": {
     // the owner allowed to delete anyone's share
     "ADMIN_OWNER": "darrin",
