@@ -66,6 +66,21 @@ public struct PushOutcome: Codable, Sendable {
     public var head: Int64
 }
 
+/// One device as the server lists it (§5.3).
+public struct DeviceInfo: Codable, Sendable, Identifiable, Equatable {
+    public var deviceID: String
+    public var name: String
+    public var platform: String
+    public var createdAt: String
+    public var lastSeenAt: String?
+    public var approved: Bool
+    /// Shown on both screens so the person approving sees which Mac they are approving (F124).
+    public var fingerprint: String
+    public var current: Bool
+
+    public var id: String { deviceID }
+}
+
 public struct EnrolmentResult: Sendable {
     public var deviceID: String
     public var token: String
@@ -85,6 +100,16 @@ public protocol LibraryTransport: Sendable {
     func getSnapshot(seq: Int64, writer: String) async throws -> Data
     /// Take the sweep lease and learn which captures are eligible (F43, F45, F108).
     func acquireSweepLease(windowMs: Int64) async throws -> SweepLease
+    func devices() async throws -> [DeviceInfo]
+    func approve(deviceID: String) async throws
+    func revoke(deviceID: String) async throws
+}
+
+public extension LibraryTransport {
+    // Most transports in tests care about ops or bytes, not device administration.
+    func devices() async throws -> [DeviceInfo] { [] }
+    func approve(deviceID: String) async throws {}
+    func revoke(deviceID: String) async throws {}
 }
 
 public struct SweepLease: Codable, Sendable {
@@ -260,6 +285,27 @@ public struct HTTPTransport: LibraryTransport {
             for: request("api/library/snapshot/\(seq)/\(writer)"))
         try Self.check(response, data)
         return data
+    }
+
+    // MARK: - Devices (§3.1, §3.3)
+
+    public func devices() async throws -> [DeviceInfo] {
+        let (data, response) = try await session.data(for: request("api/library/devices"))
+        try Self.check(response, data)
+        struct Listing: Decodable { var items: [DeviceInfo] }
+        return try JSONDecoder().decode(Listing.self, from: data).items
+    }
+
+    public func approve(deviceID: String) async throws {
+        let (data, response) = try await session.data(
+            for: request("api/library/devices/\(deviceID)/approve", method: "POST"))
+        try Self.check(response, data)
+    }
+
+    public func revoke(deviceID: String) async throws {
+        let (data, response) = try await session.data(
+            for: request("api/library/devices/\(deviceID)", method: "DELETE"))
+        try Self.check(response, data)
     }
 
     // MARK: - Sweep (§7.4)

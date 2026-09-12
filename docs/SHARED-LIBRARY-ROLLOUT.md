@@ -23,16 +23,17 @@ library is ever enabled.
 
 ---
 
-## Stage 0 — Fix what is known broken
+## Stage 0 — Fix what is known broken ✅
 
 - `LibraryService.sweepNow` passes the cursor as `opsSinceSnapshot`. They are different
   quantities, so once the cursor passes 10,000 every sweep attempts a snapshot. Track ops since
   the last snapshot, or drop the count and trigger on the log's own `oldestRetained`.
 
 *Exit:* the sweep runs twice against a log with a cursor above 10,000 and claims one snapshot,
-not two.
+not two. **Met** — `sync_state` gained `lastSnapshotSeq` (migration v8), `SyncIdentity` derives
+`opsSinceSnapshot` from it, and a test drives exactly that sequence.
 
-## Stage 1 — Make it switchable on
+## Stage 1 — Make it switchable on ⚠️ built, not yet exercised
 
 The blocker. Nothing outside `KaptureSync` calls `enrol`, `createKey` or `adoptKey`, so the
 Settings toggle currently moves the library into `.locked` and stops.
@@ -50,6 +51,13 @@ Settings › Shared Library needs:
 
 *Exit:* on one Mac, from a clean install, the toggle goes from off to `.ready` and the recovery
 code is written on paper.
+
+**Where this actually stands.** `SharedLibraryPane` exists and renders all four states; the
+recovery code round-trips in tests, including that a mistyped code is refused rather than
+silently adopted, and that a Mac keeps the key it had when one is. What has *not* happened is the
+exit criterion: reaching `.ready` needs a server to enrol against, so the last step of this stage
+is blocked on stage 3 and the two must be finished together. Counting this stage done on the
+strength of a rendered screenshot would repeat the mistake this whole document exists to avoid.
 
 ## Stage 2 — Make it sync a library rather than a trickle
 

@@ -169,8 +169,9 @@ final class SweepTests: XCTestCase {
     func testASnapshotIsRefusedWhileAnythingIsSkipped() async throws {
         try store.noteSkipped(seq: 7, v: 99, kind: "upsert")
 
+        try store.advanceCursor(to: 20_000)
         let written = try await sweeper.snapshotIfNeeded(
-            using: LeaseTransport(server: LeaseServer(granted: false)), opsSinceSnapshot: 20_000)
+            using: LeaseTransport(server: LeaseServer(granted: false)))
 
         XCTAssertFalse(written, "an incomplete snapshot plus compaction is unrecoverable loss")
     }
@@ -181,8 +182,9 @@ final class SweepTests: XCTestCase {
         try insert("LOCAL", status: .kept, acknowledged: false)
         try queueAnOp(for: "LOCAL")
 
+        try store.advanceCursor(to: 20_000)
         let written = try await sweeper.snapshotIfNeeded(
-            using: LeaseTransport(server: LeaseServer(granted: false)), opsSinceSnapshot: 20_000)
+            using: LeaseTransport(server: LeaseServer(granted: false)))
 
         XCTAssertFalse(written)
     }
@@ -192,20 +194,38 @@ final class SweepTests: XCTestCase {
         let transport = LeaseTransport(server: server)
         try insert("ONE", status: .kept)
         try insert("TWO", status: .kept)
-        try store.advanceCursor(to: 42)
+        try store.advanceCursor(to: 20_042)
 
-        let written = try await sweeper.snapshotIfNeeded(using: transport,
-                                                         opsSinceSnapshot: 20_000)
+        let written = try await sweeper.snapshotIfNeeded(using: transport)
         XCTAssertTrue(written)
 
-        let saved = await server.snapshot(42)
+        let saved = await server.snapshot(20_042)
         let data = try XCTUnwrap(saved)
         XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("ONE"),
                        "a snapshot is ciphertext like everything else")
 
         let rows = try crypto.open([SyncedRow].self, from: data,
-                                   scope: .snapshot(seq: 42), writer: deviceID)
+                                   scope: .snapshot(seq: 20_042), writer: deviceID)
         XCTAssertEqual(Set(rows.map(\.captureID)), ["ONE", "TWO"])
+    }
+
+    func testASecondSnapshotIsNotClaimedUntilAnotherTenThousandOps() async throws {
+        // The count the threshold gates on is ops *since the last snapshot*. Passing the cursor
+        // instead meant every sweep past seq 10,000 claimed another snapshot, forever.
+        let server = LeaseServer(granted: false)
+        let transport = LeaseTransport(server: server)
+        try insert("ONE", status: .kept)
+        try store.advanceCursor(to: 20_000)
+
+        let first = try await sweeper.snapshotIfNeeded(using: transport)
+        XCTAssertTrue(first)
+
+        let second = try await sweeper.snapshotIfNeeded(using: transport)
+        XCTAssertFalse(second, "nothing has happened since, so there is nothing to snapshot")
+
+        try store.advanceCursor(to: 20_000 + SweepCoordinator.opsPerSnapshot + 1)
+        let third = try await sweeper.snapshotIfNeeded(using: transport)
+        XCTAssertTrue(third, "another full threshold of ops earns another snapshot")
     }
 
     func testApplyingASnapshotRemovesARowDeletedWhileOffline() throws {

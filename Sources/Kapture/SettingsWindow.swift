@@ -175,8 +175,6 @@ struct SettingsView: View {
     @AppStorage("recordMicrophone") private var recordMicrophone = false
     @AppStorage("showClicksWhileRecording") private var showClicks = true
     @AppStorage("showKeysWhileRecording") private var showKeys = false
-    @AppStorage("libraryEnabled") private var librarySync = false
-    @AppStorage("libraryCacheGB") private var libraryCacheGB = 20
     @AppStorage("filenameTemplate") private var filenameTemplate = "%n %Y-%m-%d at %H.%M.%S"
     // Sparkle reads this key itself, preferring the user default over the Info.plist value, so
     // a plain toggle is the whole control
@@ -346,70 +344,9 @@ struct SettingsView: View {
         .padding(.top, 4)
     }
 
-    private var libraryDeviceName: String {
-        Host.current().localizedName ?? "This Mac"
-    }
-
-    /// F86: "locked" and "empty" must never look the same. Someone who fears they have lost a
-    /// year of captures needs to be told which one this is.
-    private var libraryStatus: String {
-        if !Keychain.hasLibraryKey { return "Locked — enter your recovery code" }
-        if Keychain.libraryDeviceToken == nil { return "Waiting for approval" }
-        return "Syncing"
-    }
-
-    /// Settings › Shared Library (docs/SHARED-LIBRARY.md §10.4, F121).
-    ///
-    /// The copy here carries two things the feature cannot ship without: the endpoint it will
-    /// upload to, stated before anything is enabled, and the fact that losing the key loses the
-    /// library for everyone including whoever runs the server (F16).
-    var sharedLibrary: some View {
-        Form {
-            // @AppStorage writes the same UserDefaults key `Settings.libraryEnabled` reads, so
-            // an onChange mirroring it would write the value twice.
-            Toggle("Sync this library across my Macs", isOn: $librarySync)
-
-            LabeledContent("Endpoint") {
-                Text(Settings.shared.libraryEndpoint.host ?? "—")
-                    .foregroundStyle(.secondary)
-            }
-
-            if librarySync {
-                LabeledContent("This Mac") {
-                    Text(libraryDeviceName).foregroundStyle(.secondary)
-                }
-                LabeledContent("Status") {
-                    Text(libraryStatus).foregroundStyle(.secondary)
-                }
-                Picker("Keep on this Mac", selection: $libraryCacheGB) {
-                    Text("5 GB").tag(5)
-                    Text("20 GB").tag(20)
-                    Text("100 GB").tag(100)
-                    Text("Everything").tag(0)
-                }
-            }
-
-            Text(librarySync
-                 ? "Captures, their names and their recognized text are encrypted on this Mac "
-                   + "before they are uploaded. The server stores only ciphertext and cannot read "
-                   + "any of it."
-                 : "Off. Nothing is uploaded, and the library behaves exactly as it does now.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            Text("You must run the server yourself — kapture.sh does not store anyone else's "
-                 + "library. See worker/README.md for deploying one.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            Text("Keep your recovery code. The key never leaves your Macs, so losing it makes "
-                 + "the library unreadable to everyone, including whoever runs the server.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-        .formStyle(.grouped)
-        .padding(.top, 4)
-    }
+    /// Settings › Shared Library. The pane itself lives in `SharedLibraryPane.swift`: it owns
+    /// enrolment, the recovery code and the device list, which need state of their own.
+    var sharedLibrary: some View { SharedLibraryPane() }
 
     var shortcuts: some View {
         Form {

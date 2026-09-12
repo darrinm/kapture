@@ -171,6 +171,14 @@ public final class Database: Sendable {
                 t.primaryKey(["captureId", "purpose"])
             }
         }
+        // The seq of the newest snapshot this device wrote, so "ops since the last snapshot"
+        // (F33) can be computed rather than guessed. Its own migration because v7 has already
+        // been applied to databases on this branch.
+        migrator.registerMigration("v8-snapshot-cursor") { db in
+            try db.alter(table: "sync_state") {
+                $0.add(column: "lastSnapshotSeq", .integer).notNull().defaults(to: 0)
+            }
+        }
         try migrator.migrate(queue)
     }
 }

@@ -13,12 +13,22 @@ public struct SyncIdentity: Sendable, Equatable {
     public var cursor: Int64
     public var keyID: String?
     public var capabilities: String
+    /// Where this device last wrote a snapshot (F33).
+    public var lastSnapshotSeq: Int64
 
     public init(deviceID: String, cursor: Int64 = 0, keyID: String? = nil,
-                capabilities: String = SyncStore.capabilityGeneration) {
+                capabilities: String = SyncStore.capabilityGeneration,
+                lastSnapshotSeq: Int64 = 0) {
         self.deviceID = deviceID; self.cursor = cursor
         self.keyID = keyID; self.capabilities = capabilities
+        self.lastSnapshotSeq = lastSnapshotSeq
     }
+
+    /// How many ops have landed since the last snapshot — the quantity F33 actually gates on.
+    ///
+    /// The cursor is a log position, not a count, so passing it here made every sweep past
+    /// seq 10,000 try to snapshot again.
+    public var opsSinceSnapshot: Int64 { max(0, cursor - lastSnapshotSeq) }
 }
 
 public struct OutboxEntry: Sendable, Equatable {
@@ -82,7 +92,8 @@ public struct SyncStore: Sendable {
             guard let row = try Row.fetchOne(d, sql: "SELECT * FROM sync_state WHERE id = 1")
             else { return nil }
             return SyncIdentity(deviceID: row["deviceID"], cursor: row["cursor"],
-                                keyID: row["keyID"], capabilities: row["capabilities"])
+                                keyID: row["keyID"], capabilities: row["capabilities"],
+                                lastSnapshotSeq: row["lastSnapshotSeq"] ?? 0)
         }
     }
 
@@ -100,6 +111,13 @@ public struct SyncStore: Sendable {
     public func advanceCursor(to seq: Int64) throws {
         try db.queue.write { d in
             try d.execute(sql: "UPDATE sync_state SET cursor = ? WHERE id = 1", arguments: [seq])
+        }
+    }
+
+    public func recordSnapshot(at seq: Int64) throws {
+        try db.queue.write { d in
+            try d.execute(sql: "UPDATE sync_state SET lastSnapshotSeq = ? WHERE id = 1",
+                          arguments: [seq])
         }
     }
 

@@ -21,6 +21,8 @@ public struct SweepCoordinator: Sendable {
     }
 
     public static let trashWindow: TimeInterval = 7 * 24 * 60 * 60
+    /// F33's threshold.
+    public static let opsPerSnapshot: Int64 = 10_000
 
     public struct SweepOutcome: Sendable, Equatable {
         public var heldLease = false
@@ -81,12 +83,11 @@ public struct SweepCoordinator: Sendable {
     /// F33, F102, F111: only a complete client may snapshot, so this refuses when anything is
     /// skipped or queued. An incomplete snapshot followed by compaction is silent, permanent
     /// data loss — the one failure mode in this design with no recovery at all.
-    public func snapshotIfNeeded(using transport: any LibraryTransport,
-                                 opsSinceSnapshot: Int) async throws -> Bool {
-        guard opsSinceSnapshot > 10_000 else { return false }
+    public func snapshotIfNeeded(using transport: any LibraryTransport) async throws -> Bool {
+        guard let identity = try store.identity() else { return false }
+        guard identity.opsSinceSnapshot > Self.opsPerSnapshot else { return false }
         guard try store.skippedSeqs().isEmpty else { return false }
         guard try !store.hasPending() else { return false }
-        guard let identity = try store.identity() else { return false }
 
         guard try await transport.snapshotClaim(supportsV: SyncStore.payloadVersion,
                                                 seq: identity.cursor) else { return false }
@@ -95,6 +96,7 @@ public struct SweepCoordinator: Sendable {
         let sealed = try store.crypto.seal(rows, scope: .snapshot(seq: identity.cursor),
                                            writer: deviceID)
         try await transport.putSnapshot(sealed, seq: identity.cursor)
+        try store.recordSnapshot(at: identity.cursor)
         return true
     }
 

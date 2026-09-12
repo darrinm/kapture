@@ -71,6 +71,20 @@ public actor LibraryService {
         Keychain.libraryKey = key.withUnsafeBytes { Data($0) }.base64EncodedString()
     }
 
+    /// The recovery code for the key this Mac holds (F85).
+    ///
+    /// Re-displayable rather than shown once and lost: the code is derived from the key, so a
+    /// Mac that can still read the library can always print it again. What cannot be recovered
+    /// is the key itself once every Mac has lost it (F16).
+    public static func recoveryCode() -> String? {
+        existingKey().map { LibraryCrypto(key: $0).recoveryCode() }
+    }
+
+    public static var hasKey: Bool { Keychain.hasLibraryKey }
+    public static var isEnrolled: Bool {
+        !(Keychain.libraryDeviceToken ?? "").isEmpty
+    }
+
     // MARK: - Enrolment (§3.2)
 
     /// Enrol this Mac and remember its credential. The owner token is used here and nowhere
@@ -92,6 +106,36 @@ public actor LibraryService {
             keyID: LibraryCrypto(key: key).keyID)
         Keychain.libraryDeviceToken = result.token
         return result
+    }
+
+    /// Create the library on this Mac and enrol it as the first device (F5).
+    ///
+    /// Returns the recovery code, which the caller must show before anything is uploaded: after
+    /// this point the key is the only thing standing between the owner and a library nobody can
+    /// read, the operator included (F16).
+    public static func createLibrary(ownerToken: String,
+                                     deviceName: String) async throws -> (EnrolmentResult, String) {
+        if existingKey() == nil { _ = createKey() }
+        let result = try await enrol(ownerToken: ownerToken, deviceName: deviceName)
+        guard let code = recoveryCode() else { throw SyncFailure("the key could not be read back") }
+        return (result, code)
+    }
+
+    // MARK: - Device administration (§3.3)
+
+    public func devices() async throws -> [DeviceInfo] {
+        guard let transport else { throw SyncFailure("sync is not running") }
+        return try await transport.devices()
+    }
+
+    public func approve(deviceID: String) async throws {
+        guard let transport else { throw SyncFailure("sync is not running") }
+        try await transport.approve(deviceID: deviceID)
+    }
+
+    public func revoke(deviceID: String) async throws {
+        guard let transport else { throw SyncFailure("sync is not running") }
+        try await transport.revoke(deviceID: deviceID)
     }
 
     // MARK: - Lifecycle
@@ -231,10 +275,7 @@ public actor LibraryService {
         do {
             let outcome = try await sweeper.sweep(using: transport,
                                                   cacheCeiling: Settings.shared.libraryCacheBytes)
-            if let cursor = try? store?.identity()?.cursor {
-                _ = try? await sweeper.snapshotIfNeeded(using: transport,
-                                                        opsSinceSnapshot: Int(cursor))
-            }
+            _ = try? await sweeper.snapshotIfNeeded(using: transport)
             return outcome
         } catch {
             lastError = String(describing: error)
