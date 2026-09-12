@@ -60,9 +60,17 @@ public actor SyncEngine {
                     continue
                 }
                 // The key derives from the envelope alone (F12, F95): opID and the writing
-                // device, both in front of us before anything is decrypted.
-                let row = try crypto.open(SyncedRow.self, from: ciphertext,
-                                          scope: .row(opID: wire.opID), writer: wire.deviceID)
+                // device, both in front of us before anything is decrypted. An op that will not
+                // open — a corrupt payload, or one written under a key this Mac does not hold —
+                // is skipped like any other unreadable op. Throwing here would leave the cursor
+                // where it is and every later sync would stop at the same op, forever.
+                guard let row = try? crypto.open(SyncedRow.self, from: ciphertext,
+                                                 scope: .row(opID: wire.opID),
+                                                 writer: wire.deviceID) else {
+                    try store.noteSkipped(seq: wire.seq, v: wire.v, kind: wire.kind)
+                    summary.skipped += 1
+                    continue
+                }
                 ops.append(SyncOp(seq: wire.seq, kind: kind, row: row, observed: wire.observed))
             }
 
@@ -82,14 +90,17 @@ public actor SyncEngine {
     // MARK: - Push (F30, F31, F32)
 
     func push() async throws -> Int {
-        guard let identity = try store.identity() else { throw SyncFailure("sync is not enabled") }
+        guard try store.identity() != nil else { throw SyncFailure("sync is not enabled") }
         let pending = try store.pending(limit: 100)
         guard !pending.isEmpty else { return 0 }
 
         let outgoing = pending.map { entry in
+            // `observed` is the seq the op was decided against and nothing else (F106). Raising
+            // it to the current cursor would tell the log this device had seen work it decided
+            // before — a delete queued at seq N would then be admitted over a restore at N+5.
             OutgoingOp(opID: entry.opID, blindedID: crypto.blind(entry.captureID),
                        v: entry.v, kind: entry.kind.rawValue, requires: entry.requires,
-                       observed: max(entry.observed, identity.cursor),
+                       observed: entry.observed,
                        ciphertext: entry.payload.base64EncodedString())
         }
 

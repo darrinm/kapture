@@ -186,6 +186,11 @@ export interface DeviceIdentity {
 /**
  * The device named by an Authorization header (F2). The owner credential is deliberately not
  * accepted here: it authorizes enrolment and the M5 share routes, and nothing else.
+ *
+ * A credential belonging to a device awaiting approval (F113) is recognized and returned with
+ * `device.approved` false. The caller must check it before doing anything; recognizing it is
+ * what lets the routes answer "waiting for approval" rather than "unauthorized", which is the
+ * difference between a Mac the person has to approve and one whose token is wrong.
  */
 export async function authorizeDevice(
   request: Request, env: Env,
@@ -196,7 +201,7 @@ export async function authorizeDevice(
   const owners = await loadOwners(env);
   for (const [owner, record] of Object.entries(owners)) {
     for (const [deviceID, device] of Object.entries(record.devices ?? {})) {
-      if (device.approved && timingSafeEqual(presented, device.hash)) {
+      if (timingSafeEqual(presented, device.hash)) {
         return { owner, deviceID, device };
       }
     }

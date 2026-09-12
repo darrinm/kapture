@@ -76,11 +76,13 @@ describe("§3.2 — enrolment", () => {
     const body = await response.json() as { approved: boolean; token: string };
     expect(body.approved).toBe(false);
 
-    // The unapproved credential opens nothing.
+    // The unapproved credential opens nothing — and says so, rather than reading as a bad
+    // token: the client shows "waiting for approval" only for this answer.
     const denied = await call("/api/library/changes?since=0", {
       headers: { authorization: `Bearer ${body.token}` },
     }, enabled());
-    expect(denied.status).toBe(401);
+    expect(denied.status).toBe(403);
+    expect(await denied.json()).toEqual({ error: "awaiting approval" });
   });
 
   it("keeps the gate closed after the last device is revoked (F114)", async () => {
@@ -240,7 +242,7 @@ describe("§8 — blobs", () => {
 });
 
 describe("§7.4 — the sweep lease over HTTP", () => {
-  it("grants once and reports eligible captures", async () => {
+  it("grants the lease, and will not shorten the trash window for a client (F45)", async () => {
     const device = await enrolFirstDevice();
     const auth = { authorization: `Bearer ${device.token}`, "content-type": "application/json" };
     await call("/api/library/ops", {
@@ -251,12 +253,15 @@ describe("§7.4 — the sweep lease over HTTP", () => {
       }] }),
     }, enabled());
 
+    // windowMs=0 asks for "everything in the trash is eligible now". Honouring it would date
+    // eligibility from the caller rather than the server, which is what F45 refuses; the
+    // capture was trashed a moment ago, so the clamped window leaves it alone.
     const lease = await call("/api/library/lease/sweep?windowMs=0", {
       method: "POST", headers: auth,
     }, enabled());
     expect(lease.status).toBe(200);
     const body = await lease.json() as { granted: boolean; eligible: string[] };
     expect(body.granted).toBe(true);
-    expect(body.eligible).toContain("OLDONE");
+    expect(body.eligible).toHaveLength(0);
   });
 });

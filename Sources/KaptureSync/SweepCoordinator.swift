@@ -83,7 +83,7 @@ public struct SweepCoordinator: Sendable {
                                  opsSinceSnapshot: Int) async throws -> Bool {
         guard opsSinceSnapshot > 10_000 else { return false }
         guard try store.skippedSeqs().isEmpty else { return false }
-        guard try store.pending().isEmpty else { return false }
+        guard try !store.hasPending() else { return false }
         guard let identity = try store.identity() else { return false }
 
         guard try await transport.snapshotClaim(supportsV: SyncStore.payloadVersion,

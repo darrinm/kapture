@@ -40,6 +40,7 @@ public actor LibraryService {
 
     private var engine: SyncEngine?
     private var store: SyncStore?
+    private var blobs: BlobStore?
     private var timer: Task<Void, Never>?
     private(set) public var state: LibraryState = .disabled
     private(set) public var lastSync: Date?
@@ -76,7 +77,11 @@ public actor LibraryService {
         guard let key = existingKey() else {
             throw SyncFailure("this Mac has no library key — enter the recovery code first")
         }
-        let deviceID = ULID.generate()
+        // The id this Mac signs its ops with (F3). Minting a fresh one here would register a
+        // device the log never hears from: the server stamps each op with the *authenticated*
+        // device's id, and a reader derives the row key from it (F12), so an enrolment id that
+        // differs from `LibraryDeviceID.current()` makes every op this Mac writes undecryptable.
+        let deviceID = LibraryDeviceID.current()
         let result = try await HTTPTransport.enrol(
             endpoint: Settings.shared.libraryEndpoint,
             ownerToken: ownerToken,
@@ -109,15 +114,22 @@ public actor LibraryService {
 
         let crypto = LibraryCrypto(key: key)
         let store = SyncStore(db: db, crypto: crypto)
-        if (try? store.identity()) == nil || (try? store.identity()) == .some(nil) {
+        if ((try? store.identity()) ?? nil) == nil {
             _ = try? store.enable(deviceID: deviceID)
         }
-        // F135: a build whose capabilities widened goes back for what it skipped.
+        // F135: a build whose capabilities widened goes back for what it skipped. Clearing the
+        // table alone forgets them — the cursor has already passed those seqs — so the cursor is
+        // rewound to just before the oldest skipped op first, and the page is pulled again.
         if (try? store.capabilitiesWidened()) == true {
+            if let oldest = (try? store.skippedSeqs())?.first {
+                try? store.advanceCursor(to: max(0, oldest - 1))
+            }
             try? store.clearSkipped()
             try? store.recordCapabilities()
         }
         self.store = store
+        self.blobs = BlobStore(db: db, root: Settings.shared.libraryRoot, crypto: crypto,
+                               thumbnailDirectory: Self.thumbnailDirectory())
         self.engine = SyncEngine(
             store: store,
             transport: HTTPTransport(endpoint: Settings.shared.libraryEndpoint,
@@ -133,6 +145,7 @@ public actor LibraryService {
         timer = nil
         engine = nil
         store = nil
+        blobs = nil
         state = .disabled
     }
 
@@ -147,6 +160,69 @@ public actor LibraryService {
                 await self?.syncNow()
             }
         }
+    }
+
+    /// Derived data lives beside the index, not in the user's folder of real files.
+    static func thumbnailDirectory() -> URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory,
+                                            in: .userDomainMask)[0]
+        return base.appendingPathComponent("Kapture/Thumbnails")
+    }
+
+    // MARK: - Publishing a capture (§6.3, §8)
+
+    /// Upload a capture's bytes and queue its row.
+    ///
+    /// This is the caller the byte half of sync was missing: without it no op ever names a blob,
+    /// the server's F32 dependency check has nothing to check, and a second Mac receives a row
+    /// whose pixels it can never fetch. Bytes go first, because F32 refuses an op naming a
+    /// revision the server does not yet hold.
+    public func publish(captureID: String, file: URL, revision: Int64) async {
+        guard state == .ready, let store, let blobs else { return }
+        let identity = try? store.identity()
+        guard let deviceID = identity?.deviceID else { return }
+
+        do {
+            if FileManager.default.fileExists(atPath: file.path) {
+                _ = try await blobs.upload(captureID, from: file, revision: revision,
+                                           writer: deviceID, using: transportForUploads())
+            }
+            // The row is read *after* the upload so it carries the locator the upload recorded
+            // (F23, F129), and `enqueue` derives `requires` from it (F98).
+            try store.enqueueCurrentRow(captureID, kind: .upsert,
+                                        observed: identity?.cursor ?? 0, deviceID: deviceID)
+            lastError = nil
+        } catch let failure as SyncFailure {
+            lastError = failure.description
+            Log.store.error("library publish failed: \(failure.description)")
+        } catch {
+            lastError = error.localizedDescription
+            Log.store.error("library publish failed: \(error)")
+        }
+    }
+
+    /// Queue a status change — a discard or a restore — with no bytes to move.
+    public func publishStatus(captureID: String, kind: OpKind) async {
+        guard state == .ready, let store else { return }
+        guard let identity = try? store.identity() else { return }
+        do {
+            try store.enqueueCurrentRow(captureID, kind: kind, observed: identity.cursor,
+                                        deviceID: identity.deviceID)
+        } catch {
+            Log.store.error("library status publish failed: \(error)")
+        }
+    }
+
+    private func transportForUploads() -> any LibraryTransport {
+        HTTPTransport(endpoint: Settings.shared.libraryEndpoint,
+                      deviceToken: Keychain.libraryDeviceToken ?? "")
+    }
+
+    /// Bring a capture's bytes down on demand (F48).
+    @discardableResult
+    public func materialize(captureID: String) async throws -> URL? {
+        guard state == .ready, let blobs else { return nil }
+        return try await blobs.fetch(captureID, using: transportForUploads())
     }
 
     @discardableResult

@@ -112,8 +112,18 @@ public struct HTTPTransport: LibraryTransport {
         self.session = session
     }
 
-    private func request(_ path: String, method: String = "GET") -> URLRequest {
-        var request = URLRequest(url: endpoint.appendingPathComponent(path))
+    /// `query` goes through `URLComponents`, never into `path`: `appendingPathComponent`
+    /// percent-encodes `?`, which would bury the query string inside the path and miss the route.
+    private func request(_ path: String, method: String = "GET",
+                         query: [String: String] = [:]) -> URLRequest {
+        var url = endpoint.appendingPathComponent(path)
+        if !query.isEmpty,
+           var components = URLComponents(url: url, resolvingAgainstBaseURL: false) {
+            components.queryItems = query.sorted { $0.key < $1.key }
+                .map { URLQueryItem(name: $0.key, value: $0.value) }
+            url = components.url ?? url
+        }
+        var request = URLRequest(url: url)
         request.httpMethod = method
         request.timeoutInterval = 60
         request.setValue("Bearer \(deviceToken)", forHTTPHeaderField: "authorization")
@@ -221,14 +231,16 @@ public struct HTTPTransport: LibraryTransport {
         var part = 1
         while offset < data.count {
             let end = min(offset + Self.partSize, data.count)
-            var request = self.request("\(blobPath(locator))?part=\(part)", method: "PUT")
+            var request = self.request(blobPath(locator), method: "PUT",
+                                       query: ["part": String(part)])
             request.httpBody = data.subdata(in: offset..<end)
             let (body, response) = try await session.data(for: request)
             try Self.check(response, body)
             offset = end
             part += 1
         }
-        var complete = self.request("\(blobPath(locator))?complete=\(part - 1)", method: "POST")
+        var complete = self.request(blobPath(locator), method: "POST",
+                                    query: ["complete": String(part - 1)])
         complete.setValue("application/json", forHTTPHeaderField: "content-type")
         let (body, response) = try await session.data(for: complete)
         try Self.check(response, body)
@@ -253,7 +265,8 @@ public struct HTTPTransport: LibraryTransport {
     // MARK: - Sweep (§7.4)
 
     public func acquireSweepLease(windowMs: Int64) async throws -> SweepLease {
-        let request = self.request("api/library/lease/sweep?windowMs=\(windowMs)", method: "POST")
+        let request = self.request("api/library/lease/sweep", method: "POST",
+                                   query: ["windowMs": String(windowMs)])
         let (data, response) = try await session.data(for: request)
         if let http = response as? HTTPURLResponse, http.statusCode == 409 {
             return SweepLease(granted: false)
@@ -266,9 +279,14 @@ public struct HTTPTransport: LibraryTransport {
         guard let http = response as? HTTPURLResponse else { throw SyncFailure("no response") }
         guard (200..<300).contains(http.statusCode) else {
             let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-            throw SyncFailure(json?["error"] as? String ?? "http \(http.statusCode)",
+            let message = json?["error"] as? String
+            // The status alone is not enough: the blob routes answer 403 for a device writing
+            // someone else's bytes, and flipping the whole service to "waiting for approval"
+            // over that would tell the user to approve a Mac that is already approved.
+            throw SyncFailure(message ?? "http \(http.statusCode)",
                               isAuthFailure: http.statusCode == 401,
-                              awaitingApproval: http.statusCode == 403)
+                              awaitingApproval: http.statusCode == 403
+                                  && message == "awaiting approval")
         }
     }
 }

@@ -14,6 +14,9 @@ import { quotaFor } from "./quota";
 const DEVICE_ID = "[0-9A-HJKMNP-TV-Z]{26}";
 const BLINDED_ID = "[0-9A-Z]{1,64}";
 
+/** The shortest trash window the server will sweep against, whatever a client asks for (F45). */
+const MIN_TRASH_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
 function noContent(): Response {
   return new Response(null, { status: 204, headers: SECURITY_HEADERS });
 }
@@ -84,6 +87,9 @@ export async function handleLibrary(
   const identity = await authorizeDevice(request, env);
   if (!identity) return json({ error: "unauthorized" }, 401);
   if (!libraryEnabled(env, identity.owner)) return json({ error: "not found" }, 404);
+  // F113: the credential is real, the Mac is not approved yet. 403 is what the client reads as
+  // "waiting for approval", so no other route may answer 403 for anything else.
+  if (!identity.device.approved) return json({ error: "awaiting approval" }, 403);
   const { owner, deviceID } = identity;
   const log = libraryLogFor(env, owner);
 
@@ -173,6 +179,10 @@ export async function handleLibrary(
     const seq = Number(snapshotPut[1]);
     const bytes = await request.arrayBuffer();
     const key = `lib/${owner}/snap/${seq}/${deviceID}`;
+    // A snapshot is bytes under `lib/`, so it is charged like any other (F56, F57). Left
+    // unmetered, repeated snapshots are the one write that can grow the bucket without limit.
+    const quotaError = await quotaFor(env, owner).chargeLibrary(bytes.byteLength);
+    if (quotaError) return json({ error: quotaError }, 429);
     await env.BUCKET.put(key, bytes);
     await log.recordSnapshot(seq, key, bytes.byteLength);
     return json({ key, seq, bytes: bytes.byteLength });
@@ -189,7 +199,12 @@ export async function handleLibrary(
   if (path === "/api/library/lease/sweep" && request.method === "POST") {
     const lease = await log.acquireSweepLease(deviceID);
     if (!lease.granted) return json(lease, 409);
-    const window = Number(url.searchParams.get("windowMs") ?? 7 * 24 * 60 * 60 * 1000);
+    // F45/F108: both ends of the comparison are the server's, and so is the window. A client
+    // asking for a shorter one would make a capture trashed a minute ago immediately eligible,
+    // which is exactly the client-dated eligibility those rules exist to refuse. A longer
+    // window only delays a delete, so it is allowed.
+    const asked = Number(url.searchParams.get("windowMs"));
+    const window = Number.isFinite(asked) ? Math.max(asked, MIN_TRASH_WINDOW_MS) : MIN_TRASH_WINDOW_MS;
     return json({ ...lease, eligible: await log.sweepEligible(window) });
   }
 
@@ -220,6 +235,11 @@ export async function handleLibrary(
         if (!Number.isInteger(index) || index < 1 || index > 10_000) {
           return json({ error: "bad part number" }, 400);
         }
+        // A staged part is bytes in the bucket like any other. Charging only on completion
+        // leaves an upload that is never completed entirely unmetered, which is the cheapest
+        // way to fill the bucket. The completion credits these back when it joins them.
+        const partQuotaError = await quotaFor(env, owner).chargeLibrary(body.byteLength);
+        if (partQuotaError) return json({ error: partQuotaError }, 429);
         await env.BUCKET.put(`${key}.part${index}`, body);
         return json({ key, part: index, bytes: body.byteLength });
       }
@@ -270,6 +290,9 @@ export async function handleLibrary(
       for (let index = 1; index <= parts; index++) {
         await env.BUCKET.delete(`${key}.part${index}`);
       }
+      // The parts were charged as they were staged and are gone now; the joined object has
+      // taken their place and its own charge above. Give the staging charge back.
+      await quotaFor(env, owner).creditLibrary(total, parts);
       return json({ key, bytes: total });
     }
 
@@ -312,14 +335,20 @@ function parseEnvelope(entry: unknown, deviceID: string): OpEnvelope | null {
     blindedID,
     v: Number.isFinite(Number(op.v)) ? Number(op.v) : 1,
     kind,
-    requires: requires.map((ref) => {
+    // Every field here is interpolated into an R2 key, so each is validated against the same
+    // shapes the routes use rather than cast and trusted. An op is attacker-controlled if a
+    // device credential leaks (§13), and "read-only today" is not a reason to skip it.
+    requires: requires.flatMap((ref) => {
       const entry = ref as Record<string, unknown>;
-      return {
-        purpose: entry.purpose as "blob" | "thumb" | "orig",
-        revision: Number(entry.revision),
-        writer: String(entry.writer ?? deviceID),
-        capture: typeof entry.capture === "string" ? entry.capture : undefined,
-      };
+      const purpose = entry.purpose;
+      if (purpose !== "blob" && purpose !== "thumb" && purpose !== "orig") return [];
+      const revision = Number(entry.revision);
+      if (!Number.isSafeInteger(revision) || revision < 0) return [];
+      const writer = String(entry.writer ?? deviceID);
+      if (!new RegExp(`^${DEVICE_ID}$`).test(writer)) return [];
+      const capture = entry.capture === undefined ? undefined : String(entry.capture);
+      if (capture !== undefined && !new RegExp(`^${BLINDED_ID}$`).test(capture)) return [];
+      return [{ purpose, revision, writer, capture }];
     }),
     observed: Number.isFinite(Number(op.observed)) ? Number(op.observed) : 0,
     ciphertext: fromBase64(op.ciphertext),

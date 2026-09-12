@@ -98,6 +98,16 @@ public struct SyncStore: Sendable {
             """, arguments: [record.id])
         let ocr = try String.fetchOne(d, sql: "SELECT ocr FROM fts_source WHERE captureId = ?",
                                       arguments: [record.id])
+        // F23, F129: the row must be enough on its own to reach its own bytes, because a
+        // snapshot carries the row and not the envelopes that once named them.
+        var blobs: [BlobPurpose: BlobLocator] = [:]
+        for entry in try Row.fetchAll(d, sql: """
+            SELECT purpose, revision, writer, owningCapture FROM blob_cache WHERE captureId = ?
+            """, arguments: [record.id]) {
+            guard let purpose = BlobPurpose(rawValue: entry["purpose"]) else { continue }
+            blobs[purpose] = BlobLocator(revision: entry["revision"], writer: entry["writer"],
+                                         capture: entry["owningCapture"])
+        }
         return SyncedRow(
             captureID: record.id,
             lamport: extra?["lamport"] ?? 0,
@@ -119,7 +129,18 @@ public struct SyncStore: Sendable {
             summary: record.summary,
             ocr: ocr,
             shareURL: record.shareURL,
-            durationS: record.durationS)
+            durationS: record.durationS,
+            blobs: blobs)
+    }
+
+    /// The `requires` an op must carry for a row (F32, F98). Derived from the row rather than
+    /// passed in, so a caller cannot forget it and leave the server's dependency check with
+    /// nothing to check.
+    public static func requires(for row: SyncedRow) -> [BlobLocatorRef] {
+        row.blobs.map { purpose, locator in
+            BlobLocatorRef(purpose: purpose, revision: locator.revision,
+                           writer: locator.writer, capture: locator.capture)
+        }
     }
 
     public func localRows() throws -> [String: LocalRow] {
@@ -147,17 +168,34 @@ public struct SyncStore: Sendable {
     ///
     /// The payload is sealed here rather than at send time so the outbox holds ciphertext at
     /// rest: a queued op is no more readable on disk than it is on the server.
-    public func enqueue(_ row: SyncedRow, kind: OpKind, requires: [BlobLocatorRef] = [],
+    public func enqueue(_ row: SyncedRow, kind: OpKind, requires: [BlobLocatorRef]? = nil,
                         observed: Int64, deviceID: String, in d: GRDB.Database) throws {
         let opID = ULID.generate()
         let payload = try crypto.seal(row, scope: .row(opID: opID), writer: deviceID)
-        let encoded = try JSONEncoder().encode(requires)
+        let encoded = try JSONEncoder().encode(requires ?? Self.requires(for: row))
         try d.execute(sql: """
             INSERT INTO sync_outbox (opID, captureId, kind, payload, requires, observed, v, queuedAt)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, arguments: [opID, row.captureID, kind.rawValue, payload,
                              String(data: encoded, encoding: .utf8) ?? "[]",
                              observed, Self.payloadVersion, Date()])
+    }
+
+    /// Read a capture's current row and queue it, stamping the next `lamport` (§7).
+    ///
+    /// One transaction, because F29 requires the op and the row it describes to be written
+    /// together — a queued op that does not match the row it claims to carry is worse than no op.
+    public func enqueueCurrentRow(_ captureID: String, kind: OpKind, observed: Int64,
+                                  deviceID: String) throws {
+        try db.queue.write { d in
+            guard let record = try CaptureRecord.fetchOne(d, key: captureID) else { return }
+            var row = try self.row(for: record, in: d)
+            row.lamport = try self.nextLamport(in: d)
+            row.deviceID = deviceID
+            try d.execute(sql: "UPDATE captures SET lamport = ?, syncDeviceID = ? WHERE id = ?",
+                          arguments: [row.lamport, deviceID, captureID])
+            try self.enqueue(row, kind: kind, observed: observed, deviceID: deviceID, in: d)
+        }
     }
 
     public func pending(limit: Int = 100) throws -> [OutboxEntry] {
@@ -178,6 +216,14 @@ public struct SyncStore: Sendable {
                     payload: row["payload"], requires: refs,
                     observed: row["observed"], v: row["v"])
             }
+        }
+    }
+
+    /// Whether anything at all is queued, including entries backing off after a rejection.
+    /// `pending()` hides those, and F111's "nothing queued" has to mean all of them.
+    public func hasPending() throws -> Bool {
+        try db.queue.read { d in
+            try Bool.fetchOne(d, sql: "SELECT EXISTS(SELECT 1 FROM sync_outbox)") ?? false
         }
     }
 
@@ -258,8 +304,12 @@ public struct SyncStore: Sendable {
     /// the page is simply replayed (F26).
     public func apply(_ result: MergeResult, cursor: Int64?, deviceID: String) throws {
         try db.queue.write { d in
+            // A fork is minted here and has never been near the log. Marking it acknowledged
+            // would make F130 read its absence from the next snapshot as a delete and remove
+            // the edit this device just rescued.
+            let forks = Set(result.forks)
             for row in result.upserts {
-                try upsert(row, in: d, acknowledged: true)
+                try upsert(row, in: d, acknowledged: !forks.contains(row.captureID))
             }
             for captureID in result.deletions {
                 try d.execute(sql: "DELETE FROM captures WHERE id = ?", arguments: [captureID])
@@ -281,9 +331,15 @@ public struct SyncStore: Sendable {
     /// Write one synced row into `captures`, deriving the device-local fields rather than
     /// taking them from the log (F83): `relPath` is this Mac's, not the sender's.
     func upsert(_ row: SyncedRow, in d: GRDB.Database, acknowledged: Bool) throws {
-        let existing = try Row.fetchOne(d, sql: "SELECT relPath FROM captures WHERE id = ?",
+        let existing = try Row.fetchOne(d, sql: "SELECT relPath, blobState FROM captures WHERE id = ?",
                                         arguments: [row.captureID])
         let relPath: String = existing?["relPath"] ?? Self.derivedRelPath(for: row)
+        // A row this Mac already holds keeps the state it has: it made the capture, or it has
+        // already fetched it, and the log has no opinion about where the bytes are on this
+        // machine (F83, F84). Only a genuinely new row starts as `remote`, and only when the
+        // log says bytes exist for it.
+        let blobState: String = existing?["blobState"]
+            ?? (row.blobs.isEmpty ? BlobState.local.rawValue : BlobState.remote.rawValue)
 
         try d.execute(sql: """
             INSERT INTO captures
@@ -306,7 +362,7 @@ public struct SyncStore: Sendable {
                 row.trashedAt, row.width, row.height, row.bytes, relPath, row.sourceApp,
                 row.windowTitle, row.contentHash, row.aiState.rawValue, row.summary,
                 row.shareURL, row.durationS, row.contentRevision, row.lamport, row.deviceID,
-                row.forkedFrom, row.blobs.isEmpty ? "local" : "remote", row.parentHash,
+                row.forkedFrom, blobState, row.parentHash,
                 acknowledged,
             ])
 

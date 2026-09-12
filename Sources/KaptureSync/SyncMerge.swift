@@ -6,6 +6,7 @@
 // and assert on the conflict rules, which is the part of this design most likely to be wrong
 // and the part hardest to exercise on two real Macs.
 
+import CryptoKit
 import Foundation
 import KaptureCore
 
@@ -119,6 +120,22 @@ public struct MergeResult: Sendable, Equatable {
 }
 
 public enum SyncMerge {
+    /// A fork's id, derived rather than generated (F140).
+    ///
+    /// Both devices resolve the same conflict independently and must arrive at the same capture.
+    /// `ULID.generate()` gives each of them a different one, so the losing content ends up in the
+    /// library twice under two ids that will never reconcile. Every input here is visible to both
+    /// sides, so both compute the same answer.
+    ///
+    /// The shape is a ULID's: Crockford base32, 26 characters, so it sorts and stores like every
+    /// other capture id.
+    static func forkID(for loser: SyncedRow, parent: String) -> String {
+        let material = "kapture/fork/\(parent)/\(loser.contentRevision)/"
+            + "\(loser.contentHash ?? "")/\(loser.deviceID)/\(loser.lamport)"
+        let digest = SHA256.hash(data: Data(material.utf8))
+        return String(LibraryCrypto.base32(Data(digest)).prefix(26))
+    }
+
     // MARK: - Ordering (§7)
 
     /// `(lamport, deviceID)`, a total order without clock sync. It decides *which* row wins; it
@@ -220,15 +237,18 @@ public enum SyncMerge {
                     // F128 keeps its blob locators pointing at the bytes already uploaded under
                     // the original capture, so F82's "no re-upload" holds.
                     var fork = loser
-                    fork.captureID = ULID.generate()
+                    fork.captureID = Self.forkID(for: loser, parent: winner.captureID)
                     fork.forkedFrom = winner.captureID
                     fork.lamport = max(existing.lamport, incoming.lamport) + 1
                     fork.deviceID = deviceID
                     rows[fork.captureID] = LocalRow(row: fork, acknowledged: false)
                     result.upserts.append(fork)
                     result.forks.append(fork.captureID)
-                    // Only this device knows about the fork until it pushes it.
-                    if !localLoses { result.outbox.append(fork) }
+                    // Both devices resolve the same conflict and must arrive at the same fork,
+                    // so both push it. The id is derived rather than generated (F140), so the
+                    // second push is a redundant upsert of identical content rather than a
+                    // second capture.
+                    result.outbox.append(fork)
                     continue
                 }
 

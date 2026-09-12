@@ -535,6 +535,14 @@ It becomes the sync rule.
 - **F101** A 409 from `PUT /blob` therefore no longer means a fork. After F99 and F100 it means
   only that this device already wrote these exact bytes, which is a retry, not a conflict. A
   client must not infer anything about forks from a blob response.
+- **F140** A fork's id is derived, not generated. Both devices resolve the same conflict
+  independently, so a random ULID gives each of them a different fork and the losing content ends
+  up in the library twice under two ids that will never reconcile. It is
+  `base32(SHA-256(parent, contentRevision, contentHash, deviceID, lamport))` truncated to 26
+  characters — every input visible to both sides, and the same shape as any other capture id.
+- **F141** Both devices push the fork. With F140 the second push is a redundant upsert of
+  identical content under the same id, which last-writer-wins absorbs; leaving it to one side
+  means the fork reaches the log only if that particular Mac syncs again.
 - **F36** A fork is never silent. The library window shows both, badged, with the device name and
   time that produced each.
 - **F37** Pixels are never discarded to resolve a conflict. The editor already preserves pre-edit
