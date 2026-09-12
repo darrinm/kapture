@@ -66,15 +66,30 @@ history is the feature most able to make it false. The cost is real and is accep
 server-side thumbnailing, no server-side search, no web viewer for library items, no
 cross-user deduplication. §4 specifies the scheme and §13 states what the server still learns.
 
-### D2 — An owner, several devices; no signup
+D2 later narrowed the deployment to a single owner, which changes what this decision defends
+against — the operator and the only user became the same person. The threat it still answers is
+the infrastructure rather than the operator: Cloudflare, a compromised account, a misconfigured
+bucket, a subpoena served on the provider. That is a real threat and a weaker one than the
+decision was written against, so §14 Q9 reopens it rather than letting it stand unexamined.
+
+### D2 — One owner, several devices
 
 The unit of identity stays the owner name already in the owner table. It gains a set of
-per-device credentials (§3). There is no email, no password, and no self-serve signup: on
-`kapture.sh` the admin mints an owner as they do today, and a self-hosted deployment does the
-same.
+per-device credentials (§3). There is no email, no password, and no signup, self-serve or
+otherwise.
 
-This is not an account, but it is close enough that the README must stop saying "Everything
-lives on your Mac" without qualification. §12.4 lists the copy changes.
+On `kapture.sh` the library feature is enabled for exactly one owner: the author's. Nobody else
+gets cloud storage on that deployment, because the author pays for the bytes and is not running
+a storage business. The devices in §3 are that one person's several Macs, which is the entire
+scope of "shared by all same-user clients".
+
+- **F118** The Worker enables the library routes for owners on an explicit allowlist, empty by
+  default. An owner not on it keeps the M5 share routes and receives 404 from every route in
+  §5.3. A deployment that never sets the allowlist serves no libraries, which is the correct
+  behaviour for a fork someone deploys without reading this far.
+
+Anyone else who wants the feature runs their own Worker and pays their own R2 bill.
+`worker/README.md` already documents deploying one, and nothing in this spec changes that path.
 
 ### D3 — Metadata everywhere, thumbnails everywhere, originals on demand
 
@@ -86,16 +101,17 @@ laptop should not need all of it. Metadata-only was rejected as an end state, bu
 shipping stage (§12.1) because it forces identity and conflict resolution to be solved before
 any byte moves.
 
-### D4 — Stored bytes are quota'd, and someone pays for them
+### D4 — The author pays, so the author is the only tenant
 
 R2 storage is roughly $0.015/GB-month with no egress charge, so a 100 GB library is about
-$1.50/month. The daily transfer quotas that protect against a leaked share token
-(`worker/src/quota.ts:4`) do not describe a library, and a first sync at 2 GB/day would take
-weeks.
+$1.50/month. That is affordable for one person and is the reason D2 stops at one owner: the cost
+scales with use, and a feature whose marginal cost grows per user is a business, which this
+project is not.
 
-`kapture.sh` gets a default 100 GB stored-byte ceiling per owner, and the cost of running it is
-the author's. Self-hosting stays a first-class path — `worker/README.md` already documents it,
-and a shared library changes nothing about that.
+The daily transfer quotas that protect against a leaked share token (`worker/src/quota.ts:4`) do
+not describe a library, and a first sync at 2 GB/day would take weeks, so §9 replaces them for
+library traffic. With one tenant the stored ceiling stops being a product limit and becomes a
+personal guardrail: it exists to make a runaway sync fail loudly instead of arriving as a bill.
 
 ---
 
@@ -791,22 +807,38 @@ bootstraps from the snapshot.
 
 ### 12.4 Copy changes
 
-The README's "Free, no account, no subscription", "Everything lives on your Mac", and the Privacy
-section's "Two things can send your content off the Mac" all become false the moment this ships
-enabled. They are edited in the same release, not after it. The Privacy section gains the shared
-library as a third opt-in path and states D1 and §13 plainly.
+D2 keeps most of the README true. "Free, no account, no subscription" survives, because nobody
+is offered an account or charged anything. "Everything lives on your Mac" survives for every user
+of the public build, because F118 leaves the routes off for them.
+
+What still changes:
+
+- **F119** The Privacy section gains the shared library as a third opt-in path, alongside AI
+  naming and sharing, and says plainly that it is off, that it requires a server the person runs
+  themselves, and that enabling it uploads the library. "Two things can send your content off the
+  Mac" becomes three.
+- **F120** The feature is described as self-hosted, not as a service. No README text may imply
+  that `kapture.sh` will store anyone else's library, because F118 means it will not, and an
+  implied offer is worse than no feature.
+- **F121** Settings › Library states which endpoint it will upload to before it is enabled, the
+  way Settings › Sharing already does for the share endpoint.
 
 ---
 
 ## 13. Security review
 
-**What the server operator learns anyway.** Owner name. Device ids, names and platforms. How many
+Under D2 the operator and the only user are the same person, so this section is read against the
+infrastructure rather than against a host with users to spy on. "The operator" below means
+whoever ends up holding the storage: Cloudflare, anyone who compromises that account, and anyone
+who serves it with a subpoena.
+
+**What the operator learns anyway.** Owner name. Device ids, names and platforms. How many
 captures exist, when each op was pushed, which device pushed it, and how large each ciphertext
 is. Blob sizes leak capture sizes, which distinguishes a screenshot from a recording. Op timing
 leaks working hours. This is the residue of D1. It is not fixable in v1, and it is stated rather
 than hidden.
 
-**What the server operator does not learn.** Capture contents, names, recognized text, source
+**What the operator does not learn.** Capture contents, names, recognized text, source
 app, window titles, file paths, or creation times (F15 blinds the ULID).
 
 **A stolen unlocked Mac** holds the library key, the owner token and its cache: everything. That
@@ -856,11 +888,24 @@ anything escaping the root.
 - **Q7** Presigned upload straight to R2, rejected for v1 by F88. If 32 MB parts through a
   Worker prove too slow for a library of recordings, this is the way out, and the question
   becomes whether scoped temporary credentials on the client are acceptable under D1.
-- **Q8** F113 requires an existing device to approve a new one, which is right for a second Mac
-  and wrong for someone whose only Mac was stolen. The admin dashboard is the escape on
-  `kapture.sh`; a self-hosted deployment has the same dashboard, but a person locked out of both
-  has nothing. Whether the recovery code should also authorize enrolment — turning it into a
-  full credential rather than only a decryption key — is unresolved.
+- **Q8** *Resolved by D2.* F113 requires an existing device to approve a new one, which would
+  strand someone whose only Mac was stolen. With one owner who also runs the deployment, the
+  admin dashboard behind Cloudflare Access is always available as the escape, and it is reached
+  from any browser rather than from a Mac. The recovery code stays a decryption key and does not
+  become a credential.
+- **Q9** **Is D1 still worth its cost?** Its original justification was protecting users from the
+  operator. D2 removes the users: the only person with a library on `kapture.sh` is the person
+  running it. What client-side encryption still buys is protection from Cloudflare, from a
+  compromised Cloudflare account, from a misconfigured bucket, and from a subpoena served on the
+  provider rather than the person — all real, none of them the threat the decision was written
+  against.
+
+  What it costs is most of the machinery the first review found errors in: the derivation in F12
+  and F95, the envelope split in F97 and F98, key recovery in F85, the locked state in F86, the
+  `keyID` pinning in F117, and the permanent impossibility of a web library or a phone client.
+  Dropping D1 would remove roughly a third of this spec and make a browser-based library
+  straightforward. Keeping it is defensible; keeping it *by inertia*, now that its stated reason
+  no longer applies, is not. This should be settled before §12.1 starts.
 
 ---
 
