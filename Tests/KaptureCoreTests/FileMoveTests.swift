@@ -48,6 +48,19 @@ final class FileMoveTests: XCTestCase {
         XCTAssertEqual(heard.last?.to, live)
     }
 
+    /// A discard completes when the file is already gone, but its target never comes to exist:
+    /// nothing could follow that move, so none is posted.
+    func testADiscardOfAMissingFilePostsNothing() throws {
+        let (lib, dir) = try makeLibrary()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let capture = try shot(lib)
+        try FileManager.default.removeItem(at: lib.url(for: capture))
+
+        let heard = try moves(from: lib) { try lib.discard(capture) }
+        XCTAssertTrue(heard.isEmpty)
+        XCTAssertEqual(try record(lib, capture.id).status, .trashed)
+    }
+
     /// A write is a move too, from the staging file — but nothing outside the library ever
     /// held that path, and an unchanged name must not look like a move either.
     func testAStoreAndAnUnchangedNamePostNothing() throws {

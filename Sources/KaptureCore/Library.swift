@@ -22,21 +22,41 @@ public struct LibraryBusy: LocalizedError {
     }
 }
 
+/// A capture file's path before and after a library operation moved it: an AI rename, a
+/// discard into .trash, or a restore. Posted as `Library.fileDidMove` so that anything holding
+/// the old URL (the pasteboard, a pinned panel, a corner card) can switch to the new one.
+public struct FileMove: Sendable {
+    public let from: URL
+    public let to: URL
+
+    /// Whether `url` is the path this move left.
+    public func moved(_ url: URL) -> Bool {
+        from.standardizedFileURL == url.standardizedFileURL
+    }
+}
+
+/// Delivers every `Library.fileDidMove` to `body` on the main actor until it is deallocated.
+public final class FileMoveObserver {
+    private let token: NSObjectProtocol
+
+    public init(_ body: @escaping @MainActor (FileMove) -> Void) {
+        token = NotificationCenter.default.addObserver(forName: Library.fileDidMove, object: nil, queue: .main) { note in
+            guard let move = note.userInfo?[Library.fileMoveKey] as? FileMove else { return }
+            MainActor.assumeIsolated { body(move) }
+        }
+    }
+
+    deinit { NotificationCenter.default.removeObserver(token) }
+}
+
 /// The library: visible files under the root (truth), DB index in App Support (derived).
 /// @unchecked Sendable: all mutable state lives in the thread-safe DatabaseQueue; `db` and
 /// `root` are immutable; file operations are serialized by `db.operationLock` through
 /// `withOperation`, and made durable by the op journal.
-/// A capture's file left one path for another: an AI rename, a discard into .trash, a restore.
-/// Anything holding the old URL — the pasteboard, for one — hears about it through
-/// `Library.fileDidMove` and can follow.
-public struct FileMove: Sendable {
-    public let from: URL
-    public let to: URL
-}
-
 public final class Library: @unchecked Sendable {
-    /// Posted after a move commits, with a `FileMove` under `fileMoveKey`. Arrives on the thread
-    /// that ran the operation — hop to wherever you need to be.
+    /// Posted after a move commits and its target exists, with a `FileMove` under `fileMoveKey`.
+    /// Posted synchronously on the operation's thread while the operation lock is held. An
+    /// observer that needs another thread hops itself; `FileMoveObserver` hops to the main actor.
     public static let fileDidMove = Notification.Name("Library.fileDidMove")
     public static let fileMoveKey = "move"
 

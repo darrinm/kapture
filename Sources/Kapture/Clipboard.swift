@@ -14,9 +14,9 @@ enum Clipboard {
     /// second so a paste into Finder still lands the file. Both go in one `writeObjects` call —
     /// a second call would clear the first's item.
     ///
-    /// Slack reads the file URL and reports "File unsupported" when the path is gone — which it
-    /// was, about 30s after every capture, once the AI rename moved the file.
-    /// `followLibraryMoves` keeps the URL current.
+    /// Slack reads the file URL and reports "File unsupported" when the path no longer exists.
+    /// The AI rename moves the file about 30s after capture; `followLibraryMoves` rewrites the
+    /// pasteboard with the new path.
     static func write(url: URL, image: NSImage?) {
         var objects: [any NSPasteboardWriting] = []
         if let image { objects.append(image) }
@@ -39,19 +39,17 @@ enum Clipboard {
         NSPasteboard.general.setString(string, forType: .string)
     }
 
-    /// When the library moves the file the pasteboard points at — an AI rename, a discard, a
-    /// restore — and nothing else has written to the pasteboard since, rewrite it with the new
+    private static var moveObserver: FileMoveObserver?
+
+    /// When the library moves the file the pasteboard points at (an AI rename, a discard, a
+    /// restore) and nothing else has written to the pasteboard since, rewrite it with the new
     /// URL and the same pixels. Anything the user copied afterwards is left alone.
     static func followLibraryMoves() {
-        NotificationCenter.default.addObserver(forName: Library.fileDidMove, object: nil, queue: .main) { note in
-            guard let move = note.userInfo?[Library.fileMoveKey] as? FileMove else { return }
-            MainActor.assumeIsolated { follow(move) }
-        }
+        moveObserver = FileMoveObserver(follow)
     }
 
     private static func follow(_ move: FileMove) {
-        guard let last = lastFile,
-              last.url.standardizedFileURL == move.from.standardizedFileURL,
+        guard let last = lastFile, move.moved(last.url),
               NSPasteboard.general.changeCount == last.changeCount else { return }
         write(url: move.to)
     }
