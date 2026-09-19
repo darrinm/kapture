@@ -356,6 +356,10 @@ extension Library {
             Task.detached(priority: .utility) { await self.refreshMovieMetadata(recovered) }
         }
         Log.store.info("completed \(plan.op.rawValue, privacy: .public) for \(record.relPath, privacy: .public)")
+        if plan.op.movesSidecar, source != target {
+            NotificationCenter.default.post(name: Library.fileDidMove, object: self,
+                                            userInfo: [Library.fileMoveKey: FileMove(from: source, to: target)])
+        }
     }
 
     /// Old builds journaled only paths. Recover completed moves and reconstruct orphaned writes

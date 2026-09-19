@@ -26,7 +26,20 @@ public struct LibraryBusy: LocalizedError {
 /// @unchecked Sendable: all mutable state lives in the thread-safe DatabaseQueue; `db` and
 /// `root` are immutable; file operations are serialized by `db.operationLock` through
 /// `withOperation`, and made durable by the op journal.
+/// A capture's file left one path for another: an AI rename, a discard into .trash, a restore.
+/// Anything holding the old URL — the pasteboard, for one — hears about it through
+/// `Library.fileDidMove` and can follow.
+public struct FileMove: Sendable {
+    public let from: URL
+    public let to: URL
+}
+
 public final class Library: @unchecked Sendable {
+    /// Posted after a move commits, with a `FileMove` under `fileMoveKey`. Arrives on the thread
+    /// that ran the operation — hop to wherever you need to be.
+    public static let fileDidMove = Notification.Name("Library.fileDidMove")
+    public static let fileMoveKey = "move"
+
     public let db: Database
     public let root: URL
     /// Held for the life of the instance when opened `exclusive`; closing it releases the lock.
