@@ -70,6 +70,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         installStatusItem()
         Onboarding.shared.showIfNeeded()
         ShortcutConflictWatch.shared.start()
+        Clipboard.followLibraryMoves()
 
         // trash sweep at launch + every 6h (7-day retention)
         let library = CaptureCoordinator.shared.library
