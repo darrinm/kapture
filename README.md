@@ -30,7 +30,8 @@ ratios. Pinch or ⌘+/⌘− to zoom, ⌘0 to fit, ⌘1 for actual size.
 
 A redaction covers what is under it and takes it out of the search index too — blur a password
 and it stops being findable in your library, not just in the file.
-Every layer stays editable and every edit is undoable; the untouched original is always kept
+With the select tool, text in the capture can be selected and copied; text under a redaction
+cannot. Every layer stays editable and every edit is undoable; the untouched original is always kept
 aside, so a crop is never permanent.
 
 **Record** — an area, a window, or a whole display to MP4, with system audio and your
@@ -42,7 +43,8 @@ library for the error message you screenshotted in March. Filter by app, kind or
 your own Anthropic API key, captures also get named by what's actually in them instead of
 `Screenshot 2026-03-14 at 11.42.13`.
 
-**Pin** — float any capture on top of everything while you work from it.
+**Pin** — float any capture on top of everything while you work from it. Drag across text in
+a pin to select it, and ⌘C copies it.
 
 **Share** — ⌘U uploads a capture and copies a link. See [Sharing](#sharing) — it's optional,
 off until you configure it, and you can run the server yourself.

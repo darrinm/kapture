@@ -261,6 +261,25 @@ public enum AnnotationRenderer {
         }
         return out
     }
+
+    /// The image Live Text reads in the editor: the base with every redaction rect filled solid.
+    /// The canvas draws annotations over the pristine base, so analyzing the base would let a
+    /// drag select the words a blur covers. Solid rather than the blur itself, because Vision
+    /// can still read text under a light blur. Base-sized and never cropped, so the analysis
+    /// lines up with image space. `redactions` are image-space rects (top-left origin).
+    static func liveTextSource(base: CGImage, redactions: [CGRect]) -> CGImage? {
+        guard !redactions.isEmpty else { return base }
+        let w = base.width, h = base.height
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        ctx.draw(base, in: CGRect(x: 0, y: 0, width: w, height: h))
+        ctx.setFillColor(CGColor(gray: 0, alpha: 1))
+        for r in redactions {   // annotation geometry is top-left origin; the context is bottom-left
+            ctx.fill(CGRect(x: r.minX, y: CGFloat(h) - r.maxY, width: r.width, height: r.height))
+        }
+        return ctx.makeImage()
+    }
 }
 
 /// Blur and pixelate, rendered through Core Image and cached.

@@ -1,7 +1,10 @@
 // Pins (impl spec §6): float a capture always-on-top. Drag to move, scroll to adjust opacity,
 // double-click restores 100%, right-click: Lock (click-through), Copy, Close.
 // Locked pins are closed from the menu bar's Pins submenu.
+// Text in the pin is selectable (Live Text): a drag that starts on a word selects, anywhere
+// else it moves the pin. ⌘C copies the selection, or the image when nothing is selected.
 import AppKit
+import VisionKit
 import KaptureCore
 import KaptureCapture
 import KaptureDesign
@@ -96,6 +99,7 @@ final class PinPanel: NSPanel {
 final class PinView: NSImageView {
     unowned let panel: PinPanel
     private let closeButton: HoverButton
+    private let liveText = LiveText.makeOverlay()
 
     init(panel: PinPanel, image: NSImage) {
         self.panel = panel
@@ -123,6 +127,21 @@ final class PinView: NSImageView {
             closeButton.widthAnchor.constraint(equalToConstant: 20),
             closeButton.heightAnchor.constraint(equalToConstant: 20),
         ])
+
+        // below the close button, so the button stays clickable over a line of text
+        liveText.delegate = self
+        liveText.trackingImageView = self   // VisionKit follows the aspect-fit image rect
+        liveText.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(liveText, positioned: .below, relativeTo: closeButton)
+        NSLayoutConstraint.activate([
+            liveText.topAnchor.constraint(equalTo: topAnchor),
+            liveText.bottomAnchor.constraint(equalTo: bottomAnchor),
+            liveText.leadingAnchor.constraint(equalTo: leadingAnchor),
+            liveText.trailingAnchor.constraint(equalTo: trailingAnchor),
+        ])
+        if let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+            Task { [weak self] in self?.liveText.analysis = await LiveText.analyze(cg) }
+        }
         trackHover()
     }
     required init?(coder: NSCoder) { fatalError() }
@@ -132,6 +151,15 @@ final class PinView: NSImageView {
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
+    /// The overlay gets a press only on text. Left to itself it takes every press while a
+    /// selection is active, and the pin could then be neither dragged nor deselected.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        // VisionKit answers from private subviews of the overlay, never the overlay itself
+        guard let hit = super.hitTest(point) else { return nil }
+        guard hit.isDescendant(of: liveText) else { return hit }
+        return LiveText.hasText(in: liveText, at: liveText.convert(point, from: superview)) ? hit : self
+    }
+
     override func scrollWheel(with event: NSEvent) {
         let delta = event.scrollingDeltaY * 0.01
         panel.alphaValue = min(1.0, max(0.2, panel.alphaValue + delta))
@@ -140,6 +168,7 @@ final class PinView: NSImageView {
     private var dragOffset: NSPoint?
 
     override func mouseDown(with event: NSEvent) {
+        liveText.resetSelection()   // hitTest sends only presses away from the text here
         if event.clickCount == 2 { panel.alphaValue = 1.0; return }
         let mouseInScreen = NSEvent.mouseLocation
         dragOffset = NSPoint(x: mouseInScreen.x - panel.frame.origin.x,
@@ -157,6 +186,16 @@ final class PinView: NSImageView {
     override func mouseUp(with event: NSEvent) { dragOffset = nil }
 
     override func keyDown(with event: NSEvent) {
+        if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+           event.charactersIgnoringModifiers == "c" {
+            if !LiveText.copySelection(of: liveText) { copyTapped() }
+            return
+        }
+        // esc drops a text selection first; the next esc closes the pin
+        if event.keyCode == 53, liveText.hasActiveTextSelection {
+            liveText.resetSelection()
+            return
+        }
         let step: CGFloat = event.modifierFlags.contains(.shift) ? 10 : 1
         var origin = panel.frame.origin
         switch event.keyCode {
@@ -173,16 +212,35 @@ final class PinView: NSImageView {
 
     override func menu(for event: NSEvent) -> NSMenu? {
         let menu = NSMenu()
+        addPinItems(to: menu)
+        return menu
+    }
+
+    private func addPinItems(to menu: NSMenu) {
         menu.addItem(withTitle: panel.locked ? "Unlock" : "Lock (click-through)",
                      action: #selector(lockTapped), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Copy", action: #selector(copyTapped), keyEquivalent: "").target = self
         menu.addItem(.separator())
         menu.addItem(withTitle: "Close Pin", action: #selector(closeTapped), keyEquivalent: "").target = self
-        return menu
     }
     @objc func lockTapped() { panel.toggleLock() }
     @objc func copyTapped() {
         Clipboard.write(url: panel.fileURL, image: image)
     }
     @objc func closeTapped() { panel.closePin() }
+}
+
+extension PinView: ImageAnalysisOverlayViewDelegate {
+    /// A right-click on text gets VisionKit's menu (Copy, Look Up, Translate); hitTest sends a
+    /// right-click anywhere else to the pin's own menu. The pin's items stay reachable here too.
+    func overlayView(_ overlayView: ImageAnalysisOverlayView, updatedMenuFor menu: NSMenu,
+                     for event: NSEvent, at point: CGPoint) -> NSMenu {
+        menu.addItem(.separator())
+        addPinItems(to: menu)
+        return menu
+    }
+
+    /// Keys belong to the pin (arrows nudge, esc closes); ⌘C is handled there too.
+    func overlayView(_ overlayView: ImageAnalysisOverlayView,
+                     shouldHandleKeyDownEvent event: NSEvent) -> Bool { false }
 }
