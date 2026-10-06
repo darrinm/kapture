@@ -1,6 +1,7 @@
 // The annotation editor: tool rail · canvas · options bar. Non-destructive — layers render
 // over the pristine base; Done flattens at native resolution through Library.applyEdit.
 import AppKit
+import VisionKit
 import KaptureCore
 import KaptureDesign
 
@@ -442,8 +443,14 @@ final class EditorViewController: NSViewController {
 @MainActor
 final class CanvasView: NSView, NSTextFieldDelegate {
     let image: CGImage
-    var layers: [Annotation]
-    var tool: Tool = .arrow
+    var layers: [Annotation] { didSet { refreshLiveText() } }
+    var tool: Tool = .arrow {
+        didSet {
+            guard tool != oldValue else { return }
+            liveText.resetSelection()
+            needsDisplay = true   // the viewport and the Live Text overlay both depend on the tool
+        }
+    }
     var colorHex = "#C7423A"
     var highlightHex = "#FFE83D"   // highlighter keeps its own color; classic yellow default
     var strokeWidth: CGFloat = 6
@@ -472,6 +479,14 @@ final class CanvasView: NSView, NSTextFieldDelegate {
     private var pendingTextPos: CGPoint?
     private var chipApplyRect: CGRect?    // view-space crop chips, refreshed each draw
     private var chipRemoveRect: CGRect?
+    /// Live Text, select tool only. The clip view covers the visible image, so a word outside an
+    /// applied crop or scrolled out of a zoomed view cannot be selected; the overlay inside it
+    /// covers the whole image, so VisionKit's coordinates are the image's.
+    let liveTextClip = NSView()
+    let liveText = LiveText.makeOverlay()
+    private var liveTextTask: Task<Void, Never>?
+    /// The redaction rects the current analysis was made with.
+    private var liveTextRedactions: [CGRect]?
 
     init(image: CGImage, layers: [Annotation]) {
         self.image = image
@@ -479,6 +494,11 @@ final class CanvasView: NSView, NSTextFieldDelegate {
         super.init(frame: .zero)
         wantsLayer = true
         layer?.backgroundColor = NSColor.underPageBackgroundColor.cgColor
+        liveTextClip.clipsToBounds = true
+        liveText.delegate = self
+        liveTextClip.addSubview(liveText)
+        addSubview(liveTextClip)
+        refreshLiveText()
     }
     required init?(coder: NSCoder) { fatalError() }
     override var acceptsFirstResponder: Bool { true }
@@ -576,6 +596,7 @@ final class CanvasView: NSView, NSTextFieldDelegate {
             return super.performKeyEquivalent(with: event)
         }
         switch event.charactersIgnoringModifiers {
+        case "c" where LiveText.copySelection(of: liveText): return true
         case "+", "=": setZoom(zoom * 1.25); return true
         case "-": setZoom(zoom / 1.25); return true
         case "0": setZoom(1); return true
@@ -768,6 +789,7 @@ final class CanvasView: NSView, NSTextFieldDelegate {
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         commitPendingText()
+        liveText.resetSelection()   // hitTest sends only presses away from the text here
         let viewPoint = convert(event.locationInWindow, from: nil)
         if let a = chipApplyRect, a.contains(viewPoint) { applyCrop(); return }
         if let x = chipRemoveRect, x.contains(viewPoint) { removeCrop(); return }
@@ -1015,6 +1037,8 @@ final class CanvasView: NSView, NSTextFieldDelegate {
             applyCrop()
         } else if event.keyCode == 53, tool == .crop, cropLayerIndex != nil {   // esc removes it
             removeCrop()
+        } else if event.keyCode == 53, liveText.hasActiveTextSelection {         // esc deselects text
+            liveText.resetSelection()
         } else if event.keyCode == 51, tool == .select, let sel = selected {   // delete
             pushUndo()
             layers.removeAll { $0.id == sel }
@@ -1172,6 +1196,75 @@ final class CanvasView: NSView, NSTextFieldDelegate {
 
     func controlTextDidEndEditing(_ obj: Notification) { commitPendingText() }
 
+    // MARK: Live Text
+
+    /// The overlay gets a press only where `liveTextMayBegin` allows and VisionKit has text.
+    /// Left to itself it takes every press while a selection is active, which would block
+    /// selecting and moving annotations until the text was deselected.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        // VisionKit answers from private subviews of the overlay, never the overlay itself
+        guard let hit = super.hitTest(point) else { return nil }
+        guard hit.isDescendant(of: liveText) else { return hit }
+        let viewPoint = convert(point, from: superview)
+        return liveTextMayBegin(at: viewPoint)
+            && LiveText.hasText(in: liveText, at: convert(viewPoint, to: liveText)) ? hit : self
+    }
+
+    /// Text selection starts only where a select-tool press would do nothing else: not on an
+    /// annotation, a handle of the selected one, or a crop chip. `viewPoint` is in canvas space.
+    func liveTextMayBegin(at viewPoint: CGPoint) -> Bool {
+        guard tool == .select else { return false }
+        if chipApplyRect?.contains(viewPoint) == true || chipRemoveRect?.contains(viewPoint) == true {
+            return false
+        }
+        let p = toImage(viewPoint)
+        if let layer = selectedLayer, handleIndex(of: layer, at: p) != nil { return false }
+        return !layers.contains { $0.hitTest(p) && !($0.tool == .crop && $0.applied == true) }
+    }
+
+    /// Re-analyze when the redactions change. The old analysis goes at once: text under a new
+    /// or moved redaction must not stay selectable for the time the next pass takes.
+    private func refreshLiveText() {
+        let redactions = layers.filter(\.tool.isRedaction).map(\.rect)
+        guard redactions != liveTextRedactions else { return }
+        let first = liveTextRedactions == nil
+        liveTextRedactions = redactions
+        liveText.analysis = nil
+        liveTextTask?.cancel()
+        let base = image
+        liveTextTask = Task { [weak self] in
+            // dragging a redaction changes its rect on every mouse event; analyze where it lands
+            if !first { try? await Task.sleep(for: .milliseconds(300)) }
+            guard !Task.isCancelled else { return }
+            let source = await Task.detached(priority: .userInitiated) {
+                AnnotationRenderer.liveTextSource(base: base, redactions: redactions)
+            }.value
+            guard let source, !Task.isCancelled else { return }
+            let analysis = await LiveText.analyze(source)
+            guard !Task.isCancelled else { return }
+            self?.liveText.analysis = analysis
+        }
+    }
+
+    /// Fit the overlay to the image as drawn. Runs before every draw, which is when zoom, pan,
+    /// crop and tool changes take effect.
+    override func viewWillDraw() {
+        super.viewWillDraw()
+        let visible = imageRect.intersection(bounds)
+        let clipFrame = visible.isNull ? .zero : visible
+        if liveTextClip.frame != clipFrame { liveTextClip.frame = clipFrame }
+        let topLeft = toView(.zero)
+        let bottomRight = toView(CGPoint(x: imageBounds.width, y: imageBounds.height))
+        let full = CGRect(x: topLeft.x, y: bottomRight.y,
+                          width: bottomRight.x - topLeft.x, height: topLeft.y - bottomRight.y)
+        let overlayFrame = full.offsetBy(dx: -clipFrame.minX, dy: -clipFrame.minY)
+        if liveText.frame != overlayFrame {
+            liveText.frame = overlayFrame
+            liveText.setContentsRectNeedsUpdate()
+        }
+        liveTextClip.isHidden = tool != .select || textField != nil
+    }
+
     // MARK: drawing
     /// Base image + drop shadow, composited once and blitted per frame — rescaling and
     /// re-shadowing a 5K base on every annotation tweak is the expensive part of draw.
@@ -1318,4 +1411,10 @@ final class CanvasView: NSView, NSTextFieldDelegate {
         s.draw(at: CGPoint(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2),
                withAttributes: attrs)
     }
+}
+
+extension CanvasView: ImageAnalysisOverlayViewDelegate {
+    /// Keys belong to the canvas (delete, undo, crop's return and esc); ⌘C is handled there too.
+    func overlayView(_ overlayView: ImageAnalysisOverlayView,
+                     shouldHandleKeyDownEvent event: NSEvent) -> Bool { false }
 }

@@ -21,7 +21,7 @@ M0: complete (verify-by-fire ships as ShortcutConflictWatch — notices the apps
 Done: journaled trash (.trash/ + tombstones, 7-day sweep every 6h, sweep-safe restore) ·
 discard gestures (hover trash, ⌘⌫, swipe-toward-edge; swipe-down tucks the stack off the bottom edge behind a tab) · Restore Last
 Discarded · +n stack collapse past 5 · Quick Look (space) · right-click menu · pins (drag,
-opacity scroll, nudge, lock/click-through, hover ×, ⌘⇧1 from clipboard) · capture→corner
+opacity scroll, nudge, lock/click-through, hover ×, ⌘⇧1 from clipboard, Live Text selection) · capture→corner
 flight animation · Settings window (General/Overlay: clipboard, sounds, launch-at-login,
 export location, overlay position/size, auto-close w/ save-and-close) · hover-shortcut
 event-tap tier (Accessibility JIT, tap re-enable, click-to-key floor) · uninstall flow ·
@@ -36,7 +36,8 @@ Done: annotation editor (arrow, rectangle, ellipse, line, freehand, text, counte
 blur, pixelate) with canvas zoom (pinch / ⌘+ / ⌘− / ⌘0 fit / ⌘1 actual size), layer selection, control-point editing, per-layer recolor and width, undo
 per gesture · crop (draggable from inside, resizable from any edge or corner, clamped to the
 image, aspect-ratio presets, in-editor apply that stays undoable) · per-tool options bar ·
-originals preserved in `.originals/` so every destructive edit is reversible.
+originals preserved in `.originals/` so every destructive edit is reversible · Live Text
+selection with the select tool (text under a redaction is excluded from the analysis).
 
 ## M3 status (It records)
 
