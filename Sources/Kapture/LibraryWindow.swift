@@ -403,7 +403,15 @@ final class LibraryGridView: NSView {
     private var items: [Item] = []
     private var sections: [Section] = []
     private var hovered: Int?
-    private var selected: String?
+    private var selected: String? {
+        // an open panel shows the selected capture, whichever way the selection moved, and
+        // closes when nothing is selected
+        didSet {
+            needsDisplay = true
+            guard previewing, let panel = QLPreviewPanel.shared() else { return }
+            if let i = selectedIndex { panel.currentPreviewItemIndex = i } else { panel.orderOut(nil) }
+        }
+    }
     /// Driven by the zoom control and remembered between openings. Clamped here, where the range
     /// is: a stale or hand-edited default can't land the grid on nothing.
     private var sizeIndex: Int {
@@ -507,6 +515,7 @@ final class LibraryGridView: NSView {
     }
 
     private func apply(_ records: [CaptureRecord]) {
+        let old = items
         items = records.map { record in
             Item(record: record,
                  thumb: Self.thumbCache.object(forKey: Self.thumbKey(record) as NSString)?.image)
@@ -515,16 +524,15 @@ final class LibraryGridView: NSView {
         onCountChanged?(items.count)
         relayout()
         loadThumbnails()
-        // the panel indexes into items, which this just replaced: point it at the same capture,
-        // or close it when that capture is no longer listed
-        if previewing, let panel = QLPreviewPanel.shared() {
-            if let i = selectedIndex {
-                panel.reloadData()
-                panel.currentPreviewItemIndex = i
-            } else {
-                panel.orderOut(nil)
-            }
+        // The panel indexes into items, which this just replaced. It reloads only when a file
+        // moved or changed, because a reload restarts the current preview, a movie included.
+        let changed = old.count != items.count || zip(old, items).contains {
+            $0.record.relPath != $1.record.relPath || $0.record.fastID != $1.record.fastID
         }
+        if previewing, changed { QLPreviewPanel.shared()?.reloadData() }
+        // re-resolved, so the panel moves to the selected capture's new index, or closes when
+        // that capture is no longer listed
+        selected = selectedIndex.map { items[$0].record.id }
     }
 
     // MARK: layout — justified rows, aspect preserved, tight uniform gutters
@@ -641,15 +649,18 @@ final class LibraryGridView: NSView {
         // jumps to an unrelated day, since every row above has just changed height.
         let anchor = items.firstIndex { $0.frame.intersects(enclosingScrollView?.documentVisibleRect ?? bounds) }
         relayout()
-        if let anchor, items.indices.contains(anchor) {
-            // lifted by the inset as well, or the row it anchors on lands under the toolbar
-            var target = items[anchor].frame
-            let lift = (enclosingScrollView?.contentInsets.top ?? 0) + headerHeight
-            target.origin.y -= lift
-            target.size.height += lift
-            scrollToVisible(target)
-        }
+        if let anchor, items.indices.contains(anchor) { reveal(anchor) }
         return true
+    }
+
+    /// Scroll an item into view, lifted by the toolbar inset and the pinned day header, or its row
+    /// stops underneath them.
+    private func reveal(_ i: Int) {
+        var target = items[i].frame
+        let lift = (enclosingScrollView?.contentInsets.top ?? 0) + headerHeight
+        target.origin.y -= lift
+        target.size.height += lift
+        scrollToVisible(target)
     }
 
     var canZoomIn: Bool { Tokens.gridRowHeights.indices.contains(sizeIndex + 1) }
@@ -739,29 +750,34 @@ final class LibraryGridView: NSView {
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         let p = convert(event.locationInWindow, from: nil)
-        guard let i = index(at: p) else { selected = nil; needsDisplay = true; return }
+        guard let i = index(at: p) else { selected = nil; return }
         selected = items[i].record.id
-        needsDisplay = true
-        if previewing { QLPreviewPanel.shared()?.currentPreviewItemIndex = i }
         if event.clickCount == 2 { open(items[i].record) }
     }
 
     override func keyDown(with event: NSEvent) {
-        if let arrow = Arrow(rawValue: event.keyCode),
-           event.modifierFlags.isDisjoint(with: [.command, .option, .control]) {
-            moveSelection(arrow); return
-        }
-        guard let i = selectedIndex else { super.keyDown(with: event); return }
-        let record = items[i].record
+        if let arrow = Arrow(event) { moveSelection(arrow); return }
+        // space closes an open panel with no selection too, so it is checked first
+        if event.keyCode == Self.spaceKey { toggleQuickLook(); return }
+        guard let record = selectedRecord else { super.keyDown(with: event); return }
         switch event.keyCode {
-        case 49: toggleQuickLook()                       // space
         case 36: open(record)                            // return
         case 51: discard(record)                         // delete
         default: super.keyDown(with: event)
         }
     }
 
-    private enum Arrow: UInt16 { case left = 123, right = 124, down = 125, up = 126 }
+    private static let spaceKey: UInt16 = 49
+
+    private enum Arrow: UInt16 {
+        case left = 123, right = 124, down = 125, up = 126
+
+        /// An arrow key pressed without command, option or control.
+        init?(_ event: NSEvent) {
+            guard event.modifierFlags.isDisjoint(with: [.command, .option, .control]) else { return nil }
+            self.init(rawValue: event.keyCode)
+        }
+    }
 
     /// Left and right step through the grid in order, across row and day boundaries. Up and down
     /// go to the item in the adjacent row whose centre is nearest the current one's.
@@ -788,14 +804,7 @@ final class LibraryGridView: NSView {
 
     private func select(_ i: Int) {
         selected = items[i].record.id
-        needsDisplay = true
-        // lifted by the toolbar inset and the pinned day header, or the row stops underneath them
-        var target = items[i].frame
-        let lift = (enclosingScrollView?.contentInsets.top ?? 0) + headerHeight
-        target.origin.y -= lift
-        target.size.height += lift
-        scrollToVisible(target)
-        if previewing { QLPreviewPanel.shared()?.currentPreviewItemIndex = i }
+        reveal(i)
     }
 
     // MARK: actions
@@ -817,7 +826,6 @@ final class LibraryGridView: NSView {
         let p = convert(event.locationInWindow, from: nil)
         guard let i = index(at: p) else { return nil }
         selected = items[i].record.id
-        needsDisplay = true
         let record = items[i].record
         let menu = NSMenu()
         func add(_ title: String, _ action: Selector) {
@@ -844,7 +852,7 @@ final class LibraryGridView: NSView {
         return menu
     }
     private var selectedRecord: CaptureRecord? {
-        items.first(where: { $0.record.id == selected })?.record
+        selectedIndex.map { items[$0].record }
     }
     @objc private func openSelected() { if let r = selectedRecord { open(r) } }
     @objc private func copySelected() {
@@ -881,16 +889,19 @@ final class LibraryGridView: NSView {
 
     // MARK: QuickLook — the panel previews the grid's items and follows its selection, as in Finder
 
-    /// True while the shared panel takes its items from this grid.
-    private var previewing = false
+    /// True while the shared panel takes its items from this grid. Read from the panel rather
+    /// than stored: a corner card's QuickLook sets its own data source without ending this one.
+    private var previewing: Bool {
+        QLPreviewPanel.sharedPreviewPanelExists() && QLPreviewPanel.shared()?.dataSource === self
+    }
     /// The panel steps left and right through its items itself, without asking the delegate.
     /// The grid's selection follows its index from here.
     private var previewIndexObservation: NSKeyValueObservation?
 
     private func toggleQuickLook() {
         guard let panel = QLPreviewPanel.shared() else { return }
-        if previewing && panel.isVisible { panel.orderOut(nil) }
-        else { panel.makeKeyAndOrderFront(nil) }
+        if previewing { panel.orderOut(nil) }
+        else if selectedIndex != nil { panel.makeKeyAndOrderFront(nil) }
     }
 
     func closeQuickLook() {
@@ -900,24 +911,24 @@ final class LibraryGridView: NSView {
     override func acceptsPreviewPanelControl(_ panel: QLPreviewPanel!) -> Bool { true }
 
     override func beginPreviewPanelControl(_ panel: QLPreviewPanel!) {
-        previewing = true
         panel.dataSource = self
         panel.delegate = self
         panel.currentPreviewItemIndex = selectedIndex ?? 0
         previewIndexObservation = panel.observe(\.currentPreviewItemIndex) { [weak self] panel, _ in
             MainActor.assumeIsolated {
                 let i = panel.currentPreviewItemIndex
-                guard let self, self.items.indices.contains(i), self.selectedIndex != i else { return }
+                guard let self, self.previewing, self.items.indices.contains(i),
+                      self.selectedIndex != i else { return }
                 self.select(i)
             }
         }
     }
 
     override func endPreviewPanelControl(_ panel: QLPreviewPanel!) {
-        previewing = false
         previewIndexObservation = nil
-        panel.dataSource = nil
-        panel.delegate = nil
+        // another owner (a corner card's QuickLook) may have set its own data source by now
+        if panel.dataSource === self { panel.dataSource = nil }
+        if panel.delegate === self { panel.delegate = nil }
     }
 
     // MARK: drawing
@@ -1073,7 +1084,7 @@ extension LibraryGridView: QLPreviewPanelDataSource, QLPreviewPanelDelegate {
     /// right here; the index observation covers those.
     func previewPanel(_ panel: QLPreviewPanel!, handle event: NSEvent!) -> Bool {
         guard event.type == .keyDown,
-              Arrow(rawValue: event.keyCode) != nil || event.keyCode == 49 else { return false }
+              Arrow(event) != nil || event.keyCode == Self.spaceKey else { return false }
         keyDown(with: event)
         return true
     }
