@@ -68,6 +68,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         HotkeyCenter.shared.install()
         EventTapCenter.shared.startIfPossible()   // silent no-op without the Accessibility grant
         installStatusItem()
+        _ = UpdaterController.shared   // starts Sparkle's scheduled checks; `shared` is lazy
         Onboarding.shared.showIfNeeded()
         ShortcutConflictWatch.shared.start()
         Clipboard.followLibraryMoves()
