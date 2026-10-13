@@ -63,6 +63,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSMicrophoneUsageDescription</key><string>Kapture records your microphone when Record microphone is on.</string>
   <key>SUFeedURL</key><string>${FEED_URL}</string>
   <key>SUPublicEDKey</key><string>${PUBLIC_ED_KEY}</string>
   <key>SUEnableAutomaticChecks</key><true/>
@@ -79,11 +80,11 @@ SIGN_ID="${SIGN_ID:--}"
 # Notarization requires the hardened runtime and a secure timestamp; a local Apple Development
 # build skips both, since --timestamp needs the network and the runtime blocks the debugger.
 #
-# The entitlements go on only in the same case, and only with the profile beside them. The
-# profile is what authorises keychain-access-groups, and it vouches for a Developer ID signature
-# specifically — an Apple Development build carrying that entitlement is killed at launch rather
-# than merely denied the keychain, so a local build must stay unentitled. The app handles the
-# consequence at runtime: no entitlement means a device-local token instead of a synced one.
+# The entitlements go on only in the same case. The profile is what authorises
+# keychain-access-groups, and it vouches for a Developer ID signature specifically — an Apple
+# Development build carrying that entitlement is killed at launch rather than merely denied the
+# keychain, so a local build must stay unentitled. The app handles the consequence at runtime: no
+# entitlement means a device-local token instead of a synced one.
 EXTRA=()
 ENTITLE=()
 PROFILE=signing/Kapture_Developer_ID.provisionprofile
@@ -94,6 +95,9 @@ case "$SIGN_ID" in
       cp "$PROFILE" "$APP/Contents/embedded.provisionprofile"
       ENTITLE=(--entitlements signing/Kapture.entitlements)
     else
+      # the other entitlements need no profile, so they still go on
+      plutil -remove keychain-access-groups -o dist/.unprovisioned.entitlements signing/Kapture.entitlements
+      ENTITLE=(--entitlements dist/.unprovisioned.entitlements)
       echo "note: $PROFILE missing — this build's secrets stay on one Mac"
     fi
     ;;
