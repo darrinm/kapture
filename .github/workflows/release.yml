@@ -77,6 +77,14 @@ jobs:
             || { echo "no keychain-access-groups — secrets would not sync"; exit 1; }
           [ -f dist/Kapture.app/Contents/embedded.provisionprofile ] \
             || { echo "entitled but no embedded.provisionprofile — this build dies at launch"; exit 1; }
+          # the hardened runtime denies the microphone without this entitlement, and TCC needs the
+          # usage string; missing either, a recording with Record microphone on never starts
+          codesign -d --entitlements - --xml dist/Kapture.app 2>/dev/null \
+            | grep -qF '<key>com.apple.security.device.audio-input</key><true/>' \
+            || { echo "no audio-input entitlement — microphone recording would fail"; exit 1; }
+          /usr/libexec/PlistBuddy -c "Print :NSMicrophoneUsageDescription" \
+            dist/Kapture.app/Contents/Info.plist > /dev/null \
+            || { echo "no NSMicrophoneUsageDescription in Info.plist"; exit 1; }
 
       - name: Build DMG
         env:
