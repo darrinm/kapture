@@ -85,11 +85,6 @@ SIGN_ID="${SIGN_ID:--}"
 # Development build carrying that entitlement is killed at launch rather than merely denied the
 # keychain, so a local build must stay unentitled. The app handles the consequence at runtime: no
 # entitlement means a device-local token instead of a synced one.
-#
-# The hardened runtime denies the microphone without com.apple.security.device.audio-input: TCC
-# never prompts, and SCStream refuses to start the whole recording. That entitlement needs no
-# profile, so a Developer ID build without one is signed with Kapture.entitlements minus
-# keychain-access-groups.
 EXTRA=()
 ENTITLE=()
 PROFILE=signing/Kapture_Developer_ID.provisionprofile
@@ -100,10 +95,9 @@ case "$SIGN_ID" in
       cp "$PROFILE" "$APP/Contents/embedded.provisionprofile"
       ENTITLE=(--entitlements signing/Kapture.entitlements)
     else
-      UNPROVISIONED=dist/.unprovisioned.entitlements
-      cp signing/Kapture.entitlements "$UNPROVISIONED"
-      /usr/libexec/PlistBuddy -c "Delete :keychain-access-groups" "$UNPROVISIONED" > /dev/null
-      ENTITLE=(--entitlements "$UNPROVISIONED")
+      # the other entitlements need no profile, so they still go on
+      plutil -remove keychain-access-groups -o dist/.unprovisioned.entitlements signing/Kapture.entitlements
+      ENTITLE=(--entitlements dist/.unprovisioned.entitlements)
       echo "note: $PROFILE missing — this build's secrets stay on one Mac"
     fi
     ;;
