@@ -29,7 +29,7 @@ final class SharedLibraryModel: ObservableObject {
     var isEnrolled: Bool { LibraryService.isEnrolled }
 
     func refresh() async {
-        state = await LibraryService.shared.state
+        state = await LibraryService.shared.currentState()
         guard state == .ready else { return }
         devices = (try? await LibraryService.shared.devices()) ?? []
     }
@@ -71,9 +71,12 @@ final class SharedLibraryModel: ObservableObject {
 
     /// Start or restart the service after anything that changes what this Mac holds.
     func restart() async {
-        guard let library = CaptureCoordinator.shared.library else { return }
-        _ = await LibraryService.shared.start(db: library.db,
-                                              deviceID: LibraryDeviceID.current())
+        if let library = CaptureCoordinator.shared.library {
+            _ = await LibraryService.shared.start(db: library.db,
+                                                  deviceID: LibraryDeviceID.current())
+        }
+        // Without a running library the state still comes from settings and the Keychain, so
+        // the pane shows the screen this Mac is actually on.
         await refresh()
     }
 
@@ -95,7 +98,9 @@ final class SharedLibraryModel: ObservableObject {
 struct SharedLibraryPane: View {
     @StateObject private var model = SharedLibraryModel()
     @AppStorage("libraryEnabled") private var enabled = false
-    @AppStorage("libraryCacheGB") private var cacheGB = 0
+    // The same default `Settings.libraryCacheBytes` falls back to, so the picker cannot show a
+    // ceiling the sweep is not using.
+    @AppStorage("libraryCacheGB") private var cacheGB = Settings.libraryCacheGBDefault
 
     @State private var ownerToken = ""
     @State private var typedRecoveryCode = ""
@@ -123,7 +128,9 @@ struct SharedLibraryPane: View {
                 case .ready: readySection
                 case .locked: lockedSection
                 case .awaitingApproval: awaitingSection
-                case .disabled: setUpSection
+                case .needsSetup: setUpSection
+                // The toggle is on and the service has not answered yet; nothing to offer.
+                case .disabled: EmptyView()
                 }
             }
 
@@ -133,7 +140,7 @@ struct SharedLibraryPane: View {
         }
         .formStyle(.grouped)
         .padding(.top, 4)
-        .task { await model.refresh() }
+        .task { await model.restart() }
         .onChange(of: enabled) { _, _ in Task { await model.restart() } }
         .sheet(isPresented: $showingRecovery) { recoverySheet }
     }

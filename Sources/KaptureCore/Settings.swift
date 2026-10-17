@@ -150,8 +150,14 @@ public struct Settings {
     }
 
     /// How much of the library this Mac keeps on disk (F51). Zero means keep everything.
+    ///
+    /// Defaults to keeping everything, and the Settings pane reads this same constant. They
+    /// disagreed — the pane showed "Everything" while this fell back to 20 GB — so a user who
+    /// never touched the picker got eviction under a screen promising no file would be removed.
+    public static let libraryCacheGBDefault = 0
+
     public var libraryCacheBytes: Int {
-        let gb = d.object(forKey: "libraryCacheGB") as? Int ?? 20
+        let gb = d.object(forKey: "libraryCacheGB") as? Int ?? Self.libraryCacheGBDefault
         return gb <= 0 ? .max : gb * 1024 * 1024 * 1024
     }
 

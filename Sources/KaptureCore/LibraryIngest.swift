@@ -75,7 +75,10 @@ extension Library {
     /// write.
     @discardableResult
     public func finishOCR(_ job: IngestJob, text: String, naming: Bool) throws -> Bool {
-        try withOperation(for: job.captureId) {
+        // The recognized text travels with the row, so other Macs can search a capture whose
+        // bytes they never fetch (F94 keeps OCR on the capturing Mac).
+        defer { postChange(job.captureId, .metadata) }
+        return try withOperation(for: job.captureId) {
             try db.queue.write { d in
                 guard let record = try Library.currentIngestRecord(d, job: job) else { return false }
                 try Library.indexText(d, id: job.captureId, ocr: String(text.prefix(20_000)))

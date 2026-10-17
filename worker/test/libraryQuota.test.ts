@@ -3,7 +3,6 @@
 import { env, createExecutionContext, waitOnExecutionContext, runInDurableObject } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 import worker from "../src/index";
-import { loadOwners, saveOwners } from "../src/common";
 import { quotaFor, STORED_BYTES_PER_OWNER } from "../src/quota";
 
 const ULID_A = "01JBAAAAAAAAAAAAAAAAAAAAAA";
@@ -19,11 +18,6 @@ async function call(path: string, init: RequestInit = {}, withEnv = env) {
 }
 
 async function device() {
-  const owners = await loadOwners(env);
-  for (const record of Object.values(owners)) {
-    delete record.devices; delete record.hadDevice; delete record.keyID;
-  }
-  await saveOwners(env, owners);
   const response = await call("/api/library/enroll", {
     method: "POST",
     headers: { ...ownerAuth, "content-type": "application/json" },
@@ -87,44 +81,68 @@ describe("F56 — stored bytes are charged and credited", () => {
   });
 });
 
-describe("F54, F87 — multipart upload", () => {
-  it("joins staged parts into one object and cleans them up", async () => {
+describe("F54, F87 — multipart upload through R2's own API", () => {
+  // The previous implementation staged parts as objects and joined them in Worker memory, about
+  // twice the file in a 128 MB isolate, so no recording over the threshold could ever complete.
+
+  async function upload(auth: Record<string, string>, path: string, parts: string[]) {
+    const started = await call(`${path}?uploads`, { method: "POST", headers: auth }, enabled());
+    const { uploadId } = await started.json() as { uploadId: string };
+    const done: { partNumber: number; etag: string }[] = [];
+    for (const [index, body] of parts.entries()) {
+      const response = await call(`${path}?uploadId=${uploadId}&part=${index + 1}`,
+                                  { method: "PUT", headers: auth, body }, enabled());
+      done.push(await response.json() as { partNumber: number; etag: string });
+    }
+    return { uploadId, done };
+  }
+
+  it("assembles the parts into one object", async () => {
     const token = await device();
     const auth = { authorization: `Bearer ${token}` };
     const path = `/api/library/blob/blob/BIG1/1/${ULID_A}`;
+    // R2 requires every part but the last to be at least 5 MiB.
+    const first = "a".repeat(5 * 1024 * 1024);
+    const { uploadId, done } = await upload(auth, path, [first, "tail"]);
 
-    await call(`${path}?part=1`, { method: "PUT", headers: auth, body: "hello " }, enabled());
-    await call(`${path}?part=2`, { method: "PUT", headers: auth, body: "world" }, enabled());
-    const done = await call(`${path}?complete=2`, { method: "POST", headers: auth }, enabled());
-    expect(done.status).toBe(200);
+    const completed = await call(`${path}?uploadId=${uploadId}&complete`, {
+      method: "POST", headers: { ...auth, "content-type": "application/json" },
+      body: JSON.stringify({ parts: done }),
+    }, enabled());
+    expect(completed.status).toBe(200);
 
     const get = await call(path, { headers: auth }, enabled());
-    expect(await get.text()).toBe("hello world");
-
-    // The staged parts are gone, so a failed upload cannot leave the bucket littered.
-    expect(await env.BUCKET.head(`lib/darrin/blob/BIG1/1/${ULID_A}.part1`)).toBeNull();
+    const text = await get.text();
+    expect(text.length).toBe(first.length + 4);
+    expect(text.endsWith("tail")).toBe(true);
   });
 
-  it("refuses completion when a part never arrived", async () => {
+  it("leaves no object behind when the upload is never completed", async () => {
     const token = await device();
     const auth = { authorization: `Bearer ${token}` };
     const path = `/api/library/blob/blob/BIG2/1/${ULID_A}`;
-    await call(`${path}?part=1`, { method: "PUT", headers: auth, body: "only one" }, enabled());
+    await upload(auth, path, ["only one"]);
 
-    const done = await call(`${path}?complete=3`, { method: "POST", headers: auth }, enabled());
-
-    expect(done.status).toBe(409);
-    expect((await done.json() as { error: string }).error).toContain("missing part");
+    expect(await env.BUCKET.head(`lib/darrin/blob/BIG2/1/${ULID_A}`)).toBeNull();
   });
 
-  it("charges the joined size against the quota", async () => {
+  it("charges parts as they arrive", async () => {
     const token = await device();
     const auth = { authorization: `Bearer ${token}` };
     const path = `/api/library/blob/blob/BIG3/1/${ULID_A}`;
-    await call(`${path}?part=1`, { method: "PUT", headers: auth, body: "abcde" }, enabled());
-    await call(`${path}?complete=1`, { method: "POST", headers: auth }, enabled());
+    await upload(auth, path, ["abcde"]);
 
     const usage = await call("/api/library/usage", { headers: auth }, enabled());
     expect((await usage.json() as { storedBytes: number }).storedBytes).toBe(5);
+  });
+
+  it("reports an object that already exists instead of starting a second upload", async () => {
+    const token = await device();
+    const auth = { authorization: `Bearer ${token}` };
+    const path = `/api/library/blob/blob/BIG4/1/${ULID_A}`;
+    await call(path, { method: "PUT", headers: auth, body: "done earlier" }, enabled());
+
+    const started = await call(`${path}?uploads`, { method: "POST", headers: auth }, enabled());
+    expect((await started.json() as { exists: boolean }).exists).toBe(true);
   });
 });

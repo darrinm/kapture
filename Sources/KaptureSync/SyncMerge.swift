@@ -199,6 +199,20 @@ public enum SyncMerge {
         return wins(a, over: b) ? a.status : b.status
     }
 
+    /// Two versions of one capture with no conflict between them: order decides, and the field
+    /// rules are layered on top.
+    ///
+    /// One function for both callers. `applySnapshot` used to resolve by order alone, so a
+    /// bootstrapping Mac could un-pin a manual rename (F41) or resurrect a concurrent trash
+    /// (F38) that the op-by-op path would have kept.
+    static func resolve(existing: SyncedRow, incoming: SyncedRow) -> SyncedRow {
+        let incomingWins = wins(incoming, over: existing)
+        var resolved = resolveNaming(winner: incomingWins ? incoming : existing,
+                                     loser: incomingWins ? existing : incoming)
+        resolved.status = resolveStatus(existing, incoming)
+        return resolved
+    }
+
     // MARK: - The merge
 
     /// Apply a page of ops to the local row set.
@@ -252,11 +266,7 @@ public enum SyncMerge {
                     continue
                 }
 
-                // No conflict: order decides, with the field rules layered on top.
-                let winner = wins(incoming, over: existing) ? incoming : existing
-                let loser = wins(incoming, over: existing) ? existing : incoming
-                var resolved = resolveNaming(winner: winner, loser: loser)
-                resolved.status = resolveStatus(existing, incoming)
+                let resolved = resolve(existing: existing, incoming: incoming)
                 rows[resolved.captureID] = LocalRow(row: resolved, acknowledged: true)
                 result.upserts.append(resolved)
             }
@@ -292,7 +302,7 @@ public enum SyncMerge {
                 result.forks.append(contentsOf: nested.forks)
                 continue
             }
-            result.upserts.append(wins(row, over: existing) ? row : existing)
+            result.upserts.append(resolve(existing: existing, incoming: row))
         }
 
         for (captureID, localRow) in local where !inSnapshot.contains(captureID) {

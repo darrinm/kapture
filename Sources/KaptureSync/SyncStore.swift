@@ -57,10 +57,14 @@ public struct BlobLocatorRef: Codable, Sendable, Equatable {
 public struct SyncStore: Sendable {
     public let db: KaptureCore.Database
     public let crypto: LibraryCrypto
+    /// The library folder. With it, a deletion pulled from the log removes the file it names as
+    /// well as the row (F7). Without it — the tests that only exercise rows — the file is left.
+    public let root: URL?
 
-    public init(db: KaptureCore.Database, crypto: LibraryCrypto) {
+    public init(db: KaptureCore.Database, crypto: LibraryCrypto, root: URL? = nil) {
         self.db = db
         self.crypto = crypto
+        self.root = root
     }
 
     /// What this build can apply: payload versions and op kinds together (F135).
@@ -169,7 +173,10 @@ public struct SyncStore: Sendable {
             ocr: ocr,
             shareURL: record.shareURL,
             durationS: record.durationS,
-            blobs: blobs)
+            blobs: blobs,
+            // Carried, or every re-push of a fork tells the other Macs it is not one and the
+            // F36 badge disappears.
+            forkedFrom: record.forkedFrom)
     }
 
     /// The `requires` an op must carry for a row (F32, F98). Derived from the row rather than
@@ -318,6 +325,80 @@ public struct SyncStore: Sendable {
         }
     }
 
+    // MARK: - The upload queue (F10)
+
+    /// Queue a capture's bytes for upload. Keyed by capture, so a second edit before the first
+    /// upload drains replaces the entry rather than queuing a stale revision behind it.
+    public func queueUpload(_ captureID: String) throws {
+        try db.queue.write { d in
+            try d.execute(sql: """
+                INSERT INTO upload_queue (captureId, queuedAt, attempts, nextAttemptAt, lastError)
+                VALUES (?, ?, 0, NULL, NULL)
+                ON CONFLICT(captureId) DO UPDATE SET
+                  queuedAt = excluded.queuedAt, attempts = 0, nextAttemptAt = NULL, lastError = NULL
+                """, arguments: [captureID, Date()])
+        }
+    }
+
+    public func dueUploads() throws -> [String] {
+        try db.queue.read { d in
+            try String.fetchAll(d, sql: """
+                SELECT captureId FROM upload_queue
+                WHERE nextAttemptAt IS NULL OR nextAttemptAt <= ?
+                ORDER BY queuedAt
+                """, arguments: [Date()])
+        }
+    }
+
+    public func queuedUploads() throws -> [String] {
+        try db.queue.read { d in try String.fetchAll(d, sql: "SELECT captureId FROM upload_queue") }
+    }
+
+    /// The file and revision to upload *now*: an edit since the capture was queued replaces
+    /// both, and uploading the queued ones would push a row naming bytes that no longer match.
+    public func currentContent(of captureID: String) throws -> (relPath: String, revision: Int64)? {
+        try db.queue.read { d in
+            guard let record = try CaptureRecord.fetchOne(d, key: captureID) else { return nil }
+            return (record.relPath, record.contentRevision)
+        }
+    }
+
+    /// Leave the queue and enter the outbox in one transaction (F29). Two transactions would let
+    /// a crash between them remove the upload and never queue the row that names it.
+    public func completeUpload(_ captureID: String, observed: Int64, deviceID: String) throws {
+        try db.queue.write { d in
+            try d.execute(sql: "DELETE FROM upload_queue WHERE captureId = ?", arguments: [captureID])
+            guard let record = try CaptureRecord.fetchOne(d, key: captureID) else { return }
+            var row = try self.row(for: record, in: d)
+            row.lamport = try self.nextLamport(in: d)
+            row.deviceID = deviceID
+            try d.execute(sql: "UPDATE captures SET lamport = ?, syncDeviceID = ? WHERE id = ?",
+                          arguments: [row.lamport, deviceID, captureID])
+            try self.enqueue(row, kind: .upsert, observed: observed, deviceID: deviceID, in: d)
+        }
+    }
+
+    /// Back off a failed upload: a minute, doubling, capped at an hour.
+    public func deferUpload(_ captureID: String, error: String) throws {
+        try db.queue.write { d in
+            let attempts = try Int.fetchOne(
+                d, sql: "SELECT attempts FROM upload_queue WHERE captureId = ?",
+                arguments: [captureID]) ?? 0
+            let delay = min(60 * pow(2, Double(attempts)), 3600)
+            try d.execute(sql: """
+                UPDATE upload_queue
+                SET attempts = attempts + 1, nextAttemptAt = ?, lastError = ?
+                WHERE captureId = ?
+                """, arguments: [Date().addingTimeInterval(delay), error, captureID])
+        }
+    }
+
+    public func dropUpload(_ captureID: String) throws {
+        try db.queue.write { d in
+            try d.execute(sql: "DELETE FROM upload_queue WHERE captureId = ?", arguments: [captureID])
+        }
+    }
+
     // MARK: - Skipped ops (F78, F104, F135)
 
     public func noteSkipped(seq: Int64, v: Int, kind: String) throws {
@@ -381,7 +462,11 @@ public struct SyncStore: Sendable {
     /// Write a merge result. One transaction, so a crash mid-apply leaves the cursor behind and
     /// the page is simply replayed (F26).
     public func apply(_ result: MergeResult, cursor: Int64?, deviceID: String) throws {
-        try db.queue.write { d in
+        // Files are removed after the transaction commits: the filesystem is not
+        // transactional, and removing a file whose row then failed to delete would leave a
+        // row pointing at nothing.
+        let removed = try db.queue.write { d -> [String] in
+            var removedPaths: [String] = []
             // A fork is minted here and has never been near the log. Marking it acknowledged
             // would make F130 read its absence from the next snapshot as a delete and remove
             // the edit this device just rescued.
@@ -390,8 +475,14 @@ public struct SyncStore: Sendable {
                 try upsert(row, in: d, acknowledged: !forks.contains(row.captureID))
             }
             for captureID in result.deletions {
+                if let relPath = try String.fetchOne(
+                    d, sql: "SELECT relPath FROM captures WHERE id = ?", arguments: [captureID]) {
+                    removedPaths.append(relPath)
+                }
                 try d.execute(sql: "DELETE FROM captures WHERE id = ?", arguments: [captureID])
                 try d.execute(sql: "DELETE FROM fts_source WHERE captureId = ?",
+                              arguments: [captureID])
+                try d.execute(sql: "DELETE FROM blob_cache WHERE captureId = ?",
                               arguments: [captureID])
             }
             for row in result.outbox {
@@ -403,6 +494,25 @@ public struct SyncStore: Sendable {
                 try d.execute(sql: "UPDATE sync_state SET cursor = ? WHERE id = 1",
                               arguments: [cursor])
             }
+            return removedPaths
+        }
+        removeFiles(atRelPaths: removed)
+    }
+
+    /// A deleted capture's file, its sidecar, and the pre-edit original the sidecar names.
+    ///
+    /// `MergeResult.deletions` promises "their bytes go too". Dropping only the rows left every
+    /// Mac holding a file with nothing pointing at it, so disk use never fell after a sweep.
+    func removeFiles(atRelPaths relPaths: [String]) {
+        guard let root else { return }
+        let files = FileManager.default
+        for relPath in relPaths {
+            let file = root.appendingPathComponent(relPath)
+            if let original = Sidecar.read(for: file)?.annotations?.original {
+                try? files.removeItem(at: root.appendingPathComponent(original))
+            }
+            try? files.removeItem(at: Sidecar.url(for: file))
+            try? files.removeItem(at: file)
         }
     }
 
@@ -412,10 +522,12 @@ public struct SyncStore: Sendable {
         // Fetch the whole record and write the whole record. The hand-written INSERT this
         // replaces named 26 columns in three lists that had to stay aligned by eye, and it
         // duplicated a schema `CaptureRecord` already describes.
-        var record = try CaptureRecord.fetchOne(d, key: row.captureID)
+        let existing = try CaptureRecord.fetchOne(d, key: row.captureID)
+        let heldBlob = try blobLocators(for: row.captureID, in: d)[.blob]
+        var record = try existing
             ?? CaptureRecord(id: row.captureID, kind: row.kind, status: row.status,
                              createdAt: row.createdAt, width: row.width, height: row.height,
-                             bytes: row.bytes, relPath: Self.derivedRelPath(for: row),
+                             bytes: row.bytes, relPath: availableRelPath(for: row, in: d),
                              sourceApp: row.sourceApp, windowTitle: row.windowTitle,
                              fastID: "")
 
@@ -442,20 +554,65 @@ public struct SyncStore: Sendable {
         record.parentHash = row.parentHash
         record.acknowledged = acknowledged
 
-        // A row this Mac already holds keeps the blob state it has: it made the capture, or has
-        // already fetched it, and the log has no opinion about where the bytes sit here. Only a
-        // genuinely new row starts `remote`, and only when the log says bytes exist for it.
-        if try !CaptureRecord.exists(d, key: row.captureID) {
+        // Where this Mac's bytes stand. A new row is `remote` when the log names bytes for it. A
+        // row already held keeps its state — it made the capture, or fetched it — unless the log
+        // now names a different revision or writer than the one on disk, in which case the file
+        // here is the old content and opening it must fetch the new one.
+        if existing == nil {
             record.blobState = row.blobs.isEmpty ? BlobState.local.rawValue
                                                  : BlobState.remote.rawValue
+        } else if let incoming = row.blobs[.blob], incoming != heldBlob {
+            record.blobState = BlobState.remote.rawValue
         }
         try record.save(d)
+
+        // The locators themselves (F23, F129). Without them a capture pulled from another Mac
+        // has no way to reach its bytes here: `BlobStore.fetch` finds no locator, marks it
+        // missing, and every later push or snapshot from this Mac drops the locators too. Only
+        // the address columns are written; `bytes` and `lastOpenedAt` are this Mac's own.
+        for (purpose, locator) in row.blobs {
+            try d.execute(sql: """
+                INSERT INTO blob_cache (captureId, purpose, revision, writer, owningCapture, bytes)
+                VALUES (?, ?, ?, ?, ?, 0)
+                ON CONFLICT(captureId, purpose) DO UPDATE SET
+                  revision = excluded.revision, writer = excluded.writer,
+                  owningCapture = excluded.owningCapture
+                """, arguments: [row.captureID, purpose.rawValue, locator.revision,
+                                 locator.writer, locator.capture])
+        }
 
         try d.execute(sql: """
             INSERT INTO fts_source (captureId, name, summary, tags, ocr) VALUES (?, ?, ?, '', ?)
             ON CONFLICT(captureId) DO UPDATE SET
               name = excluded.name, summary = excluded.summary, ocr = excluded.ocr
             """, arguments: [row.captureID, row.name, row.summary ?? "", row.ocr ?? ""])
+    }
+
+    /// A path for a capture this Mac has never held, free both in the index and on disk.
+    ///
+    /// Names are second-resolution timestamps, so two Macs capturing in the same second produce
+    /// the same one, and `captures.relPath` is UNIQUE. Without this the pulled row fails the
+    /// constraint, the page's transaction rolls back, the cursor never moves, and every later
+    /// pull fails on the same page. The suffix follows `Library.uniqueURL`'s " 2", " 3" form.
+    func availableRelPath(for row: SyncedRow, in d: GRDB.Database) throws -> String {
+        let base = Self.derivedRelPath(for: row)
+        func taken(_ candidate: String) throws -> Bool {
+            if try Bool.fetchOne(d, sql: "SELECT EXISTS(SELECT 1 FROM captures WHERE relPath = ?)",
+                                 arguments: [candidate]) == true { return true }
+            if let root, FileManager.default.fileExists(
+                atPath: root.appendingPathComponent(candidate).path) { return true }
+            return false
+        }
+        guard try taken(base) else { return base }
+        let ns = base as NSString
+        let ext = ns.pathExtension
+        let stem = ext.isEmpty ? base : ns.deletingPathExtension
+        for n in 2...10_000 {
+            let candidate = ext.isEmpty ? "\(stem) \(n)" : "\(stem) \(n).\(ext)"
+            if try !taken(candidate) { return candidate }
+        }
+        // Ten thousand collisions on one name is not a real library; the id cannot collide.
+        return ext.isEmpty ? "\(stem) \(row.captureID)" : "\(stem) \(row.captureID).\(ext)"
     }
 
     /// This Mac's path for a capture it has never held: the sharded directory its date implies,

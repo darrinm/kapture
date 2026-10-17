@@ -6,6 +6,19 @@ import AVFoundation
 /// The complete intended state is durable before any visible file moves. Replaying the same
 /// plan is safe whether the crash happened before the move, during metadata writes, or before
 /// the SQLite commit. Incoming bytes are staged on the library's own filesystem.
+extension FileOperation.Op {
+    /// What a completed operation means for the shared library.
+    var captureChange: CaptureChange.Kind {
+        switch self {
+        case .write: .created
+        case .flatten, .trim: .contentReplaced
+        case .rename: .metadata
+        case .discard: .trashed
+        case .restore: .restored
+        }
+    }
+}
+
 struct FileOperation: Codable {
     /// Encoded as its raw string, so plans and journal rows written by earlier builds decode.
     enum Op: String, Codable {
@@ -356,6 +369,7 @@ extension Library {
             Task.detached(priority: .utility) { await self.refreshMovieMetadata(recovered) }
         }
         Log.store.info("completed \(plan.op.rawValue, privacy: .public) for \(record.relPath, privacy: .public)")
+        postChange(record.id, plan.op.captureChange)
         // A discard whose file was already gone completes without a target; nothing can follow it.
         if plan.op.movesSidecar, source != target, try itemExists(target) {
             NotificationCenter.default.post(name: Library.fileDidMove, object: self,

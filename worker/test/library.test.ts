@@ -129,7 +129,7 @@ describe("F102 — only a complete client may snapshot", () => {
     const name = owner();
     const log = libraryLogFor(env, name);
     await log.append(name, [op({ v: 2 })]);
-    const claim = await log.claimSnapshot(1, 1);
+    const claim = await log.claimSnapshot("device-a", 1, 1);
     expect(claim.granted).toBe(false);
     expect(claim.required).toBe(2);
   });
@@ -138,7 +138,7 @@ describe("F102 — only a complete client may snapshot", () => {
     const name = owner();
     const log = libraryLogFor(env, name);
     await log.append(name, [op({ v: 2 })]);
-    const claim = await log.claimSnapshot(2, 1);
+    const claim = await log.claimSnapshot("device-a", 2, 1);
     expect(claim.granted).toBe(true);
   });
 
@@ -147,7 +147,7 @@ describe("F102 — only a complete client may snapshot", () => {
     const log = libraryLogFor(env, name);
     await log.append(name, [op()]);
     await log.append(name, [op()]);
-    expect((await log.claimSnapshot(1, 1)).granted).toBe(false);
+    expect((await log.claimSnapshot("device-a", 1, 1)).granted).toBe(false);
   });
 });
 
@@ -244,7 +244,7 @@ describe("F136 — the version gate is a high-water mark", () => {
     // Simulate compaction removing the v2 op. A MAX(v) over survivors would now read 1 and let
     // a v1-only client write the library back down.
     await log.forgetOpsForTest(1);
-    expect((await log.claimSnapshot(1, 2)).granted).toBe(false);
+    expect((await log.claimSnapshot("device-a", 1, 2)).granted).toBe(false);
   });
 });
 

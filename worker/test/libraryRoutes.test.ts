@@ -1,9 +1,8 @@
 // The library's HTTP surface (docs/SHARED-LIBRARY.md §5.3), end to end through the Worker.
 
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
-import { beforeEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import worker from "../src/index";
-import { loadOwners, saveOwners, sha256Hex } from "../src/common";
 
 const ULID_A = "01JBAAAAAAAAAAAAAAAAAAAAAA";
 const ULID_B = "01JBBBBBBBBBBBBBBBBBBBBBBB";
@@ -22,15 +21,6 @@ async function call(path: string, init: RequestInit = {}, withEnv = env) {
 /** The allowlist is empty by default (F118); most tests need it on. */
 const enabled = () => ({ ...env, LIBRARY_OWNERS: "darrin" });
 
-async function resetOwners() {
-  const owners = await loadOwners(env);
-  for (const record of Object.values(owners)) {
-    delete record.devices;
-    delete record.hadDevice;
-    delete record.keyID;
-  }
-  await saveOwners(env, owners);
-}
 
 async function enrolFirstDevice(deviceID = ULID_A) {
   const response = await call("/api/library/enroll", {
@@ -42,7 +32,6 @@ async function enrolFirstDevice(deviceID = ULID_A) {
     { deviceID: string; token: string; approved: boolean; fingerprint: string };
 }
 
-beforeEach(resetOwners);
 
 describe("F118 — the allowlist gates every route", () => {
   it("404s enrolment when the owner is not allowlisted", async () => {
@@ -225,8 +214,14 @@ describe("§8 — blobs", () => {
     expect(retry.status).toBe(200);
     expect((await retry.json() as { retry: boolean }).retry).toBe(true);
 
-    const conflict = await call(path, { method: "PUT", headers: auth, body: "other" }, enabled());
-    expect(conflict.status).toBe(409);
+    // Different bytes at the same key are what a real retry looks like: F13 seals with a
+    // fresh random nonce, so re-sealing the same pixels never reproduces the ciphertext. The
+    // old digest comparison answered every such retry 409, and the capture never reached the
+    // log. The key names (capture, revision, writer), so what is already there is this
+    // device's own upload of this content, and it is kept.
+    const resealed = await call(path, { method: "PUT", headers: auth, body: "other" }, enabled());
+    expect(resealed.status).toBe(200);
+    expect((await resealed.json() as { retry: boolean }).retry).toBe(true);
 
     const get = await call(path, { headers: auth }, enabled());
     expect(await get.text()).toBe("pixels");
@@ -263,5 +258,90 @@ describe("§7.4 — the sweep lease over HTTP", () => {
     const body = await lease.json() as { granted: boolean; eligible: string[] };
     expect(body.granted).toBe(true);
     expect(body.eligible).toHaveLength(0);
+  });
+});
+
+
+describe("F8 — device state is consistent because it lives in one Durable Object", () => {
+  it("lets only one of two simultaneous enrolments be the silent first device", async () => {
+    // In eventually consistent KV both could read "no device yet" and both be approved.
+    const enrol = (deviceID: string) => call("/api/library/enroll", {
+      method: "POST",
+      headers: { ...ownerAuth, "content-type": "application/json" },
+      body: JSON.stringify({ deviceID }),
+    }, enabled());
+    const [a, b] = await Promise.all([enrol(ULID_A), enrol(ULID_B)]);
+    const approved = [await a.json(), await b.json()]
+      .filter((r) => (r as { approved: boolean }).approved);
+    expect(approved).toHaveLength(1);
+  });
+
+  it("refuses a revoked credential on the very next request", async () => {
+    const device = await enrolFirstDevice();
+    const auth = { authorization: `Bearer ${device.token}` };
+    await call(`/api/library/devices/${ULID_A}`, { method: "DELETE", headers: auth }, enabled());
+
+    const after = await call("/api/library/changes?since=0", { headers: auth }, enabled());
+    expect(after.status).toBe(401);
+  });
+
+  it("names the owner in the credential so the right object can be asked", async () => {
+    const device = await enrolFirstDevice();
+    expect(device.token.startsWith("darrin.")).toBe(true);
+  });
+});
+
+describe("F14 — a snapshot upload needs a granted claim", () => {
+  it("refuses a snapshot PUT that was never claimed", async () => {
+    const device = await enrolFirstDevice();
+    const response = await call("/api/library/snapshot/0", {
+      method: "PUT", headers: { authorization: `Bearer ${device.token}` }, body: "rows",
+    }, enabled());
+    expect(response.status).toBe(409);
+  });
+
+  it("accepts the claimed snapshot once, and only once", async () => {
+    const device = await enrolFirstDevice();
+    const auth = { authorization: `Bearer ${device.token}` };
+    const claim = await call("/api/library/snapshot", {
+      method: "POST", headers: { ...auth, "content-type": "application/json" },
+      body: JSON.stringify({ supportsV: 1, seq: 0 }),
+    }, enabled());
+    expect(claim.status).toBe(200);
+
+    const first = await call("/api/library/snapshot/0", { method: "PUT", headers: auth,
+                                                          body: "rows" }, enabled());
+    expect(first.status).toBe(200);
+    const again = await call("/api/library/snapshot/0", { method: "PUT", headers: auth,
+                                                          body: "rows" }, enabled());
+    expect(again.status).toBe(409);
+  });
+});
+
+describe("F15 — an admitted delete removes the capture's bytes", () => {
+  it("deletes every purpose and revision and returns the space", async () => {
+    const device = await enrolFirstDevice();
+    const auth = { authorization: `Bearer ${device.token}` };
+    const json = { ...auth, "content-type": "application/json" };
+    for (const key of [`blob/GONE/1/${ULID_A}`, `blob/GONE/2/${ULID_A}`, `thumb/GONE/1/${ULID_A}`]) {
+      await call(`/api/library/blob/${key}`, { method: "PUT", headers: auth, body: "xx" }, enabled());
+    }
+    const op = (opID: string, kind: string, observed: number) => ({
+      opID, blindedID: "GONE", v: 1, kind, requires: [], observed, ciphertext: btoa("x"),
+    });
+    const trashed = await call("/api/library/ops", {
+      method: "POST", headers: json, body: JSON.stringify({ ops: [op("01JBQP00000000000000000071", "trash", 0)] }),
+    }, enabled());
+    const { head } = await trashed.json() as { head: number };
+
+    await call("/api/library/ops", {
+      method: "POST", headers: json,
+      body: JSON.stringify({ ops: [op("01JBQP00000000000000000072", "delete", head)] }),
+    }, enabled());
+
+    const left = await env.BUCKET.list({ prefix: "lib/darrin/" });
+    expect(left.objects.filter((o) => o.key.includes("/GONE/"))).toHaveLength(0);
+    const usage = await call("/api/library/usage", { headers: auth }, enabled());
+    expect((await usage.json() as { storedBytes: number }).storedBytes).toBe(0);
   });
 });

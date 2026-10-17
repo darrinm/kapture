@@ -52,22 +52,29 @@ Settings › Shared Library needs:
 *Exit:* on one Mac, from a clean install, the toggle goes from off to `.ready` and the recovery
 code is written on paper.
 
-**Where this actually stands.** `SharedLibraryPane` exists and renders all four states; the
-recovery code round-trips in tests, including that a mistyped code is refused rather than
-silently adopted, and that a Mac keeps the key it had when one is. What has *not* happened is the
-exit criterion: reaching `.ready` needs a server to enrol against, so the last step of this stage
-is blocked on stage 3 and the two must be finished together. Counting this stage done on the
-strength of a rendered screenshot would repeat the mistake this whole document exists to avoid.
+**Where this actually stands.** `SharedLibraryPane` exists, and the recovery code round-trips in
+tests, including that a mistyped code is refused rather than silently adopted and that a Mac
+keeps the key it had when one is.
+
+The first version of this note said the pane rendered "all four states". It did, in a
+screenshot, but the setup screen was unreachable in the running app: with the toggle on, a Mac
+with no credential went straight to `.locked`, and the harness that took the screenshot never
+started the service. This was exactly the mistake the ground rules above describe, made in the
+same document that names it. A review of the merged branch caught it. `.needsSetup` now exists,
+the pane and the service read one function for which screen a Mac is on, and a test starts the
+real service on a fresh Mac and asserts it lands on setup.
+
+The exit criterion has still not been met: reaching `.ready` needs a server to enrol against, so
+this stage finishes together with stage 3.
 
 ## Stage 2 — Make it sync a library rather than a trickle
 
-Today only newly-taken captures publish. Three gaps, all in the client:
+Two gaps remain, both in the client. A third — status and edit publishing — was closed by the
+review fixes: `Library` now posts every committed change and the sync service publishes it
+(F148), which also brought recordings and GIF exports in, since they had never published at all.
 
 - **Seeding (F62).** Enabling writes one `upsert` per live capture into the outbox in a single
   transaction, and the existing push loop drains it. Rows first, blobs newest-first (F65).
-- **Status and edits.** `publishStatus` has no caller: discard, restore, rename, annotate and
-  trim all need to publish. The natural seam is `Library`'s mutation methods, which already run
-  inside `withOperation`.
 - **Thumbnails (F47, F67, F92).** Nothing generates one. Needed at capture time, as a poster
   frame for recordings, plus a backfill pass for everything older, or a second Mac sees
   placeholders rather than a grid.

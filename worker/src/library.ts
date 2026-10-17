@@ -91,6 +91,8 @@ export function ownerPrefix(owner: string): string {
 /** opIDs outlive their ops so a retry after compaction is still recognized (F103). */
 const OPID_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const SWEEP_LEASE_MS = 30 * 60 * 1000;
+/** How long a granted snapshot claim stays valid for its upload. */
+const SNAPSHOT_CLAIM_MS = 60 * 60 * 1000;
 const MAX_PAGE = 500;
 
 const SCHEMA = `
@@ -156,6 +158,36 @@ CREATE TABLE IF NOT EXISTS trash_marks (
 CREATE TABLE IF NOT EXISTS log_meta (
   key   TEXT PRIMARY KEY,
   value INTEGER NOT NULL
+);
+
+-- Device credentials (§3). These lived in the KV owner table, which is eventually consistent:
+-- inside its propagation window a second Mac could read a stale "no device yet", enrol with no
+-- approval, and overwrite the first Mac's entry, and a revoked credential kept working at other
+-- edge locations. Here every check and write is one transaction in one place.
+CREATE TABLE IF NOT EXISTS credentials (
+  deviceID    TEXT PRIMARY KEY,
+  hash        TEXT NOT NULL UNIQUE,
+  name        TEXT NOT NULL,
+  platform    TEXT NOT NULL,
+  createdAt   TEXT NOT NULL,
+  lastSeenAt  TEXT,
+  approved    INTEGER NOT NULL,
+  fingerprint TEXT NOT NULL
+);
+
+-- The library's keyID (F117) and whether it has ever had a device (F114).
+CREATE TABLE IF NOT EXISTS library_settings (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
+-- F102: a snapshot PUT must follow a granted claim, or a device could write a "whole library at
+-- seq N" that the completeness gate never examined.
+CREATE TABLE IF NOT EXISTS snapshot_claims (
+  deviceID TEXT NOT NULL,
+  seq      INTEGER NOT NULL,
+  expires  INTEGER NOT NULL,
+  PRIMARY KEY (deviceID, seq)
 );
 `;
 
@@ -334,7 +366,7 @@ export class LibraryLog extends DurableObject<Env> {
    * it could not parse cannot make that assertion, and if it did, F34's compaction would delete
    * the only copy of the capture it omitted. Version is the part the server can check.
    */
-  async claimSnapshot(supportsV: number, seq: number) {
+  async claimSnapshot(deviceID: string, supportsV: number, seq: number) {
     const required = this.maxVersion();
     if (supportsV < required) {
       return { granted: false as const, reason: `log contains v${required} ops`, required };
@@ -342,7 +374,26 @@ export class LibraryLog extends DurableObject<Env> {
     if (seq !== this.head()) {
       return { granted: false as const, reason: "snapshot must be taken at head", required };
     }
+    this.sql().exec(
+      "INSERT OR REPLACE INTO snapshot_claims (deviceID, seq, expires) VALUES (?, ?, ?)",
+      deviceID, seq, Date.now() + SNAPSHOT_CLAIM_MS,
+    );
     return { granted: true as const, seq, required };
+  }
+
+  /** True once, for the device and seq a claim was granted to. */
+  async consumeSnapshotClaim(deviceID: string, seq: number): Promise<boolean> {
+    let granted = false;
+    this.ctx.storage.transactionSync(() => {
+      this.sql().exec("DELETE FROM snapshot_claims WHERE expires < ?", Date.now());
+      const rows = this.sql()
+        .exec("SELECT 1 FROM snapshot_claims WHERE deviceID = ? AND seq = ?", deviceID, seq)
+        .toArray();
+      if (rows.length === 0) return;
+      this.sql().exec("DELETE FROM snapshot_claims WHERE deviceID = ? AND seq = ?", deviceID, seq);
+      granted = true;
+    });
+    return granted;
   }
 
   async recordSnapshot(seq: number, key: string, bytes: number) {
@@ -402,6 +453,99 @@ export class LibraryLog extends DurableObject<Env> {
    */
   async forgetOpsForTest(through: number) {
     this.sql().exec("DELETE FROM ops WHERE seq <= ?", through);
+  }
+
+  // ---- device credentials (§3, F8) --------------------------------------
+
+  private setting(key: string): string | null {
+    const rows = this.sql()
+      .exec<{ value: string }>("SELECT value FROM library_settings WHERE key = ?", key)
+      .toArray();
+    return rows[0]?.value ?? null;
+  }
+
+  /**
+   * Enrol a device, atomically.
+   *
+   * F5/F113/F114 — silent only for the first device this owner has ever had — and F117 — one key
+   * per library — are a read followed by a write. In KV that pair raced across edge locations;
+   * here it is one transaction on one object, so two Macs enrolling at once cannot both be first.
+   */
+  async enrol(device: {
+    deviceID: string; hash: string; name: string; platform: string;
+    keyID: string; fingerprint: string;
+  }): Promise<{ approved: boolean } | { error: "key-mismatch"; keyID: string }> {
+    let outcome: { approved: boolean } | { error: "key-mismatch"; keyID: string } =
+      { approved: false };
+    this.ctx.storage.transactionSync(() => {
+      const keyID = this.setting("keyID");
+      if (keyID && device.keyID && device.keyID !== keyID) {
+        outcome = { error: "key-mismatch", keyID };
+        return;
+      }
+      const approved = this.setting("hadDevice") !== "1";
+      this.sql().exec(
+        `INSERT OR REPLACE INTO credentials
+           (deviceID, hash, name, platform, createdAt, approved, fingerprint)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        device.deviceID, device.hash, device.name, device.platform,
+        new Date().toISOString(), approved ? 1 : 0, device.fingerprint,
+      );
+      this.sql().exec(
+        "INSERT OR REPLACE INTO library_settings (key, value) VALUES ('hadDevice', '1')");
+      if (!keyID && device.keyID) {
+        this.sql().exec(
+          "INSERT OR REPLACE INTO library_settings (key, value) VALUES ('keyID', ?)", device.keyID);
+      }
+      outcome = { approved };
+    });
+    return outcome;
+  }
+
+  /**
+   * The device a credential hash belongs to, or null.
+   *
+   * A lookup by hash rather than a constant-time scan: the hash is SHA-256 of a 192-bit random
+   * token, so learning anything from lookup timing would need a preimage first.
+   */
+  async verifyDevice(hash: string): Promise<{ deviceID: string; approved: boolean } | null> {
+    const rows = this.sql()
+      .exec<{ deviceID: string; approved: number }>(
+        "SELECT deviceID, approved FROM credentials WHERE hash = ?", hash)
+      .toArray();
+    const found = rows[0];
+    if (!found) return null;
+    this.sql().exec("UPDATE credentials SET lastSeenAt = ? WHERE deviceID = ?",
+                    new Date().toISOString(), found.deviceID);
+    return { deviceID: found.deviceID, approved: found.approved === 1 };
+  }
+
+  async listDevices() {
+    return this.sql()
+      .exec<{ deviceID: string; name: string; platform: string; createdAt: string;
+              lastSeenAt: string | null; approved: number; fingerprint: string }>(
+        `SELECT deviceID, name, platform, createdAt, lastSeenAt, approved, fingerprint
+         FROM credentials ORDER BY createdAt`)
+      .toArray()
+      .map((row) => ({ ...row, approved: row.approved === 1 }));
+  }
+
+  async approveDevice(deviceID: string): Promise<boolean> {
+    const before = this.sql()
+      .exec("SELECT 1 FROM credentials WHERE deviceID = ?", deviceID).toArray().length;
+    if (before === 0) return false;
+    this.sql().exec("UPDATE credentials SET approved = 1 WHERE deviceID = ?", deviceID);
+    return true;
+  }
+
+  /** Immediate: the next request carrying this credential finds nothing to match (F8). */
+  async revokeDevice(deviceID: string): Promise<boolean> {
+    const before = this.sql()
+      .exec("SELECT 1 FROM credentials WHERE deviceID = ?", deviceID).toArray().length;
+    if (before === 0) return false;
+    // `hadDevice` stays set, so revoking the last device does not reopen silent enrolment (F114).
+    this.sql().exec("DELETE FROM credentials WHERE deviceID = ?", deviceID);
+    return true;
   }
 
   /** Test/diagnostic view. Never routed. */

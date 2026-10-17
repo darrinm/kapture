@@ -3,10 +3,13 @@
 // Every route here is gated twice: the owner must be allowlisted (F118) and the caller must hold
 // a device credential (F2, F21). Enrolment is the one exception — it is how a device gets that
 // credential — and it takes the owner credential instead.
+//
+// Device credentials live in the owner's LibraryLog Durable Object, not in the KV owner table.
+// KV is eventually consistent, which let a second Mac enrol with no approval inside the
+// propagation window and let a revoked credential keep working at other edge locations.
 
 import {
-  Device, Env, SECURITY_HEADERS, authorize, authorizeDevice, bearerToken, json, loadOwners,
-  newToken, saveOwners, sha256Hex,
+  Env, SECURITY_HEADERS, authorize, bearerToken, json, newToken, sha256Hex,
 } from "./common";
 import {
   blobKey, libraryEnabled, libraryLogFor, ownerPrefix, snapshotKey, type OpEnvelope,
@@ -40,6 +43,25 @@ async function fingerprint(token: string): Promise<string> {
   return hex.slice(0, 8).toUpperCase().match(/.{1,4}/g)!.join("-");
 }
 
+interface DeviceIdentity { owner: string; deviceID: string; approved: boolean }
+
+/**
+ * The device a bearer credential belongs to (F2), or null.
+ *
+ * A device credential is `<owner>.<secret>`, so the owner's Durable Object can be asked directly
+ * rather than every owner being scanned. Owner names cannot contain a dot (`validOwnerName`), so
+ * the first one separates them. The owner token is deliberately not accepted here: it authorizes
+ * enrolment and the M5 share routes and nothing else.
+ */
+async function authorizeDevice(request: Request, env: Env): Promise<DeviceIdentity | null> {
+  const token = bearerToken(request);
+  const dot = token.indexOf(".");
+  if (dot <= 0) return null;
+  const owner = token.slice(0, dot);
+  const found = await libraryLogFor(env, owner).verifyDevice(await sha256Hex(token));
+  return found ? { owner, ...found } : null;
+}
+
 export async function handleLibrary(
   request: Request, env: Env, url: URL,
 ): Promise<Response | null> {
@@ -60,40 +82,23 @@ export async function handleLibrary(
       return json({ error: "deviceID must be a ULID" }, 400);
     }
 
-    const owners = await loadOwners(env);
-    const record = owners[owner];
-    if (!record) return json({ error: "unauthorized" }, 401);
-    const devices = record.devices ?? {};      // F74: absent means none, not broken
-
-    // F117: the library's key is fixed by the first enrolment. A device with a different key
-    // would write a second, unreadable half of one log.
-    const presentedKeyID = (body?.keyID ?? "").trim();
-    if (record.keyID && presentedKeyID && presentedKeyID !== record.keyID) {
-      return json({ error: "this owner already has a library under a different key",
-                    keyID: record.keyID }, 409);
-    }
-
-    const token = newToken();
+    const token = `${owner}.${newToken()}`;
     const mark = await fingerprint(token);
-    // F5, F113, F114: silent only for the very first device this owner has ever had.
-    const approved = !record.hadDevice;
-    const device: Device = {
+    // F5, F113, F114, F117 are checked and written together, inside the Durable Object.
+    const outcome = await libraryLogFor(env, owner).enrol({
+      deviceID,
       hash: await sha256Hex(token),
       name: (body?.name ?? "Mac").slice(0, 64),
       platform: (body?.platform ?? "macOS").slice(0, 32),
-      createdAt: new Date().toISOString(),
-      approved,
+      keyID: (body?.keyID ?? "").trim(),
       fingerprint: mark,
-    };
-    owners[owner] = {
-      ...record,
-      devices: { ...devices, [deviceID]: device },
-      keyID: record.keyID ?? (presentedKeyID || undefined),
-      hadDevice: true,
-    };
-    await saveOwners(env, owners);
-
-    return json({ deviceID, token, approved, fingerprint: mark }, approved ? 200 : 202);
+    });
+    if ("error" in outcome) {
+      return json({ error: "this owner already has a library under a different key",
+                    keyID: outcome.keyID }, 409);
+    }
+    return json({ deviceID, token, approved: outcome.approved, fingerprint: mark },
+                outcome.approved ? 200 : 202);
   }
 
   // ---- everything below needs a device credential (F2, F21) --------------
@@ -102,44 +107,29 @@ export async function handleLibrary(
   if (!libraryEnabled(env, identity.owner)) return json({ error: "not found" }, 404);
   // F113: the credential is real, the Mac is not approved yet. 403 is what the client reads as
   // "waiting for approval", so no other route may answer 403 for anything else.
-  if (!identity.device.approved) return json({ error: "awaiting approval" }, 403);
+  if (!identity.approved) return json({ error: "awaiting approval" }, 403);
   const { owner, deviceID } = identity;
   const log = libraryLogFor(env, owner);
 
-  // ---- devices -----------------------------------------------------------
+  // ---- devices (§3.3) ----------------------------------------------------
   if (path === "/api/library/devices" && request.method === "GET") {
-    const owners = await loadOwners(env);
-    const devices = owners[owner]?.devices ?? {};
+    const devices = await log.listDevices();
     return json({
-      items: Object.entries(devices).map(([id, device]) => ({
-        deviceID: id, name: device.name, platform: device.platform,
-        createdAt: device.createdAt, lastSeenAt: device.lastSeenAt,
-        approved: device.approved, fingerprint: device.fingerprint,
-        current: id === deviceID,
-      })),
+      items: devices.map((device) => ({ ...device, current: device.deviceID === deviceID })),
     });
   }
 
   const approveMatch = path.match(APPROVE_RE);
   if (approveMatch && request.method === "POST") {
     // F125: an enrolled Mac may approve, as a convenience. F124's dashboard is the mechanism.
-    const owners = await loadOwners(env);
-    const record = owners[owner];
-    const pending = record?.devices?.[approveMatch[1]];
-    if (!record || !pending) return json({ error: "not found" }, 404);
-    record.devices![approveMatch[1]] = { ...pending, approved: true };
-    await saveOwners(env, owners);
-    return noContent();
+    return (await log.approveDevice(approveMatch[1]))
+      ? noContent() : json({ error: "not found" }, 404);
   }
 
   const revokeMatch = path.match(REVOKE_RE);
   if (revokeMatch && request.method === "DELETE") {
-    const owners = await loadOwners(env);
-    const record = owners[owner];
-    if (!record?.devices?.[revokeMatch[1]]) return json({ error: "not found" }, 404);
-    delete record.devices[revokeMatch[1]];
-    await saveOwners(env, owners);       // hadDevice stays true: F114 keeps the gate closed
-    return noContent();
+    return (await log.revokeDevice(revokeMatch[1]))
+      ? noContent() : json({ error: "not found" }, 404);
   }
 
   // ---- pull (F26) --------------------------------------------------------
@@ -174,6 +164,17 @@ export async function handleLibrary(
       ops.push(parsed);
     }
     const outcome = await log.append(owner, ops);
+
+    // F107: an admitted delete removes the capture's bytes, every revision and purpose, and
+    // returns their space. Nothing did this before, so stored usage only ever grew. The DO's
+    // tombstone (F132) already refuses later writes to the capture, so nothing can land between
+    // the admission and this cleanup.
+    const admitted = new Set(outcome.assigned.map((a) => a.opID));
+    for (const op of ops) {
+      if (op.kind === "delete" && admitted.has(op.opID)) {
+        await deleteCaptureBytes(env, owner, op.blindedID);
+      }
+    }
     return json(outcome, outcome.rejected.length > 0 && outcome.assigned.length === 0 ? 409 : 200);
   }
 
@@ -181,7 +182,8 @@ export async function handleLibrary(
   if (path === "/api/library/snapshot" && request.method === "POST") {
     const body = await request.json().catch(() => null) as
       { supportsV?: number; seq?: number } | null;
-    const claim = await log.claimSnapshot(Number(body?.supportsV ?? 0), Number(body?.seq ?? 0));
+    const claim = await log.claimSnapshot(deviceID, Number(body?.supportsV ?? 0),
+                                          Number(body?.seq ?? 0));
     if (!claim.granted) return json(claim, 409);
     return json(claim);
   }
@@ -189,10 +191,15 @@ export async function handleLibrary(
   const snapshotPut = path.match(SNAPSHOT_PUT_RE);
   if (snapshotPut && request.method === "PUT") {
     const seq = Number(snapshotPut[1]);
+    // The completeness gate (F102) is the claim. A PUT that skipped it would publish a "whole
+    // library at seq N" from a device the gate never examined — exactly the client F102 exists
+    // to stop, since compaction then deletes the ops that snapshot left out.
+    if (!(await log.consumeSnapshotClaim(deviceID, seq))) {
+      return json({ error: "no granted snapshot claim for this seq" }, 409);
+    }
     const bytes = await request.arrayBuffer();
     const key = snapshotKey(owner, seq, deviceID);
-    // A snapshot is bytes under `lib/`, so it is charged like any other (F56, F57). Left
-    // unmetered, repeated snapshots are the one write that can grow the bucket without limit.
+    // A snapshot is bytes under `lib/`, so it is charged like any other (F56, F57).
     const quotaError = await quotaFor(env, owner).chargeLibrary(bytes.byteLength);
     if (quotaError) return json({ error: quotaError }, 429);
     await env.BUCKET.put(key, bytes);
@@ -213,111 +220,15 @@ export async function handleLibrary(
     const lease = await log.acquireSweepLease(deviceID);
     if (!lease.granted) return json(lease, 409);
     // F45/F108: both ends of the comparison are the server's, and so is the window. A client
-    // asking for a shorter one would make a capture trashed a minute ago immediately eligible,
-    // which is exactly the client-dated eligibility those rules exist to refuse. A longer
-    // window only delays a delete, so it is allowed.
+    // asking for a shorter one would make a capture trashed a minute ago immediately eligible.
     const asked = Number(url.searchParams.get("windowMs"));
     const window = Number.isFinite(asked) ? Math.max(asked, MIN_TRASH_WINDOW_MS) : MIN_TRASH_WINDOW_MS;
     return json({ ...lease, eligible: await log.sweepEligible(window) });
   }
 
-  // ---- blobs (F19, F22, F99, F100) ---------------------------------------
+  // ---- blobs (§8) --------------------------------------------------------
   const blobMatch = path.match(BLOB_RE);
-  if (blobMatch) {
-    const [, purpose, blinded, revision, writer] = blobMatch;
-    const key = blobKey(owner, purpose, blinded, Number(revision), writer);
-
-    if (request.method === "GET") {
-      const object = await env.BUCKET.get(key);
-      if (!object) return json({ error: "not found" }, 404);
-      return new Response(object.body, {
-        headers: { "cache-control": "public, max-age=31536000, immutable", ...SECURITY_HEADERS },
-      });
-    }
-
-    if (request.method !== "GET" && writer !== deviceID) {
-      return json({ error: "a device writes only its own blobs" }, 403);
-    }
-
-    if (request.method === "PUT") {
-      const body = await request.arrayBuffer();
-
-      // F54, F87: a part of a multipart upload, staged under its own key and joined on
-      // completion. Parts are 32 MB because each one is held in memory by this invocation.
-      const part = url.searchParams.get("part");
-      if (part) {
-        const index = Number(part);
-        if (!Number.isInteger(index) || index < 1 || index > 10_000) {
-          return json({ error: "bad part number" }, 400);
-        }
-        // A staged part is bytes in the bucket like any other. Charging only on completion
-        // leaves an upload that is never completed entirely unmetered, which is the cheapest
-        // way to fill the bucket. The completion credits these back when it joins them.
-        const partQuotaError = await quotaFor(env, owner).chargeLibrary(body.byteLength);
-        if (partQuotaError) return json({ error: partQuotaError }, 429);
-        await env.BUCKET.put(`${key}.part${index}`, body);
-        return json({ key, part: index, bytes: body.byteLength });
-      }
-
-      const existing = await env.BUCKET.head(key);
-      if (existing) {
-        // F99: a PUT whose response was lost looks like a collision to the retrying client, and
-        // F81 would read that as a fork against itself. Identical bytes are a retry, not a
-        // conflict, so answer 200 rather than 409.
-        const digest = await digestOf(body);
-        const stored = existing.customMetadata?.digest;
-        if (stored && stored === digest) return json({ key, bytes: body.byteLength, retry: true });
-        return json({ error: "blob already exists" }, 409);
-      }
-
-      const quotaError = await quotaFor(env, owner).chargeLibrary(body.byteLength);
-      if (quotaError) return json({ error: quotaError }, 429);
-
-      await env.BUCKET.put(key, body, {
-        customMetadata: { digest: await digestOf(body) },
-      });
-      return json({ key, bytes: body.byteLength });
-    }
-
-    if (request.method === "POST" && url.searchParams.has("complete")) {
-      const parts = Number(url.searchParams.get("complete"));
-      if (!Number.isInteger(parts) || parts < 1) return json({ error: "bad part count" }, 400);
-
-      const chunks: Uint8Array[] = [];
-      let total = 0;
-      for (let index = 1; index <= parts; index++) {
-        const staged = await env.BUCKET.get(`${key}.part${index}`);
-        if (!staged) return json({ error: `missing part ${index}` }, 409);
-        const bytes = new Uint8Array(await staged.arrayBuffer());
-        chunks.push(bytes);
-        total += bytes.byteLength;
-      }
-      const quotaError = await quotaFor(env, owner).chargeLibrary(total);
-      if (quotaError) return json({ error: quotaError }, 429);
-
-      const joined = new Uint8Array(total);
-      let offset = 0;
-      for (const chunk of chunks) { joined.set(chunk, offset); offset += chunk.byteLength; }
-      await env.BUCKET.put(key, joined, {
-        customMetadata: { digest: await digestOf(joined) },
-      });
-      for (let index = 1; index <= parts; index++) {
-        await env.BUCKET.delete(`${key}.part${index}`);
-      }
-      // The parts were charged as they were staged and are gone now; the joined object has
-      // taken their place and its own charge above. Give the staging charge back.
-      await quotaFor(env, owner).creditLibrary(total, parts);
-      return json({ key, bytes: total });
-    }
-
-    if (request.method === "DELETE") {
-      const head = await env.BUCKET.head(key);
-      if (!head) return json({ error: "not found" }, 404);
-      await env.BUCKET.delete(key);
-      await quotaFor(env, owner).creditLibrary(head.size);
-      return noContent();
-    }
-  }
+  if (blobMatch) return handleBlob(request, env, url, owner, deviceID, blobMatch);
 
   // ---- storage usage, and the only supported repair for drift (F59, F76) ----
   if (path === "/api/library/usage" && request.method === "GET") {
@@ -330,6 +241,118 @@ export async function handleLibrary(
   return json({ error: "not found" }, 404);
 }
 
+/**
+ * Blob routes (F19, F22, F99, F100, F54, F87), on an already-authenticated device.
+ */
+async function handleBlob(
+  request: Request, env: Env, url: URL, owner: string, deviceID: string,
+  match: RegExpMatchArray,
+): Promise<Response> {
+  const [, purpose, blinded, revision, writer] = match;
+  const key = blobKey(owner, purpose, blinded, Number(revision), writer);
+
+  if (request.method === "GET") {
+    const object = await env.BUCKET.get(key);
+    if (!object) return json({ error: "not found" }, 404);
+    return new Response(object.body, {
+      headers: { "cache-control": "public, max-age=31536000, immutable", ...SECURITY_HEADERS },
+    });
+  }
+
+  if (writer !== deviceID) return json({ error: "a device writes only its own blobs" }, 403);
+
+  // F99: an object already at this device's own key is this device's own earlier upload of this
+  // revision, so a second write is a retry and succeeds. The key names (capture, revision,
+  // writer), a device can write only under its own id, and a revision names one content.
+  // Comparing ciphertext digests could never recognize a retry: F13 seals with a fresh random
+  // nonce, so re-sealing the same pixels never produces the same bytes, and every retry after
+  // a lost response was answered 409 and the capture never reached the log.
+  const existing = await env.BUCKET.head(key);
+
+  if (request.method === "PUT" && !url.searchParams.has("uploadId")) {
+    if (existing) return json({ key, bytes: existing.size, retry: true });
+    const body = await request.arrayBuffer();
+    const quotaError = await quotaFor(env, owner).chargeLibrary(body.byteLength);
+    if (quotaError) return json({ error: quotaError }, 429);
+    await env.BUCKET.put(key, body);
+    return json({ key, bytes: body.byteLength });
+  }
+
+  // ---- multipart (F54, F87) — R2's own, so no part is ever held here ------
+  //
+  // The previous version staged parts as objects and joined them in Worker memory, holding about
+  // twice the file in a 128 MB isolate: no recording over the threshold could ever complete.
+
+  if (request.method === "POST" && url.searchParams.has("uploads")) {
+    if (existing) return json({ key, exists: true });
+    const upload = await env.BUCKET.createMultipartUpload(key);
+    return json({ key, uploadId: upload.uploadId });
+  }
+
+  const uploadId = url.searchParams.get("uploadId");
+  if (uploadId) {
+    const upload = env.BUCKET.resumeMultipartUpload(key, uploadId);
+
+    if (request.method === "PUT") {
+      const partNumber = Number(url.searchParams.get("part"));
+      if (!Number.isInteger(partNumber) || partNumber < 1 || partNumber > 10_000) {
+        return json({ error: "bad part number" }, 400);
+      }
+      const body = await request.arrayBuffer();
+      // Parts occupy storage from the moment they land, so they are charged as they arrive.
+      // An abandoned upload is then already counted; R2 expires incomplete uploads, and
+      // `?reconcile=1` recomputes from what is actually held (F76).
+      const quotaError = await quotaFor(env, owner).chargeLibrary(body.byteLength);
+      if (quotaError) return json({ error: quotaError }, 429);
+      const part = await upload.uploadPart(partNumber, body);
+      return json({ partNumber: part.partNumber, etag: part.etag });
+    }
+
+    if (request.method === "POST" && url.searchParams.has("complete")) {
+      const body = await request.json().catch(() => null) as
+        { parts?: { partNumber: number; etag: string }[] } | null;
+      const parts = body?.parts;
+      if (!Array.isArray(parts) || parts.length === 0) {
+        return json({ error: "parts must be a non-empty array" }, 400);
+      }
+      try {
+        const object = await upload.complete(parts);
+        return json({ key, bytes: object.size });
+      } catch (error) {
+        return json({ error: `could not complete: ${String(error)}` }, 409);
+      }
+    }
+  }
+
+  if (request.method === "DELETE") {
+    if (!existing) return json({ error: "not found" }, 404);
+    await env.BUCKET.delete(key);
+    await quotaFor(env, owner).creditLibrary(existing.size);
+    return noContent();
+  }
+
+  return json({ error: "not found" }, 404);
+}
+
+/** Every stored revision of a capture, in every purpose, and the space it held (F20, F107). */
+async function deleteCaptureBytes(env: Env, owner: string, blindedID: string): Promise<void> {
+  let bytes = 0;
+  let objects = 0;
+  for (const purpose of ["blob", "thumb", "orig"]) {
+    let cursor: string | undefined;
+    do {
+      const listed = await env.BUCKET.list({
+        prefix: `${ownerPrefix(owner)}${purpose}/${blindedID}/`, cursor,
+      });
+      const keys = listed.objects.map((object) => object.key);
+      for (const object of listed.objects) { bytes += object.size; objects += 1; }
+      if (keys.length > 0) await env.BUCKET.delete(keys);
+      cursor = listed.truncated ? listed.cursor : undefined;
+    } while (cursor);
+  }
+  if (objects > 0) await quotaFor(env, owner).creditLibrary(bytes, objects);
+}
+
 function parseEnvelope(entry: unknown, deviceID: string): OpEnvelope | null {
   if (typeof entry !== "object" || entry === null) return null;
   const op = entry as Record<string, unknown>;
@@ -337,6 +360,7 @@ function parseEnvelope(entry: unknown, deviceID: string): OpEnvelope | null {
   const blindedID = typeof op.blindedID === "string" ? op.blindedID : "";
   const kind = op.kind;
   if (!opID || !blindedID) return null;
+  if (!BLINDED_ID_RE.test(blindedID)) return null;
   if (kind !== "upsert" && kind !== "trash" && kind !== "restore" && kind !== "delete") return null;
   if (typeof op.ciphertext !== "string") return null;
 
@@ -351,7 +375,7 @@ function parseEnvelope(entry: unknown, deviceID: string): OpEnvelope | null {
     kind,
     // Every field here is interpolated into an R2 key, so each is validated against the same
     // shapes the routes use rather than cast and trusted. An op is attacker-controlled if a
-    // device credential leaks (§13), and "read-only today" is not a reason to skip it.
+    // device credential leaks (§13).
     requires: requires.flatMap((ref) => {
       const entry = ref as Record<string, unknown>;
       const purpose = entry.purpose;
@@ -367,18 +391,6 @@ function parseEnvelope(entry: unknown, deviceID: string): OpEnvelope | null {
     observed: Number.isFinite(Number(op.observed)) ? Number(op.observed) : 0,
     ciphertext: fromBase64(op.ciphertext),
   };
-}
-
-/**
- * SHA-256 of the bytes themselves.
- *
- * This used to hash `toBase64(body)`, which built a string a third larger than the blob and then
- * re-encoded it to bytes — roughly 240 MB of transient allocation for a 90 MB upload, inside a
- * 128 MB limit. The digest is only ever compared against another digest from this same function.
- */
-export async function digestOf(body: ArrayBuffer | Uint8Array): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", body);
-  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 export function toBase64(buffer: ArrayBuffer | Uint8Array): string {

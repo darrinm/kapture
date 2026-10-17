@@ -251,22 +251,43 @@ public struct HTTPTransport: LibraryTransport {
     public static let multipartThreshold = 90 * 1024 * 1024
     public static let partSize = 32 * 1024 * 1024
 
+    /// R2's own multipart upload, driven through the Worker: start, send parts, complete.
+    ///
+    /// The server used to stage each part as an object and join them in Worker memory on
+    /// completion, which held about twice the file in a 128 MB isolate — no upload over the
+    /// threshold could ever finish. Now each part goes straight to R2 and the Worker never holds
+    /// more than the one in flight.
     func putMultipart(_ data: Data, at locator: BlobLocatorRef) async throws {
+        let path = blobPath(locator)
+
+        let (startBody, startResponse) = try await session.data(
+            for: request(path, method: "POST", query: ["uploads": ""]))
+        try Self.check(startResponse, startBody)
+        struct Started: Decodable { var uploadId: String?; var exists: Bool? }
+        let started = try JSONDecoder().decode(Started.self, from: startBody)
+        // Already uploaded — by an earlier attempt whose response was lost (F99).
+        if started.exists == true { return }
+        guard let uploadId = started.uploadId else { throw SyncFailure("no upload id") }
+
+        struct Part: Codable { var partNumber: Int; var etag: String }
+        var parts: [Part] = []
         var offset = 0
-        var part = 1
         while offset < data.count {
             let end = min(offset + Self.partSize, data.count)
-            var request = self.request(blobPath(locator), method: "PUT",
-                                       query: ["part": String(part)])
-            request.httpBody = data[offset..<end]
-            let (body, response) = try await session.data(for: request)
+            var put = request(path, method: "PUT",
+                              query: ["uploadId": uploadId, "part": String(parts.count + 1)])
+            // Relative to the buffer's own start, so a slice works as well as a fresh buffer.
+            put.httpBody = data[(data.startIndex + offset)..<(data.startIndex + end)]
+            let (body, response) = try await session.data(for: put)
             try Self.check(response, body)
+            parts.append(try JSONDecoder().decode(Part.self, from: body))
             offset = end
-            part += 1
         }
-        var complete = self.request(blobPath(locator), method: "POST",
-                                    query: ["complete": String(part - 1)])
+
+        var complete = request(path, method: "POST",
+                               query: ["uploadId": uploadId, "complete": ""])
         complete.setValue("application/json", forHTTPHeaderField: "content-type")
+        complete.httpBody = try JSONEncoder().encode(["parts": parts])
         let (body, response) = try await session.data(for: complete)
         try Self.check(response, body)
     }

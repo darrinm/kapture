@@ -130,10 +130,18 @@ personal guardrail: it exists to make a runaway sync fail loudly instead of arri
 
 ### 3.1 Owners and devices
 
-- **F1** The owner table gains a device list. `Owner` becomes
-  `{ hash, createdAt, note?, devices: Record<deviceID, Device> }` where
-  `Device = { hash, name, platform, createdAt, lastSeenAt }`. The owner `hash` stays, and keeps
-  authorizing the M5 share routes unchanged.
+- **F1** Device credentials live in the owner's `LibraryLog` Durable Object, one row per device:
+  `{ deviceID, hash, name, platform, createdAt, lastSeenAt, approved, fingerprint }`. The KV owner
+  table is unchanged and keeps authorizing the M5 share routes.
+- **F142** Not in the KV owner table, where an earlier version put them. KV is eventually
+  consistent, and both F113's gate and F8's revocation are a read followed by a write: inside the
+  propagation window a second Mac could read a stale "no device yet", enrol with no approval and
+  overwrite the first Mac's entry, and a revoked credential kept working at other edge
+  locations. In the Durable Object each enrolment is one transaction on one object, and a
+  revocation is refused on the very next request.
+- **F143** A device credential is `<owner>.<secret>`, so the server can ask the owner's object
+  directly rather than scanning every owner. Owner names cannot contain a dot, so the first one
+  separates the parts.
 - **F2** A device credential authorizes the library routes. The owner credential does not. A
   device credential does not authorize the admin dashboard.
 - **F3** `deviceID` is a ULID generated on first enable and stored in the local database, not in
@@ -423,6 +431,13 @@ Decrypted, the payload is:
   once named it. A row must be sufficient on its own to reach its own bytes.
 - **F24** An op is a whole row, not a field delta. Rows are small, the conflict rules (§7) are
   stated per field anyway, and a whole row makes snapshotting trivial.
+- **F150** A pulled capture's derived path is made free in the index and on disk, suffixed the
+  way `Library.uniqueURL` suffixes. Names are second-resolution timestamps, so two Macs capturing
+  in the same second produce the same name; against `relPath`'s UNIQUE constraint the pulled row
+  failed, the page rolled back, and every later pull failed on the same page.
+- **F151** A deletion pulled from the log removes the file, its sidecar, the pre-edit original
+  the sidecar names, and its locators, after the transaction commits. Removing only the rows left
+  every Mac holding files nothing pointed at.
 - **F83** `relPath` is device-local and is never carried in an op. Each Mac has its own root,
   its own shard directories and its own history of filename collisions, so one capture
   legitimately sits at a different path on each. The op carries the capture's `name`; the
@@ -477,15 +492,35 @@ Decrypted, the payload is:
   another Mac would otherwise pull a row pointing at nothing. The check is on the envelope, not
   the payload: the server cannot read the payload's `blobs` map, and a rule stated over
   ciphertext would be unenforceable.
-- **F99** A `PUT /blob` whose key exists is idempotent when the bytes match. The server compares
-  the stored object's ciphertext digest with the one the client presents and answers 200, not
-  409, when they agree. Without this, a PUT whose response was lost looks to the retrying client
-  like a collision, and F81 would read that as a fork against itself.
+- **F147** Uploads are queued durably before they are attempted. A failed upload, or one whose
+  response is lost, stays queued with backoff and is retried on the next sync; leaving the queue
+  and entering the outbox happen in one transaction (F29), so a crash between them cannot drop
+  the capture. An earlier version logged the failure and the capture never reached the log.
+- **F148** Every capture change reaches the log from one place. `Library` posts a change after
+  each operation commits — its journaled file operations, a status, a share link, OCR text — and
+  the sync service publishes it. Publishing from individual call sites reached only new
+  screenshots: recordings, GIF exports, discards, restores, renames and edits never synced, and a
+  trashed capture with no trash op is never swept on any Mac.
+- **F149** A row pulled from the log writes its blob locators locally, and a pulled locator that
+  differs from the one this Mac holds marks the local file stale (`remote`). Without the first, a
+  capture from another Mac has no way to its bytes here and is reported missing; without the
+  second, an edit made on another Mac never reaches this one.
+- **F99** A `PUT /blob` whose key already exists is a retry and succeeds, and the stored object
+  is kept. The key names `(capture, revision, writer)`, a device can write only under its own
+  `deviceID` (403 otherwise), and a revision names one content, so an object already at a
+  device's own key is that device's own upload of that content.
+- **F146** Comparing ciphertext digests, as this requirement first said, could never recognize a
+  retry: F13 seals with a fresh random nonce, so re-sealing the same pixels never produces the
+  same bytes. Every retry after a lost response was answered 409 and the capture never reached
+  the log. F13 and the first F99 contradicted each other; this is the resolution.
 
 ### 6.4 Compaction
 
 - **F33** A client that pulls to `head` and finds more than 10,000 ops since the newest snapshot
   uploads a fresh encrypted snapshot of its full row set at that `seq`.
+- **F152** A snapshot upload must follow a claim granted to the same device for the same seq,
+  and consumes it. Without the binding a device could skip the claim and publish a "whole library
+  at seq N" that F102's gate never examined.
 - **F102** Only a complete client may snapshot. A device that skipped any op (F78) or that holds
   a non-empty outbox must not publish one, and the server refuses a snapshot from a device whose
   declared payload version is below the highest `v` in the log (F97). An incomplete snapshot
@@ -652,19 +687,29 @@ delete bytes the other just restored.
 
 ### 8.3 Local cache
 
-- **F51** Settings › Library sets a cache ceiling, default 20 GB, with "keep everything" as an
-  option.
+- **F51** Settings › Library sets a cache ceiling. The default is "keep everything", and the
+  setting and the pane read one constant for it.
+- **F144** "Keep everything" is the default because eviction is the only mechanism that makes
+  local data depend on the server. An earlier version showed "Everything" in the pane while the
+  setting fell back to 20 GB, so a user who never touched the picker got eviction under a screen
+  promising no local file would be removed.
 - **F52** Eviction is least-recently-opened. It never evicts a capture whose bytes the server has
   not acknowledged (F30), or one referenced by an unsynced `.originals/` entry.
 - **F53** A capture created on this Mac is pinned local until its blob upload is acknowledged.
 
 ### 8.4 Large files
 
-- **F54** Above 90 MB the client uses R2 multipart upload through the Worker, in parts sized by
-  F87. `MAX_SINGLE_UPLOAD` (`worker/src/index.ts:21`) stays as it is for the M5 share route.
+- **F54** Above 90 MB the client uses R2's own multipart API through the Worker — start, one
+  request per part, complete with the parts' etags — in parts sized by F87.
+  `MAX_SINGLE_UPLOAD` (`worker/src/index.ts:21`) stays as it is for the M5 share route.
 - **F87** Parts are 32 MB. Each part passes through a Worker invocation that holds it in memory,
   and a Worker has a 128 MB ceiling; a larger part plus request and response overhead leaves too
   little headroom to rely on.
+- **F145** The Worker never holds more than the part in flight. An earlier version staged parts
+  as objects and joined them in Worker memory on completion, about twice the file in a 128 MB
+  isolate, so no upload over the threshold could ever finish. Parts are charged to the quota as
+  they arrive, because they occupy storage from then on; R2 expires an upload that is never
+  completed, and `?reconcile=1` (F76) recomputes from what is held.
 - **F88** Uploading straight to R2 with presigned URLs was considered and rejected for v1. It
   takes the Worker out of the byte path, but it puts time-scoped S3-compatible credentials on the
   client and moves the transfer off the path that charges quota (F56). §14 Q7 keeps it as the
@@ -1078,6 +1123,13 @@ text in a spec. It found seven more, and they are recorded for the same reason:
     bytes (F132).
 12. Compaction could erase the trash timestamp F108 dates eligibility from, leaving a capture
     permanently unsweepable (F134).
+
+A third pass reviewed the merged branch and found sixteen more. They are recorded as
+F142–F152, with four earlier requirements rewritten (F1, F51, F54, F99) because what they said
+was the defect. Two of the sixteen passed every test because a helper did what production
+skipped: the round-trip test inserted the blob locators that `upsert` never wrote, and a settings
+screenshot showed a setup screen the real state machine could not reach. Each fix now has a test
+that goes through the entry point the app uses.
 
 Findings 6, 8 and 10 are all D1's shape: a value the reader needs, placed where the reader
 cannot reach it. That is the standing cost of the encryption decision (§14 Q9), and it is the

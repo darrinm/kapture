@@ -2,7 +2,6 @@
 import AppKit
 import ScreenCaptureKit
 import KaptureCore
-import KaptureSync
 import KaptureCapture
 import KaptureIntelligence
 
@@ -156,11 +155,6 @@ final class CaptureCoordinator {
                     Sounds.play("Tink")
                     // OCR after the debounce — a burst-triage discard costs no work
                     Task { await IngestQueue.shared.enqueue(record.id) }
-                    // And publish it to the shared library, which is a no-op while that is off.
-                    Task {
-                        await LibraryService.shared.publish(
-                            captureID: record.id, file: url, revision: record.contentRevision)
-                    }
                 }
             } catch { Log.store.error("store failed: \(error)") }
         }

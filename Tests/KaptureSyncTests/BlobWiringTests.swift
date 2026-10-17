@@ -35,19 +35,16 @@ final class BlobWiringTests: XCTestCase {
         try? FileManager.default.removeItem(at: directory)
     }
 
-    /// Apply a row as a pull would: the row plus the locators it names (F23, F129).
+    /// Apply a row exactly as a pull does, through `SyncStore.apply`.
+    ///
+    /// This helper used to insert `blob_cache` by hand after `upsert` — the step `upsert`
+    /// itself skipped — so the round trip passed while a capture really pulled from another Mac
+    /// had no locator and could never be fetched. It now does nothing production does not.
     static func receive(_ row: SyncedRow, into store: SyncStore,
                         db: KaptureCore.Database) throws {
-        try db.queue.write { d in
-            try store.upsert(row, in: d, acknowledged: true)
-            for (purpose, locator) in row.blobs {
-                try d.execute(sql: """
-                    INSERT INTO blob_cache (captureId, purpose, revision, writer, owningCapture, bytes)
-                    VALUES (?, ?, ?, ?, ?, 0)
-                    """, arguments: [row.captureID, purpose.rawValue, locator.revision,
-                                     locator.writer, locator.capture])
-            }
-        }
+        var result = MergeResult()
+        result.upserts = [row]
+        try store.apply(result, cursor: nil, deviceID: "01JBBBBBBBBBBBBBBBBBBBBBBB")
     }
 
     func insert(_ id: String) throws -> URL {

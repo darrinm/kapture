@@ -179,6 +179,19 @@ public final class Database: Sendable {
                 $0.add(column: "lastSnapshotSeq", .integer).notNull().defaults(to: 0)
             }
         }
+        // Captures whose bytes are waiting to upload. An upload that fails, or whose response is
+        // lost, used to be logged and forgotten, so the capture never reached the log. Now it
+        // stays here and is retried on the next sync, with the same backoff columns the outbox
+        // and the journal carry.
+        migrator.registerMigration("v9-upload-queue") { db in
+            try db.create(table: "upload_queue") { t in
+                t.column("captureId", .text).primaryKey()
+                t.column("queuedAt", .datetime).notNull()
+                t.column("attempts", .integer).notNull().defaults(to: 0)
+                t.column("nextAttemptAt", .datetime)
+                t.column("lastError", .text)
+            }
+        }
         try migrator.migrate(queue)
     }
 }
