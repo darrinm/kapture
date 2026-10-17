@@ -6,8 +6,10 @@ import GRDB
 
 extension Library {
     /// Files the shell is actively using — a drag in flight, an open save panel, a running
-    /// upload. An AI rename must not move a file out from under one of those (the pasteboard
-    /// holds a concrete URL), so applyName refuses and the ingest job retries later.
+    /// upload. An AI rename must not move a file out from under one of those (the drag
+    /// pasteboard holds a concrete URL), so applyName refuses and the ingest job retries later.
+    /// A copy to the general pasteboard is not registered here: the rename goes ahead and the
+    /// clipboard follows it via `Library.fileDidMove`.
     private static let inUseLock = NSLock()
     nonisolated(unsafe) private static var inUseIDs: Set<String> = []
 

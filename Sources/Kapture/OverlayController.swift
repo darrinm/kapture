@@ -444,10 +444,13 @@ final class ChipView: NSView {
 
 final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
     let record: CaptureRecord
-    let fileURL: URL
+    /// Follows the file across library moves: the card can outlive the AI rename, and a Copy or
+    /// Save As after it must carry a path that exists.
+    private(set) var fileURL: URL
     let image: CGImage   // decoded pixels — reused for clipboard/drag instead of re-reading disk
     let onClose: (OverlayPanel) -> Void
     var placed = false
+    private var moveObserver: FileMoveObserver?
     /// Where the stack says this card belongs. A swipe springs back to *this*, never to wherever
     /// the card happened to be when the gesture started — otherwise an interrupted swipe leaves
     /// the card displaced and the next one starts from the new spot, walking it across the screen.
@@ -476,6 +479,9 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
         level = .statusBar
         hasShadow = true
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        moveObserver = FileMoveObserver { [weak self] move in
+            if let self, move.moved(self.fileURL) { self.fileURL = move.to }
+        }
         // The card lives inside a container rather than being the content view itself. A swipe
         // moves the card within the window instead of moving the window: a window that slides
         // out from under the pointer stops receiving the gesture's scroll events, which left the

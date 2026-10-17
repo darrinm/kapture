@@ -47,9 +47,12 @@ final class PinController {
 }
 
 final class PinPanel: NSPanel {
-    let fileURL: URL
+    /// Follows the file across library moves, so a Copy or drag after the AI rename still
+    /// carries a path that exists.
+    private(set) var fileURL: URL
     let onClose: (PinPanel) -> Void
     var locked = false
+    private var moveObserver: FileMoveObserver?
 
     init(fileURL: URL, image: NSImage, onClose: @escaping (PinPanel) -> Void) {
         self.fileURL = fileURL; self.onClose = onClose
@@ -69,6 +72,9 @@ final class PinPanel: NSPanel {
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         contentAspectRatio = size
         contentView = PinView(panel: self, image: image)
+        moveObserver = FileMoveObserver { [weak self] move in
+            if let self, move.moved(self.fileURL) { self.fileURL = move.to }
+        }
         if let screen = NSScreen.main {
             setFrameOrigin(NSPoint(x: screen.visibleFrame.maxX - size.width - 24,
                                    y: screen.visibleFrame.maxY - size.height - 24))
