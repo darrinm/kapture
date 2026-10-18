@@ -438,8 +438,20 @@ final class LibraryGridView: NSView {
         return cache
     }()
 
+    /// The content revision is in the key as well as `fastID`: a capture pulled from another Mac
+    /// has no `fastID` here, and without the revision an edit made there would keep showing
+    /// the old cached thumbnail.
     private static func thumbKey(_ record: CaptureRecord) -> String {
-        "\(record.id):\(record.fastID)"
+        "\(record.id):\(record.fastID):\(record.contentRevision)"
+    }
+
+    /// What to draw a capture from. Its own file when it is here; otherwise the thumbnail synced
+    /// from the Mac that made it (F47), so the grid is complete before any bytes are fetched.
+    private func thumbnailSource(_ record: CaptureRecord) -> URL {
+        let own = library.url(for: record)
+        guard record.blobState != "local" else { return own }
+        let synced = LibraryService.thumbnailURL(for: record.id)
+        return FileManager.default.fileExists(atPath: synced.path) ? synced : own
     }
 
     init(library: Library) {
@@ -684,7 +696,7 @@ final class LibraryGridView: NSView {
         thumbTask?.cancel()
 
         let jobs = order.map { (index: $0, key: Self.thumbKey(items[$0].record),
-                                url: library.url(for: items[$0].record)) }
+                                url: thumbnailSource(items[$0].record)) }
         let size = CGSize(width: 480, height: 480)
         let scale = backingScale
         let limit = thumbsInFlight

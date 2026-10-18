@@ -192,6 +192,17 @@ public final class Database: Sendable {
                 t.column("lastError", .text)
             }
         }
+        // Seeding (shared-library §11.1). A priority so a seed of thousands of old captures
+        // never queues a new screenshot behind it, and the moment this Mac's existing library
+        // was handed to the log, so seeding runs once rather than on every launch.
+        migrator.registerMigration("v10-seeding") { db in
+            try db.alter(table: "upload_queue") {
+                $0.add(column: "priority", .integer).notNull().defaults(to: 0)
+            }
+            try db.alter(table: "sync_state") {
+                $0.add(column: "seededAt", .datetime)
+            }
+        }
         try migrator.migrate(queue)
     }
 }

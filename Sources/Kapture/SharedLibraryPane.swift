@@ -24,6 +24,8 @@ final class SharedLibraryModel: ObservableObject {
     /// Shown once, at creation, and re-displayable afterwards on a Mac that holds the key.
     @Published var recoveryCode: String?
     @Published var fingerprint: String?
+    /// Local captures the library has never seen, waiting for F72's confirmation.
+    @Published var pendingSeed = 0
 
     var hasKey: Bool { LibraryService.hasKey }
     var isEnrolled: Bool { LibraryService.isEnrolled }
@@ -32,6 +34,15 @@ final class SharedLibraryModel: ObservableObject {
         state = await LibraryService.shared.currentState()
         guard state == .ready else { return }
         devices = (try? await LibraryService.shared.devices()) ?? []
+        pendingSeed = LibrarySeed.isConfirmed ? 0 : await LibraryService.shared.pendingSeedCount()
+    }
+
+    /// F72: the person agreed to add this Mac's captures to the shared library.
+    func addLocalCaptures() async {
+        busy = true
+        await LibraryService.shared.confirmSeed()
+        busy = false
+        await refresh()
     }
 
     /// Create the library here and enrol this Mac as its first device.
@@ -223,6 +234,22 @@ struct SharedLibraryPane: View {
     // MARK: - Running
 
     @ViewBuilder private var readySection: some View {
+        if model.pendingSeed > 0 {
+            Section {
+                Text("This Mac has \(model.pendingSeed) capture\(model.pendingSeed == 1 ? "" : "s") "
+                     + "that \(model.pendingSeed == 1 ? "isn't" : "aren't") in the shared library yet.")
+                Button("Add them to the library") { Task { await model.addLocalCaptures() } }
+                    .disabled(model.busy)
+            } header: {
+                Text("This Mac's captures")
+            } footer: {
+                // F72: adding thousands of captures to a shared library is not obviously what
+                // turning on a toggle meant, so nothing is uploaded until this is pressed.
+                Text("Nothing from this Mac is uploaded until you choose to add it. Captures you "
+                     + "take from now on are added as you take them.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
         Section {
             LabeledContent("Name") { Text(deviceName).foregroundStyle(.secondary) }
             Picker("Keep on this Mac", selection: $cacheGB) {

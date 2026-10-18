@@ -69,18 +69,27 @@ this stage finishes together with stage 3.
 
 ## Stage 2 — Make it sync a library rather than a trickle
 
-Two gaps remain, both in the client. A third — status and edit publishing — was closed by the
-review fixes: `Library` now posts every committed change and the sync service publishes it
-(F148), which also brought recordings and GIF exports in, since they had never published at all.
+**Status: built and tested against fakes.** Status and edit publishing was closed by the review
+fixes (F148). Seeding and thumbnails are now in the client:
 
-- **Seeding (F62).** Enabling writes one `upsert` per live capture into the outbox in a single
-  transaction, and the existing push loop drains it. Rows first, blobs newest-first (F65).
-- **Thumbnails (F47, F67, F92).** Nothing generates one. Needed at capture time, as a poster
-  frame for recordings, plus a backfill pass for everything older, or a second Mac sees
-  placeholders rather than a grid.
+- **Seeding (F62–F66, F72, F73).** `SyncStore.seed` enqueues one op per live capture (trashed
+  captures as `trash`) and queues its bytes at priority 1, in one transaction. A creating Mac
+  seeds on its first sync. A joining Mac with local captures shows the count in Settings and
+  seeds when the person presses "Add them to the library". A Mac with no local captures marks
+  itself seeded without asking.
+- **Thumbnails (F47, F67).** `Thumbnailer` makes a 512px JPEG, using the frame at one second for
+  recordings. The upload drain uploads it after the bytes, so new captures and seeded ones take
+  the same path. Each sync fetches missing thumbnails, and the grid draws a capture with no
+  local file from its synced thumbnail.
+
+Tests: `SeedingAndThumbnailTests.swift` (11 tests) runs seeding, gating, upload order, thumbnail
+upload and thumbnail fetch through `LibraryService` and `SyncStore`. The recording test uses a
+Motion JPEG movie, because the hardware H.264 encoder fails after a few frames in a
+command-line test process.
 
 *Exit:* enable on a Mac with an existing library; every capture appears in the outbox, drains,
-and `/api/library/usage` reports bytes in the right order of magnitude.
+and `/api/library/usage` reports bytes in the right order of magnitude. This needs the deployed
+Worker, so it is checked in stage 4.
 
 ## Stage 3 — Deploy the Worker
 

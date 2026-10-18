@@ -36,12 +36,7 @@ public struct BlobStore: Sendable {
         self.thumbnailDirectory = thumbnailDirectory
     }
 
-    // MARK: - Thumbnails (F47)
-
-    /// Long edge 512, JPEG 0.7, target under 60 KB. Ten thousand captures is about 600 MB on
-    /// every Mac, which is what makes a complete grid affordable everywhere.
-    public static let thumbnailMaxEdge = 512
-    public static let thumbnailQuality = 0.7
+    // MARK: - Thumbnails (F47; `Thumbnailer` makes them)
 
     public func thumbnailURL(for captureID: String) -> URL {
         thumbnailDirectory.appendingPathComponent("\(captureID).jpg")
@@ -166,6 +161,55 @@ public struct BlobStore: Sendable {
         try await transport.putBlob(sealed, at: locator)
         try recordLocator(locator, for: captureID, bytes: plaintext.count)
         return locator
+    }
+
+    /// Seal and upload a thumbnail, record its locator, and keep it here too.
+    ///
+    /// Keyed by the capture's own revision, like the full-size bytes, so an edit gets a fresh
+    /// thumbnail rather than the old one under a new revision's row.
+    @discardableResult
+    public func uploadThumbnail(_ jpeg: Data, for captureID: String, revision: Int64,
+                                writer: String, using transport: any LibraryTransport) async throws
+        -> BlobLocatorRef {
+        let capture = crypto.blind(captureID)
+        let locator = BlobLocatorRef(purpose: .thumb, revision: revision,
+                                     writer: writer, capture: capture)
+        let sealed = try crypto.seal(
+            jpeg, scope: .blob(purpose: .thumb, capture: capture, revision: revision),
+            writer: writer)
+        try await transport.putBlob(sealed, at: locator)
+        try recordLocator(locator, for: captureID, bytes: jpeg.count)
+        try writeThumbnail(jpeg, for: captureID)
+        return locator
+    }
+
+    /// Fetch one capture's thumbnail into the thumbnail directory (F47: every Mac holds every
+    /// thumbnail, so the grid is complete without the full-size bytes).
+    public func fetchThumbnail(_ captureID: String, using transport: any LibraryTransport)
+        async throws {
+        guard let locator = try locator(for: captureID, purpose: .thumb) else { return }
+        let ciphertext = try await transport.getBlob(locator)
+        let jpeg = try crypto.open(
+            ciphertext,
+            scope: .blob(purpose: .thumb, capture: locator.capture, revision: locator.revision),
+            writer: locator.writer)
+        try writeThumbnail(jpeg, for: captureID)
+    }
+
+    /// Captures whose rows name a thumbnail this Mac does not have yet, newest first.
+    public func missingThumbnails(limit: Int) throws -> [String] {
+        let named = try db.queue.read { d in
+            try String.fetchAll(d, sql: """
+                SELECT b.captureId FROM blob_cache b JOIN captures c ON c.id = b.captureId
+                WHERE b.purpose = 'thumb' ORDER BY c.createdAt DESC
+                """)
+        }
+        var missing: [String] = []
+        for id in named where !hasThumbnail(id) {
+            missing.append(id)
+            if missing.count == limit { break }
+        }
+        return missing
     }
 
     // MARK: - Eviction (F51, F52, F53)

@@ -671,9 +671,14 @@ delete bytes the other just restored.
 
 ### 8.1 Eager
 
-- **F47** A thumbnail is generated at capture time — long edge 512px, JPEG quality 0.7, target
-  under 60 KB — encrypted and uploaded with the op. A 10,000-capture library is therefore about
-  600 MB of thumbnails on every Mac, which is acceptable.
+- **F47** A thumbnail is generated in the upload drain (F147), immediately after the capture's
+  bytes upload: long edge 512px, JPEG quality 0.7, target under 60 KB. It is encrypted, uploaded
+  under the capture's content revision like the bytes, and named in the row that
+  `completeUpload` enqueues. A recording's thumbnail is the frame at one second, or the first
+  frame of a recording shorter than that. A file that cannot be decoded syncs without a
+  thumbnail. After each successful sync every Mac fetches the thumbnails its rows name and it
+  lacks, newest first, at most 500 per pass. A 10,000-capture library is therefore about 600 MB
+  of thumbnails on every Mac, which is acceptable.
 
 ### 8.2 On demand
 
@@ -821,28 +826,33 @@ already holds a library and a deployment that already serves M5.
 
 ### 11.1 Seeding the log
 
-- **F62** Seeding is an ordinary outbox fill, not a second protocol. Enabling the library writes
-  one `upsert` op per live capture into `sync_outbox` in a single transaction, and the push loop
-  (F30) drains it. There is no separate endpoint and no separate failure mode.
+- **F62** Seeding is an ordinary outbox fill, not a second protocol. The first sync after the
+  library reaches `ready` and F72 is satisfied writes one op per live capture into `sync_outbox`,
+  queues each capture's bytes in `upload_queue`, and sets `sync_state.seededAt`, all in a single
+  transaction. The push loop (F30) and the upload drain (F147) process them. There is no separate
+  endpoint and no separate failure mode.
 - **F63** Seeding is resumable because the outbox is durable. An interrupted seed continues on
   the next launch, and F31's `opID` uniqueness means a row enqueued twice is stored once.
 - **F64** Trashed captures seed with their `trashedAt`, so the sweep (F45) sees a complete
   picture. Captures in `sweeping` do not seed: F40 keeps that state local to the device.
 - **F65** Rows first, blobs newest-first. Metadata for 10,000 captures is a few megabytes and
   goes up in minutes; blobs take hours, and the captures wanted on the second Mac are the recent
-  ones.
+  ones. Seeded uploads are queued at priority 1 and live changes at priority 0, so a capture
+  taken during a seed uploads before the seed's backlog. Within a priority the newest capture
+  uploads first.
 - **F66** A seed that exhausts quota (F58) stops and leaves the library coherent rather than
   truncated. F32 means an op names only blob revisions the server already holds, so the other Mac
   sees a row with no blob and a placeholder, never a row pointing at nothing.
 
 ### 11.2 Thumbnail backfill
 
-- **F67** Every capture made before M6 has no thumbnail, because F47 generates one at capture
-  time. Backfill runs through the existing ingest queue at the lowest priority, newest-first, and
-  does not block seeding.
-- **F68** A row may be pushed before its thumbnail exists. Its `blobs` map (F23) omits `thumb`
-  until the thumbnail uploads, at which point the row is re-pushed as an `upsert` with
-  `lamport + 1`. A seeded library is searchable immediately and gains thumbnails over the
+- **F67** Every capture made before M6 has no synced thumbnail. Backfill needs no separate pass:
+  a seeded capture's upload item generates and uploads its thumbnail in the same drain as its
+  bytes (F47), at seed priority, newest first (F65). It does not block seeding, because the
+  seed's rows are enqueued before any bytes move.
+- **F68** A seeded row is pushed before its bytes and thumbnail exist on the server. Its `blobs`
+  map (F23) omits them until the upload drain completes, at which point the row is re-pushed as
+  an `upsert` with `lamport + 1` naming both. A seeded library is searchable immediately and gains thumbnails over the
   following hours.
 - **F69** The cost is one extra op per pre-M6 capture. Compaction (F33) absorbs it.
 
@@ -880,6 +890,9 @@ empty-client bootstrap of F27.
 - **F72** A merge is confirmed before it happens. Settings states how many local captures are
   about to be added to the library, and nothing is pushed until the person agrees. Adding 4,000
   captures to a shared library is not obviously what someone enabling a checkbox intended.
+  Creating a library counts as agreement, so only a joining Mac asks. The answer is stored per
+  Mac (`librarySeedConfirmed`). Captures taken after joining publish as they are taken whatever
+  the answer, because they are not part of the merge.
 - **F73** An empty Mac joining a non-empty log is the F27 bootstrap. It is not a merge and needs
   no confirmation.
 

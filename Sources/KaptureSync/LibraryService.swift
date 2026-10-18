@@ -53,6 +53,20 @@ public enum LibraryApproval {
     }
 }
 
+/// Whether this Mac may hand its existing library to the log (F72).
+///
+/// A Mac creating the library is choosing to sync it, so creation confirms. A Mac joining one
+/// is not obviously agreeing to add four thousand captures to it, so it asks first. A Mac with
+/// nothing local to add needs no confirmation at all (F73).
+public enum LibrarySeed {
+    static let key = "librarySeedConfirmed"
+
+    public static var isConfirmed: Bool {
+        get { UserDefaults.standard.bool(forKey: key) }
+        set { UserDefaults.standard.set(newValue, forKey: key) }
+    }
+}
+
 public actor LibraryService {
     public static let shared = LibraryService()
 
@@ -156,6 +170,8 @@ public actor LibraryService {
                                      deviceName: String) async throws -> (EnrolmentResult, String) {
         if existingKey() == nil { _ = createKey() }
         let result = try await enrol(ownerToken: ownerToken, deviceName: deviceName)
+        // Creating the library is the decision to sync this Mac's captures into it.
+        LibrarySeed.isConfirmed = true
         guard let code = recoveryCode() else { throw SyncFailure("the key could not be read back") }
         return (result, code)
     }
@@ -254,6 +270,11 @@ public actor LibraryService {
         }
     }
 
+    /// The synced thumbnail for a capture, for a capture whose own file is not on this Mac.
+    public static func thumbnailURL(for captureID: String) -> URL {
+        thumbnailDirectory().appendingPathComponent("\(captureID).jpg")
+    }
+
     /// Derived data lives beside the index, not in the user's folder of real files.
     static func thumbnailDirectory() -> URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory,
@@ -330,6 +351,16 @@ public actor LibraryService {
                 if FileManager.default.fileExists(atPath: file.path) {
                     _ = try await blobs.upload(captureID, from: file, revision: content.revision,
                                                writer: identity.deviceID, using: transport)
+                    // In the same drain as the bytes, so a new capture and the backfill of one
+                    // made before sync existed take one path (F67). A file that will not render
+                    // syncs without a thumbnail; a thumbnail that will not upload retries with
+                    // the rest of the item, and the bytes' second PUT is a no-op (F99).
+                    if let jpeg = await Thumbnailer.jpeg(for: file, kind: content.kind) {
+                        try await blobs.uploadThumbnail(jpeg, for: captureID,
+                                                        revision: content.revision,
+                                                        writer: identity.deviceID,
+                                                        using: transport)
+                    }
                 }
                 try store.completeUpload(captureID, observed: identity.cursor,
                                          deviceID: identity.deviceID)
@@ -386,10 +417,59 @@ public actor LibraryService {
         }
     }
 
+    // MARK: - Seeding (§11.1)
+
+    /// How many local captures seeding would add, for F72's confirmation. Zero once seeded.
+    public func pendingSeedCount() -> Int {
+        guard let store, (try? store.isSeeded()) == false else { return 0 }
+        return (try? store.seedCandidateCount()) ?? 0
+    }
+
+    /// The person agreed to add this Mac's captures to the library (F72).
+    public func confirmSeed() async {
+        LibrarySeed.isConfirmed = true
+        await syncNow()
+    }
+
+    /// Hand this Mac's existing library to the log, once, if it may.
+    func seedIfNeeded() {
+        guard state == .ready, let store, let identity = try? store.identity(),
+              (try? store.isSeeded()) == false else { return }
+        do {
+            // F73: nothing local to add is not a merge, and needs no confirmation.
+            if try store.seedCandidateCount() == 0 {
+                try store.markSeeded()
+                return
+            }
+            guard LibrarySeed.isConfirmed else { return }
+            let seeded = try store.seed(deviceID: identity.deviceID, observed: identity.cursor)
+            Log.store.info("library seeded \(seeded) captures")
+        } catch {
+            lastError = String(describing: error)
+            Log.store.error("library seed failed: \(error)")
+        }
+    }
+
+    /// Fetch thumbnails this Mac lacks, newest first and bounded per pass so one sync never
+    /// runs unboundedly long on a ten-thousand capture bootstrap.
+    func fetchThumbnails(limit: Int = 500) async {
+        guard state == .ready, let blobs, let transport else { return }
+        for captureID in (try? blobs.missingThumbnails(limit: limit)) ?? [] {
+            do {
+                try await blobs.fetchThumbnail(captureID, using: transport)
+            } catch {
+                Log.store.error("library thumbnail fetch failed: \(error)")
+            }
+        }
+    }
+
     @discardableResult
     public func syncNow() async -> SyncSummary? {
         guard let engine else { return nil }
-        if state == .ready { await drainUploads() }
+        if state == .ready {
+            seedIfNeeded()
+            await drainUploads()
+        }
         do {
             let summary = try await engine.syncOnce()
             lastSync = Date()
@@ -398,6 +478,7 @@ public actor LibraryService {
             // only way back to `.ready` from `.awaitingApproval`.
             LibraryApproval.isApproved = true
             state = .ready
+            await fetchThumbnails()
             return summary
         } catch let failure as SyncFailure {
             lastError = failure.description

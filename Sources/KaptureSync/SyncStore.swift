@@ -332,20 +332,25 @@ public struct SyncStore: Sendable {
     public func queueUpload(_ captureID: String) throws {
         try db.queue.write { d in
             try d.execute(sql: """
-                INSERT INTO upload_queue (captureId, queuedAt, attempts, nextAttemptAt, lastError)
-                VALUES (?, ?, 0, NULL, NULL)
+                INSERT INTO upload_queue (captureId, queuedAt, attempts, nextAttemptAt, lastError, priority)
+                VALUES (?, ?, 0, NULL, NULL, 0)
                 ON CONFLICT(captureId) DO UPDATE SET
-                  queuedAt = excluded.queuedAt, attempts = 0, nextAttemptAt = NULL, lastError = NULL
+                  queuedAt = excluded.queuedAt, attempts = 0, nextAttemptAt = NULL, lastError = NULL,
+                  priority = 0
                 """, arguments: [captureID, Date()])
         }
     }
 
+    /// Live changes before seeded ones, and within each the newest capture first (F65): the
+    /// captures someone wants on a second Mac are the recent ones, and a new screenshot must
+    /// not wait behind a seed of ten thousand old ones.
     public func dueUploads() throws -> [String] {
         try db.queue.read { d in
             try String.fetchAll(d, sql: """
-                SELECT captureId FROM upload_queue
-                WHERE nextAttemptAt IS NULL OR nextAttemptAt <= ?
-                ORDER BY queuedAt
+                SELECT u.captureId FROM upload_queue u
+                LEFT JOIN captures c ON c.id = u.captureId
+                WHERE u.nextAttemptAt IS NULL OR u.nextAttemptAt <= ?
+                ORDER BY u.priority ASC, c.createdAt DESC
                 """, arguments: [Date()])
         }
     }
@@ -356,10 +361,11 @@ public struct SyncStore: Sendable {
 
     /// The file and revision to upload *now*: an edit since the capture was queued replaces
     /// both, and uploading the queued ones would push a row naming bytes that no longer match.
-    public func currentContent(of captureID: String) throws -> (relPath: String, revision: Int64)? {
+    public func currentContent(of captureID: String) throws
+        -> (relPath: String, revision: Int64, kind: CaptureKind)? {
         try db.queue.read { d in
             guard let record = try CaptureRecord.fetchOne(d, key: captureID) else { return nil }
-            return (record.relPath, record.contentRevision)
+            return (record.relPath, record.contentRevision, record.kind)
         }
     }
 
@@ -396,6 +402,68 @@ public struct SyncStore: Sendable {
     public func dropUpload(_ captureID: String) throws {
         try db.queue.write { d in
             try d.execute(sql: "DELETE FROM upload_queue WHERE captureId = ?", arguments: [captureID])
+        }
+    }
+
+    // MARK: - Seeding (§11.1, F62-F66, F70, F72)
+
+    /// Captures this Mac holds that the log has never seen: not acknowledged, not already
+    /// queued either way, and not mid-sweep (F40 keeps `sweeping` local).
+    private static let seedCandidatesSQL = """
+        SELECT id FROM captures
+        WHERE acknowledged = 0 AND status != 'sweeping'
+          AND id NOT IN (SELECT captureId FROM sync_outbox)
+          AND id NOT IN (SELECT captureId FROM upload_queue)
+        """
+
+    public func isSeeded() throws -> Bool {
+        try db.queue.read { d in
+            try Row.fetchOne(d, sql: "SELECT seededAt FROM sync_state WHERE id = 1")?["seededAt"]
+                as Date? != nil
+        }
+    }
+
+    /// How many local captures seeding would add — what F72's confirmation states.
+    public func seedCandidateCount() throws -> Int {
+        try db.queue.read { d in
+            try Int.fetchOne(d, sql: "SELECT COUNT(*) FROM (\(Self.seedCandidatesSQL))") ?? 0
+        }
+    }
+
+    /// Hand this Mac's existing library to the log, in one transaction (F62).
+    ///
+    /// Rows first and bytes after (F65): every candidate's row is queued now, carrying its status —
+    /// a trashed capture as a trash op, so the sweep sees it (F64) — and its bytes are queued at
+    /// seed priority for the upload drain, which re-pushes each row with its locators once the
+    /// bytes land (F68). One transaction makes it all-or-nothing, so an interrupted seed simply
+    /// runs again on the next launch (F63). Returns how many captures were seeded.
+    @discardableResult
+    public func seed(deviceID: String, observed: Int64) throws -> Int {
+        try db.queue.write { d in
+            let ids = try String.fetchAll(d, sql: Self.seedCandidatesSQL)
+            for id in ids {
+                guard let record = try CaptureRecord.fetchOne(d, key: id) else { continue }
+                var row = try self.row(for: record, in: d)
+                row.lamport = try self.nextLamport(in: d)
+                row.deviceID = deviceID
+                try d.execute(sql: "UPDATE captures SET lamport = ?, syncDeviceID = ? WHERE id = ?",
+                              arguments: [row.lamport, deviceID, id])
+                try self.enqueue(row, kind: record.status == .trashed ? .trash : .upsert,
+                                 observed: observed, deviceID: deviceID, in: d)
+                try d.execute(sql: """
+                    INSERT OR IGNORE INTO upload_queue (captureId, queuedAt, attempts, priority)
+                    VALUES (?, ?, 0, 1)
+                    """, arguments: [id, Date()])
+            }
+            try d.execute(sql: "UPDATE sync_state SET seededAt = ? WHERE id = 1", arguments: [Date()])
+            return ids.count
+        }
+    }
+
+    /// Record that there was nothing to seed, so the check is not repeated (F73).
+    public func markSeeded() throws {
+        try db.queue.write { d in
+            try d.execute(sql: "UPDATE sync_state SET seededAt = ? WHERE id = 1", arguments: [Date()])
         }
     }
 
