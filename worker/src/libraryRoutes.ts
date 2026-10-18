@@ -46,18 +46,25 @@ async function fingerprint(token: string): Promise<string> {
 interface DeviceIdentity { owner: string; deviceID: string; approved: boolean }
 
 /**
- * The device a bearer credential belongs to (F2), or null.
+ * The device a bearer credential belongs to (F2): its identity, "disabled" when the owner is not
+ * on the allowlist (F118), or null.
  *
  * A device credential is `<owner>.<secret>`, so the owner's Durable Object can be asked directly
  * rather than every owner being scanned. Owner names cannot contain a dot (`validOwnerName`), so
  * the first one separates them. The owner token is deliberately not accepted here: it authorizes
  * enrolment and the M5 share routes and nothing else.
+ *
+ * The allowlist is checked before the Durable Object is called. The owner name comes from an
+ * unauthenticated header, and `idFromName` on an arbitrary name would create an object for it.
  */
-async function authorizeDevice(request: Request, env: Env): Promise<DeviceIdentity | null> {
+async function authorizeDevice(
+  request: Request, env: Env,
+): Promise<DeviceIdentity | "disabled" | null> {
   const token = bearerToken(request);
   const dot = token.indexOf(".");
   if (dot <= 0) return null;
   const owner = token.slice(0, dot);
+  if (!libraryEnabled(env, owner)) return "disabled";
   const found = await libraryLogFor(env, owner).verifyDevice(await sha256Hex(token));
   return found ? { owner, ...found } : null;
 }
@@ -103,8 +110,8 @@ export async function handleLibrary(
 
   // ---- everything below needs a device credential (F2, F21) --------------
   const identity = await authorizeDevice(request, env);
+  if (identity === "disabled") return json({ error: "not found" }, 404);
   if (!identity) return json({ error: "unauthorized" }, 401);
-  if (!libraryEnabled(env, identity.owner)) return json({ error: "not found" }, 404);
   // F113: the credential is real, the Mac is not approved yet. 403 is what the client reads as
   // "waiting for approval", so no other route may answer 403 for anything else.
   if (!identity.approved) return json({ error: "awaiting approval" }, 403);

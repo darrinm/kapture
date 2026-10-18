@@ -41,6 +41,27 @@ describe("F118 — the allowlist gates every route", () => {
     expect(response.status).toBe(404);
   });
 
+  it("404s a real device credential once its owner leaves the allowlist", async () => {
+    const { token } = await enrolFirstDevice();
+    const response = await call("/api/library/changes?since=0", {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(response.status).toBe(404);
+  });
+
+  it("404s a forged credential without creating a Durable Object for its owner", async () => {
+    const untouchable = {
+      ...env,
+      LIBRARY_LOGS: new Proxy(env.LIBRARY_LOGS, {
+        get() { throw new Error("the library log was consulted"); },
+      }),
+    };
+    const response = await call("/api/library/changes?since=0", {
+      headers: { authorization: "Bearer someone-invented.not-a-secret" },
+    }, untouchable);
+    expect(response.status).toBe(404);
+  });
+
   it("leaves the M5 share routes working for the same owner", async () => {
     const response = await call("/api/list", { headers: ownerAuth });
     expect(response.status).toBe(200);

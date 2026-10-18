@@ -124,6 +124,54 @@ actual received bytes and one object in a single transaction before writing to R
 uploads cannot overwrite one another's charges. Failed R2 writes retain their reservation;
 deleting a share does not refund its upload quota. The dashboard reads the same counter.
 
+## Shared library
+
+The same Worker serves the shared library (`docs/SHARED-LIBRARY.md`): one end-to-end encrypted
+library synced across one owner's Macs. The Worker stores ciphertext and an op log. It cannot
+read either.
+
+```
+POST   /api/library/enroll              owner token → { deviceID, token, approved, fingerprint }
+GET    /api/library/devices             the owner's devices
+POST   /api/library/devices/:id/approve approve a pending device
+DELETE /api/library/devices/:id         revoke a device
+GET    /api/library/changes?since=N     pull ops after seq N
+POST   /api/library/ops                 push up to 100 ops
+POST   /api/library/snapshot            claim a snapshot at a seq
+PUT    /api/library/snapshot/:seq       upload the claimed snapshot
+GET    /api/library/snapshot/:seq/:dev  fetch a snapshot
+POST   /api/library/lease/sweep         take the trash-sweep lease
+PUT    /api/library/blob/:purpose/:capture/:rev/:dev   upload bytes (idempotent)
+GET    /api/library/blob/:purpose/:capture/:rev/:dev   fetch bytes
+POST   …/blob/…?uploads, PUT ?uploadId&part=N, POST ?uploadId&complete   R2 multipart
+GET    /api/library/usage[?reconcile=1] stored bytes and objects
+```
+
+Only `enroll` takes the owner token. Every other route takes a device credential of the form
+`<owner>.<secret>`. A device that enrolls after the owner's first device gets 202 and a
+credential that answers 403 until another device or the dashboard approves it.
+
+**The routes are off by default.** `LIBRARY_OWNERS` is a comma-separated allowlist of owners.
+It is unset in `wrangler.jsonc`, and with it unset every library route answers 404 to every
+owner. The author pays for the bytes, so the hosted deployment enables only the author. To
+enable an owner for one deploy:
+
+```sh
+npx wrangler deploy --var LIBRARY_OWNERS:darrin
+```
+
+A later `wrangler deploy` without the flag removes the variable again. To keep it, add it to
+`vars` in `wrangler.jsonc`.
+
+The `v2-library-log` migration creates the SQLite-backed `LibraryLog` class, one object per
+owner, holding the op log, device credentials, snapshot claims and the sweep lease. Blobs live
+in the same R2 bucket under `lib/<owner>/`. Library bytes are charged in the owner's
+`QuotaCounter` against a 100 GB stored ceiling and a 50 GB daily ceiling, separate from the daily
+share quota.
+
+Once `v2-library-log` is deployed, a deploy from a checkout without `LibraryLog` fails, because
+existing Durable Objects depend on the class. Deploy only from a branch that contains it.
+
 ## Design notes
 
 - **Links are permanent.** No expiry, because a link pasted into a thread that

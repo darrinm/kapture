@@ -103,9 +103,39 @@ Worker, so it is checked in stage 4.
 
 *Exit:* a curl transcript showing an op round-tripping through real R2 and a real Durable Object.
 
+**Status: done, 18 October 2026.** Production had never received main's quota Durable Object
+(`b08dd1e`, `v1-quota-counter`), so it went first as its own deploy, and the share routes were
+checked through it: upload, raw view, list, delete. The library Worker followed with
+`v2-library-log`.
+
+- With `LIBRARY_OWNERS` unset, enrolment and every device route answered 404. That check found a
+  defect: a device-format token for an unlisted owner answered 401, and `authorizeDevice` called
+  `idFromName` on the owner name from the header before checking the allowlist, so any caller
+  could create a `LibraryLog` object for any name. The allowlist is now checked first, and two
+  tests cover it.
+- With a throwaway owner allowlisted, against real R2 and a real Durable Object: enrol, list
+  devices, PUT a 4 KB blob, PUT it again (F99 retry), GET it back byte-identical, push an op
+  requiring the blob, pull it back with its ciphertext intact, usage 4096 bytes, take the sweep
+  lease, push a delete (the blob then 404s and usage reconciles to 0), revoke the device (its
+  credential then 401s).
+- R2 native multipart through the Worker: a 5 MiB part and a 300 KB part completed as one
+  5,542,880-byte object and read back identical.
+- Revoking the throwaway owner's only device and enrolling another returned 202 and no approved
+  device remained to approve it. That is F114 working, and it is why the dashboard approval UI
+  matters (below). A second throwaway owner ran the multipart check.
+
+Afterwards the owner table was restored to `darrin` alone and the Worker redeployed with
+`LIBRARY_OWNERS` unset. The two throwaway `LibraryLog` objects keep a few rows of SQLite state;
+there is no route that deletes a Durable Object's storage. Their R2 prefixes are empty.
+
+From now on, deploy only from a branch containing `LibraryLog`. A deploy from `main` as it
+stands fails, because existing Durable Objects depend on the class.
+
 ## Stage 4 — One Mac, a copy of the library
 
-Point a Mac at a **copy** of `~/Pictures/Kapture`, not the real one.
+Point a Mac at a **copy** of `~/Pictures/Kapture`, not the real one. First enable the owner:
+add `"LIBRARY_OWNERS": "darrin"` to `vars` in `wrangler.jsonc` and deploy, so a later deploy
+does not switch the library off again.
 
 Watch for what Miniflare cannot tell you: R2 conditional-put semantics under F22/F99, Durable
 Object SQLite behaviour as the op table grows, the multipart path at a real recording's size
@@ -149,7 +179,9 @@ the outbox ever stops draining.
 - **Library-grid badges** for `remote` and forked captures (F36, F48). Cosmetic until stage 5
   produces a fork.
 - **Admin device-approval UI** (F124). The API works; the dashboard does not show it. Stage 1's
-  in-app approval covers the two-Mac case.
+  in-app approval covers the two-Mac case. It does not cover an owner whose every device was
+  revoked: F114 keeps later enrolments pending, and only the dashboard could approve them.
+  Stage 3 reached that state with a throwaway owner.
 - **Disable-with-download (F80).** Unimplemented, and the ground rule about keeping everything
   local is what stands in for it until it exists.
 - **Any non-Mac client.** Foreclosed by D1 and re-confirmed (§14 Q9).
