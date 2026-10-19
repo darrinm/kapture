@@ -1,30 +1,26 @@
-// Which H.264 encoder a recording uses, decided once per recording before capture starts.
+// Checks the hardware H.264 encoder before a recording starts.
 //
 // The hardware encoder can stop accepting work while the rest of the system runs normally: on
 // macOS 27.0.1 after twelve days of uptime, every hardware session failed its first frame with
-// -17691 (the AVE driver reported error 0xfffffc0d), and AVAssetWriter failed the same way, so
-// every recording was lost. The software encoder still worked. It encodes about 120 fps at
-// 1080p but 13 fps at 6K on an M2 Ultra, so a software recording is captured at most
-// `softwareMaxEdge` on its long side, which it encodes at about 60 fps.
+// -17691 (the AVE driver reported error 0xfffffc0d), and AVAssetWriter failed the same way on
+// every frame. The recording ran to the end and produced no movie. Probing first means the
+// person learns this before recording rather than after. A restart clears it.
 import CoreMedia
 import CoreVideo
 import Foundation
 import VideoToolbox
 
-public enum VideoEncoder: Equatable, Sendable {
-    case hardware
-    case software
-
-    public static let softwareMaxEdge = 2560
-
-    /// The hardware encoder when it encodes a frame at this size, otherwise the software one.
-    public static func choose(width: Int, height: Int) -> VideoEncoder {
-        hardwareEncodes(width: width, height: height) ? .hardware : .software
+public enum EncoderProbe {
+    /// The hardware H.264 encoder is not accepting frames.
+    public struct Unavailable: LocalizedError {
+        public var errorDescription: String? {
+            "The video encoder isn't responding. Restart the Mac to record."
+        }
     }
 
     /// Encodes one blank frame on the hardware H.264 encoder and reports whether it came back.
     /// A failing encoder fails the first frame, so one is enough; it costs a few milliseconds.
-    static func hardwareEncodes(width: Int, height: Int) -> Bool {
+    public static func hardwareEncodes(width: Int, height: Int) -> Bool {
         let spec = [kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: true]
         var created: VTCompressionSession?
         guard VTCompressionSessionCreate(
@@ -51,26 +47,6 @@ public enum VideoEncoder: Equatable, Sendable {
         // Returns once the frame's output handler has run.
         VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
         return result.encoded
-    }
-
-    /// The size to capture and encode at: the requested size on hardware; on software, scaled so
-    /// the long edge is at most `softwareMaxEdge`, with even dimensions as H.264 requires.
-    public func size(width: Int, height: Int) -> (width: Int, height: Int) {
-        let longEdge = max(width, height)
-        guard self == .software, longEdge > Self.softwareMaxEdge else { return (width, height) }
-        let scale = Double(Self.softwareMaxEdge) / Double(longEdge)
-        let even = { (value: Int) in max(2, Int((Double(value) * scale).rounded()) / 2 * 2) }
-        return (even(width), even(height))
-    }
-
-    /// `AVVideoEncoderSpecificationKey` for the writer. Hardware leaves the choice to
-    /// AVFoundation, as before; software rules the hardware encoder out.
-    public var specification: [String: Any] {
-        switch self {
-        case .hardware: return [:]
-        case .software:
-            return [kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder as String: false]
-        }
     }
 }
 

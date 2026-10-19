@@ -2,7 +2,7 @@ import AVFoundation
 import XCTest
 @testable import KaptureRecording
 
-final class VideoEncoderTests: XCTestCase {
+final class EncoderProbeTests: XCTestCase {
     var directory: URL!
 
     override func setUpWithError() throws {
@@ -13,49 +13,25 @@ final class VideoEncoderTests: XCTestCase {
 
     override func tearDownWithError() throws { try? FileManager.default.removeItem(at: directory) }
 
-    func testSoftwareCapsTheLongEdgeAndKeepsDimensionsEven() {
-        XCTAssertEqual(VideoEncoder.software.size(width: 5120, height: 2880).width, 2560)
-        XCTAssertEqual(VideoEncoder.software.size(width: 5120, height: 2880).height, 1440)
-        let portrait = VideoEncoder.software.size(width: 2234, height: 3456)
-        XCTAssertEqual(portrait.height, 2560)
-        XCTAssertEqual(portrait.width % 2, 0)
-        let odd = VideoEncoder.software.size(width: 6000, height: 3333)
-        XCTAssertEqual(odd.width, 2560)
-        XCTAssertEqual(odd.height % 2, 0)
-    }
-
-    func testSmallRecordingsAndHardwareKeepTheirSize() {
-        XCTAssertEqual(VideoEncoder.software.size(width: 1200, height: 800).width, 1200)
-        XCTAssertEqual(VideoEncoder.hardware.size(width: 5120, height: 2880).width, 5120)
-    }
-
-    func testTheSoftwareFallbackWritesAMovie() async throws {
-        // The settings RecordingSession uses when the probe fails, at a 5K display's capped size.
-        let size = VideoEncoder.software.size(width: 5120, height: 2880)
-        let completed = try await write(encoder: .software, width: size.width, height: size.height)
-        XCTAssertTrue(completed, "software H.264 writes a complete movie")
-    }
-
     func testTheProbeAgreesWithTheWriter() async throws {
-        // What the probe exists for: when it says hardware works, a hardware recording completes,
-        // and when it says it does not, a hardware recording fails. Either can be true on a given
-        // Mac on a given day.
-        let probe = VideoEncoder.hardwareEncodes(width: 1920, height: 1080)
-        let completed = try await write(encoder: .hardware, width: 1920, height: 1080)
+        // What the probe exists for: when it says the encoder works, a recording's writer
+        // completes, and when it says it does not, that writer fails. Either can be true on a
+        // given Mac on a given day.
+        let probe = EncoderProbe.hardwareEncodes(width: 1920, height: 1080)
+        let completed = try await write(width: 1920, height: 1080)
         XCTAssertEqual(probe, completed)
     }
 
-    /// Writes 30 frames through AVAssetWriter with RecordingSession's video settings for this
-    /// encoder, and reports whether the movie completed.
-    private func write(encoder: VideoEncoder, width: Int, height: Int) async throws -> Bool {
-        let url = directory.appendingPathComponent("\(encoder)-\(width).mp4")
+    /// Writes 30 frames through AVAssetWriter with RecordingSession's video settings and reports
+    /// whether the movie completed.
+    private func write(width: Int, height: Int) async throws -> Bool {
+        let url = directory.appendingPathComponent("probe-\(width).mp4")
         let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
         let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
             AVVideoCodecKey: AVVideoCodecType.h264,
             AVVideoWidthKey: width,
             AVVideoHeightKey: height,
             AVVideoCompressionPropertiesKey: [AVVideoMaxKeyFrameIntervalDurationKey: 1.5],
-            AVVideoEncoderSpecificationKey: encoder.specification,
         ])
         let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input,
                                                            sourcePixelBufferAttributes: [

@@ -115,7 +115,7 @@ final class RecordingCoordinator {
                     }
                 }
                 try await session.start()
-                Log.capture.info("record: capturing \(session.pixelWidth)x\(session.pixelHeight) encoder=\(String(describing: session.encoder))")
+                Log.capture.info("record: capturing \(session.pixelWidth)x\(session.pixelHeight)")
                 self.session = session
                 pauseStart = nil
                 pausedTotal = 0
@@ -128,7 +128,8 @@ final class RecordingCoordinator {
             } catch {
                 Log.capture.error("recording start failed: \(error)")
                 self.session = nil
-                Toast.show(Self.describe(error, while: "Recording could not start"))
+                Toast.show(error is EncoderProbe.Unavailable ? error.localizedDescription
+                           : Self.describe(error, while: "Recording could not start"))
             }
         }
     }
@@ -151,7 +152,7 @@ final class RecordingCoordinator {
                 OverlayController.shared.showCard(recordID: record.id)
             } catch {
                 Log.capture.error("recording stop failed: \(error)")
-                Toast.show(Self.describe(error, while: "Recording failed: the movie could not be written"))
+                Toast.show(Self.describe(error, while: "Recording failed"))
             }
         }
     }
