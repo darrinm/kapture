@@ -45,6 +45,10 @@ public final class RecordingSession: NSObject, SCStreamOutput, @unchecked Sendab
     public let pixelWidth: Int
     public let pixelHeight: Int
     public private(set) var startedAt: Date?
+    /// Called once, on the capture queue, when the writer fails. Nothing after that point is
+    /// recorded, so the caller should stop rather than let the person keep recording.
+    public var onFailure: (@Sendable (Error) -> Void)?
+    private var reportedFailure = false
 
     public init(scope: RecordingScope, excludingWindows excluded: [SCWindow],
                 captureMic: Bool, captureSystemAudio: Bool) throws {
@@ -207,7 +211,13 @@ public final class RecordingSession: NSObject, SCStreamOutput, @unchecked Sendab
         @unknown default: input = nil
         }
         if let input, input.isReadyForMoreMediaData { input.append(retimed) }
-        if writer.status == .failed { Log.capture.error("recording writer failed: \(self.writer.error)") }
+        // Every later append fails the same way, so this reports once rather than per frame.
+        if writer.status == .failed, !reportedFailure {
+            reportedFailure = true
+            let error = writer.error ?? CocoaError(.fileWriteUnknown)
+            Log.capture.error("recording writer failed: \(error)")
+            onFailure?(error)
+        }
     }
 
     /// Audio buffers can't be retimed in place — every buffer is copied with shifted timing.
