@@ -44,27 +44,37 @@ public final class RecordingSession: NSObject, SCStreamOutput, @unchecked Sendab
     public let outputURL: URL
     public let pixelWidth: Int
     public let pixelHeight: Int
+    /// The H.264 encoder this recording writes with. Software captures at a reduced size.
+    public let encoder: VideoEncoder
     public private(set) var startedAt: Date?
+    /// Called once, on the capture queue, when the writer fails. Nothing after that point is
+    /// recorded, so the caller should stop rather than let the person keep recording.
+    public var onFailure: (@Sendable (Error) -> Void)?
+    private var reportedFailure = false
 
     public init(scope: RecordingScope, excludingWindows excluded: [SCWindow],
                 captureMic: Bool, captureSystemAudio: Bool) throws {
         let config = SCStreamConfiguration()
         let filter: SCContentFilter
+        let native: (width: Int, height: Int)
         switch scope {
         case .display(let display, let scale):
             filter = SCContentFilter(display: display, excludingWindows: excluded)
-            pixelWidth = Int(CGFloat(display.width) * scale)
-            pixelHeight = Int(CGFloat(display.height) * scale)
+            native = (Int(CGFloat(display.width) * scale), Int(CGFloat(display.height) * scale))
         case .area(let display, let rect, let scale):
             filter = SCContentFilter(display: display, excludingWindows: excluded)
             config.sourceRect = rect
-            pixelWidth = Int(rect.width * scale) / 2 * 2   // encoder wants even dimensions
-            pixelHeight = Int(rect.height * scale) / 2 * 2
+            // encoder wants even dimensions
+            native = (Int(rect.width * scale) / 2 * 2, Int(rect.height * scale) / 2 * 2)
         case .window(let window, let scale):
             filter = SCContentFilter(desktopIndependentWindow: window)
-            pixelWidth = Int(window.frame.width * scale) / 2 * 2
-            pixelHeight = Int(window.frame.height * scale) / 2 * 2
+            native = (Int(window.frame.width * scale) / 2 * 2,
+                      Int(window.frame.height * scale) / 2 * 2)
         }
+        // SCK scales the capture to config.width x height, so a software recording's frames
+        // arrive at the reduced size rather than being scaled again on the way into the writer.
+        encoder = VideoEncoder.choose(width: native.width, height: native.height)
+        (pixelWidth, pixelHeight) = encoder.size(width: native.width, height: native.height)
         config.width = pixelWidth
         config.height = pixelHeight
         config.minimumFrameInterval = CMTime(value: 1, timescale: 60)
@@ -90,6 +100,7 @@ public final class RecordingSession: NSObject, SCStreamOutput, @unchecked Sendab
             AVVideoCompressionPropertiesKey: [
                 AVVideoMaxKeyFrameIntervalDurationKey: 1.5,   // bounds trim snap error (spec §4)
             ],
+            AVVideoEncoderSpecificationKey: encoder.specification,
         ])
         let audioSettings: [String: Any] = [
             AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: 48000,
@@ -207,7 +218,13 @@ public final class RecordingSession: NSObject, SCStreamOutput, @unchecked Sendab
         @unknown default: input = nil
         }
         if let input, input.isReadyForMoreMediaData { input.append(retimed) }
-        if writer.status == .failed { Log.capture.error("recording writer failed: \(self.writer.error)") }
+        // Every later append fails the same way, so this reports once rather than per frame.
+        if writer.status == .failed, !reportedFailure {
+            reportedFailure = true
+            let error = writer.error ?? CocoaError(.fileWriteUnknown)
+            Log.capture.error("recording writer failed: \(error)")
+            onFailure?(error)
+        }
     }
 
     /// Audio buffers can't be retimed in place — every buffer is copied with shifted timing.

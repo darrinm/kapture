@@ -106,8 +106,16 @@ final class RecordingCoordinator {
                     scope: scope, excludingWindows: excluded,
                     captureMic: Settings.shared.recordMicrophone,
                     captureSystemAudio: Settings.shared.recordSystemAudio)
+                // A failed writer records nothing more, so the recording ends there and says so
+                // rather than running on until the person stops a movie that does not exist.
+                session.onFailure = { _ in
+                    Task { @MainActor in
+                        let coordinator = RecordingCoordinator.shared
+                        if coordinator.session === session { coordinator.stop() }
+                    }
+                }
                 try await session.start()
-                Log.capture.info("record: capturing \(session.pixelWidth)x\(session.pixelHeight)")
+                Log.capture.info("record: capturing \(session.pixelWidth)x\(session.pixelHeight) encoder=\(String(describing: session.encoder))")
                 self.session = session
                 pauseStart = nil
                 pausedTotal = 0
@@ -120,6 +128,7 @@ final class RecordingCoordinator {
             } catch {
                 Log.capture.error("recording start failed: \(error)")
                 self.session = nil
+                Toast.show(Self.describe(error, while: "Recording could not start"))
             }
         }
     }
@@ -140,8 +149,22 @@ final class RecordingCoordinator {
                 let (record, _) = try library.storeMovie(result, sourceApp: app)
                 Sounds.play("Glass")
                 OverlayController.shared.showCard(recordID: record.id)
-            } catch { Log.capture.error("recording stop failed: \(error)") }
+            } catch {
+                Log.capture.error("recording stop failed: \(error)")
+                Toast.show(Self.describe(error, while: "Recording failed: the movie could not be written"))
+            }
         }
+    }
+
+    /// AVFoundation's description of a writer failure is "The operation could not be completed",
+    /// so the codes go in too: they are what tells one failure from another.
+    private static func describe(_ error: Error, while action: String) -> String {
+        let ns = error as NSError
+        var codes = ["\(ns.code)"]
+        if let underlying = ns.userInfo[NSUnderlyingErrorKey] as? NSError {
+            codes.append("\(underlying.code)")
+        }
+        return "\(action) (error \(codes.joined(separator: ", ")))"
     }
 
     private func startTimer() {
