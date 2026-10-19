@@ -102,21 +102,29 @@ final class RecordingCoordinator {
                     let scale = ScreenshotService.displayScale(forCGGlobal: win.frame)
                     scope = .window(win, scale: scale)
                 }
+                // Before anything is captured, so a dead encoder is reported instead of a lost
+                // recording.
+                try await EncoderProbe.check()
                 let session = try RecordingSession(
                     scope: scope, excludingWindows: excluded,
                     captureMic: Settings.shared.recordMicrophone,
                     captureSystemAudio: Settings.shared.recordSystemAudio)
                 // A failed writer records nothing more, so the recording ends there and says so
                 // rather than running on until the person stops a movie that does not exist.
-                session.onFailure = { _ in
+                // Weak, because the session holds this closure.
+                session.onFailure = { [weak session] _ in
                     Task { @MainActor in
                         let coordinator = RecordingCoordinator.shared
-                        if coordinator.session === session { coordinator.stop() }
+                        if let session, coordinator.session === session { coordinator.stop() }
                     }
                 }
-                try await session.start()
-                Log.capture.info("record: capturing \(session.pixelWidth)x\(session.pixelHeight)")
+                // Assigned before start, so a failure on one of the first frames finds it.
                 self.session = session
+                try await session.start()
+                // A failure or the hotkey can stop it while start is awaited; the chrome below
+                // is then for a recording that has already ended.
+                guard self.session === session else { return }
+                Log.capture.info("record: capturing \(session.pixelWidth)x\(session.pixelHeight)")
                 pauseStart = nil
                 pausedTotal = 0
                 if let rect = borderRect { showBorder(around: rect) }
@@ -128,8 +136,7 @@ final class RecordingCoordinator {
             } catch {
                 Log.capture.error("recording start failed: \(error)")
                 self.session = nil
-                Toast.show(error is EncoderProbe.Unavailable ? error.localizedDescription
-                           : Self.describe(error, while: "Recording could not start"))
+                Toast.show(Self.describe(error, while: "Recording could not start"))
             }
         }
     }
@@ -158,8 +165,10 @@ final class RecordingCoordinator {
     }
 
     /// AVFoundation's description of a writer failure is "The operation could not be completed",
-    /// so the codes go in too: they are what tells one failure from another.
+    /// so the codes go in too: they are what tells one failure from another. The probe's error
+    /// already says what to do.
     private static func describe(_ error: Error, while action: String) -> String {
+        if error is EncoderProbe.Unavailable { return error.localizedDescription }
         let ns = error as NSError
         var codes = ["\(ns.code)"]
         if let underlying = ns.userInfo[NSUnderlyingErrorKey] as? NSError {

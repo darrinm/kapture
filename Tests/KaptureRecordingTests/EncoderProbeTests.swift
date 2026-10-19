@@ -17,9 +17,11 @@ final class EncoderProbeTests: XCTestCase {
         // What the probe exists for: when it says the encoder works, a recording's writer
         // completes, and when it says it does not, that writer fails. Either can be true on a
         // given Mac on a given day.
-        let probe = EncoderProbe.hardwareEncodes(width: 1920, height: 1080)
-        let completed = try await write(width: 1920, height: 1080)
-        XCTAssertEqual(probe, completed)
+        let outcome = EncoderProbe.probe()
+        try XCTSkipIf(outcome == .noHardwareSession,
+                      "no hardware encoder here (a virtual machine); the writer uses software")
+        let completed = try await write(width: 1280, height: 720)
+        XCTAssertEqual(outcome == .encodes, completed)
     }
 
     /// Writes 30 frames through AVAssetWriter with RecordingSession's video settings and reports

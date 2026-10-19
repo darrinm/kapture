@@ -18,9 +18,24 @@ public enum EncoderProbe {
         }
     }
 
-    /// Encodes one blank frame on the hardware H.264 encoder and reports whether it came back.
-    /// A failing encoder fails the first frame, so one is enough; it costs a few milliseconds.
-    public static func hardwareEncodes(width: Int, height: Int) -> Bool {
+    enum Outcome { case encodes, fails, noHardwareSession }
+
+    /// Throws `Unavailable` when the hardware encoder takes a session but fails its frame. Runs
+    /// off the caller's actor, because the VideoToolbox calls block.
+    public static func check() async throws {
+        let outcome = await Task.detached(priority: .userInitiated) { probe() }.value
+        if outcome == .fails { throw Unavailable() }
+    }
+
+    /// Encodes one blank frame on a hardware H.264 session.
+    ///
+    /// The size is fixed rather than the recording's: this asks whether the encoder works, not
+    /// whether it takes a given size, which AVAssetWriter settles on its own (it can use the
+    /// software encoder for a size the hardware rejects). For the same reason a Mac where no
+    /// hardware session can be created, such as a virtual machine, is not refused: the writer
+    /// uses software there. One frame is enough, because a failing encoder fails the first.
+    static func probe() -> Outcome {
+        let width = 1280, height = 720
         let spec = [kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: true]
         var created: VTCompressionSession?
         guard VTCompressionSessionCreate(
@@ -28,13 +43,13 @@ public enum EncoderProbe {
             codecType: kCMVideoCodecType_H264, encoderSpecification: spec as CFDictionary,
             imageBufferAttributes: nil, compressedDataAllocator: nil, outputCallback: nil,
             refcon: nil, compressionSessionOut: &created) == noErr,
-              let session = created else { return false }
+              let session = created else { return .noHardwareSession }
         defer { VTCompressionSessionInvalidate(session) }
 
         var frame: CVPixelBuffer?
         let attributes = [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary
         guard CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_32BGRA, attributes,
-                                  &frame) == kCVReturnSuccess, let frame else { return false }
+                                  &frame) == kCVReturnSuccess, let frame else { return .encodes }
 
         let result = ProbeResult()
         let submitted = VTCompressionSessionEncodeFrame(
@@ -43,10 +58,10 @@ public enum EncoderProbe {
         ) { status, _, sample in
             result.encoded = status == noErr && sample != nil
         }
-        guard submitted == noErr else { return false }
+        guard submitted == noErr else { return .fails }
         // Returns once the frame's output handler has run.
         VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
-        return result.encoded
+        return result.encoded ? .encodes : .fails
     }
 }
 

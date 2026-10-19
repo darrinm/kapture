@@ -69,10 +69,6 @@ public final class RecordingSession: NSObject, SCStreamOutput, @unchecked Sendab
             pixelWidth = Int(window.frame.width * scale) / 2 * 2
             pixelHeight = Int(window.frame.height * scale) / 2 * 2
         }
-        // Before anything is captured, so a dead encoder is reported instead of a lost recording.
-        guard EncoderProbe.hardwareEncodes(width: pixelWidth, height: pixelHeight) else {
-            throw EncoderProbe.Unavailable()
-        }
         config.width = pixelWidth
         config.height = pixelHeight
         config.minimumFrameInterval = CMTime(value: 1, timescale: 60)
