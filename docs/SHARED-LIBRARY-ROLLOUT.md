@@ -197,6 +197,37 @@ Enrol the second Mac, approve it from the first, and walk the cases the spec arg
 
 *Exit:* all five observed, including the two that are supposed to fail safely.
 
+**Status, 21 October 2026: four of five observed; the restore race waits until 29 October.**
+The second Mac was a MacBook Pro (`dmbpb`, macOS 27.0.1), driven over SSH with the same
+isolated test build as stage 4.
+
+- **Recovery.** The MacBook unlocked with the written-down recovery code and decrypted every row
+  and all 383 thumbnails, so the code reproduces the key.
+- **Convergence.** After approval the MacBook pulled all 383 captures and 383 thumbnails (14 MB)
+  within two minutes. A screenshot taken on the MacBook reached the Studio with its thumbnail.
+  Search text matched on both Macs: 385 entries, 278 with OCR and 326 with summaries.
+- **Fetch on demand.** Opening that capture on the Studio downloaded it, and its SHA-256 matched
+  the MacBook's file.
+- **Conflict.** The first attempt lost the Studio's annotation: nothing set `contentHash` or
+  `parentHash`, so the merge never saw a conflict (fixed in 4f1f142). After the fix, the same
+  capture edited on the Studio and on the offline MacBook came back as the original (the
+  MacBook's edit) plus fork `W4KP0T9TRS3HHC61RP747J4MQA` (the Studio's edit) on both Macs.
+- **Restore race.** Not run. The server counts the seven days from when it recorded each trash
+  (F45), and it recorded this library's 47 trashed captures at the seed on 21 October, so
+  nothing is eligible to sweep before 29 October. The server's refusal of a delete observed
+  before a restore (F106) is tested against the real Durable Object. The sweeper only queues
+  delete ops and removes files when an admitted delete comes back down the log, so a refused
+  delete touches nothing.
+
+Fixed along the way, each with tests that fail against the old code:
+
+- A new capture's row and status changes waited for the five-minute timer; they now push at once.
+- A Mac waiting for approval asked every five minutes; it now asks every 15 seconds.
+- Settings gave no account of sync. It now shows a Status section: current activity, last
+  sync, counts of what is in the log, still to upload, still to download and on this Mac, and
+  the last error. The device list refreshes on its own.
+- Edits did not record content hashes, so concurrent edits resolved by order and one was lost.
+
 ## Stage 6 — The real library
 
 Only now point a Mac at the real `~/Pictures/Kapture`. Seed it, let it settle, then enable
