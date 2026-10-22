@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import GRDB
 
@@ -433,8 +434,28 @@ public final class Library: @unchecked Sendable {
         var record = current
         var sidecar = try Sidecar.readIfPresent(for: url(for: record)) ?? Sidecar(for: record)
         sidecar.annotations = .init(original: try originalPath(for: record), layersJSON: layersJSON)
+        // The shared library's only evidence that two Macs edited one capture concurrently
+        // (F81, F112): the same revision with different hashes, or a parent hash the other side
+        // does not have. Nothing set either before, so every concurrent edit resolved by order
+        // and one Mac's annotation was lost (rollout stage 5). The parent is hashed from the file
+        // when this capture has never been edited, which gives both Macs the same parent.
+        let parent = current.contentHash ?? Library.sha256(of: url(for: current))
         record.markContentReplaced()
+        record.parentHash = parent
+        record.contentHash = Library.sha256(of: staged)
         try commit(FileOperation(op: op, source: rel(staged), record: record, sidecar: sidecar))
+    }
+
+    /// Hex SHA-256 of a file, read in 1 MB chunks so a long recording is never held whole. Nil
+    /// when the file cannot be read.
+    public static func sha256(of url: URL) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while let chunk = try? handle.read(upToCount: 1 << 20), !chunk.isEmpty {
+            hasher.update(data: chunk)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
     /// The image the editor should open: pristine original if one exists, else the file itself.
