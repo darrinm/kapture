@@ -50,6 +50,17 @@ enum Diagnostics {
         let sem = DispatchSemaphore(value: 0)
         Task {
             do {
+                if CommandLine.arguments.contains("--multipart") {
+                    let result = try await LibraryCheck.multipartRestartCheck(db: KaptureCore.Database())
+                    for (label, (counter, actual)) in [("after upload", result.afterUpload),
+                                                       ("after delete", result.afterDelete)] {
+                        print("\(label): counter \(counter.storedBytes) bytes, "
+                              + "\(counter.storedObjects) objects; R2 \(actual.storedBytes) bytes, "
+                              + "\(actual.storedObjects) objects: "
+                              + (counter == actual ? "AGREES" : "DIFFERS"))
+                    }
+                    sem.signal(); return
+                }
                 let counter = try await LibraryCheck.usage(reconcile: false)
                 let actual = try await LibraryCheck.usage(reconcile: true)
                 print("counter: \(counter.storedBytes) bytes, \(counter.storedObjects) objects")

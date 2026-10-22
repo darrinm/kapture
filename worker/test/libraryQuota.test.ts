@@ -136,6 +136,70 @@ describe("F54, F87 — multipart upload through R2's own API", () => {
     expect((await usage.json() as { storedBytes: number }).storedBytes).toBe(5);
   });
 
+  // The counter and R2 must agree after each of these, which is what `?reconcile=1` checks.
+  // Stage 4 found a 2.27 GB recording's 70 parts counted as 70 objects, and two app restarts
+  // mid-upload leaving 946 MB charged that R2 did not hold.
+  async function counterAgreesWithR2(auth: Record<string, string>) {
+    const counter = await (await call("/api/library/usage", { headers: auth }, enabled())).json();
+    const actual = await (await call("/api/library/usage?reconcile=1",
+                                     { headers: auth }, enabled())).json();
+    expect(counter).toEqual(actual);
+    return actual as { storedBytes: number; storedObjects: number };
+  }
+
+  async function complete(auth: Record<string, string>, path: string, uploadId: string,
+                          parts: { partNumber: number; etag: string }[]) {
+    const response = await call(`${path}?uploadId=${uploadId}&complete`, {
+      method: "POST", headers: { ...auth, "content-type": "application/json" },
+      body: JSON.stringify({ parts }),
+    }, enabled());
+    expect(response.status).toBe(200);
+  }
+
+  it("counts a completed upload as one object, however many parts it had", async () => {
+    const token = await device();
+    const auth = { authorization: `Bearer ${token}` };
+    const path = `/api/library/blob/blob/BIG5/1/${ULID_A}`;
+    const part = "p".repeat(5 * 1024 * 1024);
+    const { uploadId, done } = await upload(auth, path, [part, part, "end"]);
+    await complete(auth, path, uploadId, done);
+
+    const usage = await counterAgreesWithR2(auth);
+    expect(usage.storedObjects).toBe(1);
+    expect(usage.storedBytes).toBe(2 * part.length + 3);
+  });
+
+  it("credits the parts of an upload a restarted device abandoned", async () => {
+    const token = await device();
+    const auth = { authorization: `Bearer ${token}` };
+    const path = `/api/library/blob/blob/BIG6/1/${ULID_A}`;
+    const part = "q".repeat(5 * 1024 * 1024);
+    await upload(auth, path, [part]);                 // the app quits here
+    const { uploadId, done } = await upload(auth, path, [part, "end"]);
+    await complete(auth, path, uploadId, done);
+
+    const usage = await counterAgreesWithR2(auth);
+    expect(usage.storedBytes).toBe(part.length + 3);
+  });
+
+  it("charges a part sent twice once", async () => {
+    const token = await device();
+    const auth = { authorization: `Bearer ${token}` };
+    const path = `/api/library/blob/blob/BIG7/1/${ULID_A}`;
+    const part = "r".repeat(5 * 1024 * 1024);
+    const { uploadId } = await upload(auth, path, [part]);
+    // The response to part 1 was lost, so the device sends it again.
+    const again = await call(`${path}?uploadId=${uploadId}&part=1`,
+                             { method: "PUT", headers: auth, body: part }, enabled());
+    const first = await again.json() as { partNumber: number; etag: string };
+    const last = await call(`${path}?uploadId=${uploadId}&part=2`,
+                            { method: "PUT", headers: auth, body: "end" }, enabled());
+    await complete(auth, path, uploadId,
+                   [first, await last.json() as { partNumber: number; etag: string }]);
+
+    await counterAgreesWithR2(auth);
+  });
+
   it("reports an object that already exists instead of starting a second upload", async () => {
     const token = await device();
     const auth = { authorization: `Bearer ${token}` };

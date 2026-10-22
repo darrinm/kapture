@@ -156,6 +156,32 @@ actually holds — `/api/library/usage?reconcile=1` answers that directly.
 *Exit:* the copy is fully seeded, `reconcile=1` agrees with the counter, and a >90 MB recording
 has uploaded and downloaded intact.
 
+**Status: done, 21 October 2026.** The copy held 383 captures (47 trashed) and 8.97 GB. All 383
+rows were in the log within a minute of the fixed build's launch. All bytes and 383 thumbnails
+had uploaded by 22:18, about 27 minutes after seeding began. The largest recording, 2.27 GB,
+downloaded, decrypted and matched the local file byte for byte. After the Worker fix below, the
+counter and R2 agree at 8,987,804,306 bytes and 766 objects.
+
+The run found five defects, each fixed with tests that fail against the old code:
+
+- A new library did not sync until the five-minute timer. `start()` now syncs at once.
+- `syncNow` uploaded every queued byte before pushing any op, so no row reached the log until
+  the whole seed had uploaded. Rows now go first, and the uploads follow in 60-second slices,
+  each followed by a push.
+- Nothing stopped a second upload drain while one ran. The timer and each new capture started
+  another. One sync and one drain run at a time now.
+- `push()` sent one batch of 100 ops per sync. It now empties the outbox.
+- The Worker counted each multipart part as an object, and kept the charge for parts of
+  uploads that a restarted app abandoned. Before the fix the counter showed 9,933,792,206 bytes
+  and 1,207 objects; R2 held 8,987,804,306 and 766. `QuotaCounter` now tracks each upload in
+  progress: a restart under the same key aborts and credits the old upload, a part sent again
+  is charged once, and completion counts one object. `Kapture --library-check --multipart`
+  repeats that sequence against the real server, and the counter matched R2 after the upload
+  and after the delete.
+
+Separately, ⌘V beeped in every Settings field, because the app had no main menu. That fix is on
+`main` (PR #17), not on this branch.
+
 ## Stage 5 — Two Macs
 
 Enrol the second Mac, approve it from the first, and walk the cases the spec argues about:

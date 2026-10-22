@@ -7,7 +7,7 @@ import GRDB
 import KaptureCore
 
 public enum LibraryCheck {
-    public struct Usage: Decodable, Sendable {
+    public struct Usage: Decodable, Equatable, Sendable {
         public let storedBytes: Int64
         public let storedObjects: Int64
     }
@@ -35,6 +35,68 @@ public enum LibraryCheck {
         let (data, response) = try await URLSession.shared.data(for: request)
         try HTTPTransport.check(response, data)
         return try JSONDecoder().decode(Usage.self, from: data)
+    }
+
+    /// The multipart path that drifted in stage 4, against the real server: an upload started,
+    /// abandoned after one part and started again under the same key (an app restart), a part
+    /// sent twice (a lost response), then completed and deleted. Returns the counter and R2's
+    /// total after completing and after deleting; each pair should agree.
+    ///
+    /// The object is `orig/STAGE4MULTIPART/1/<this device>`, which names no capture, and the
+    /// blob delete route removes it without adding anything to the log.
+    public static func multipartRestartCheck(db: KaptureCore.Database) async throws
+        -> (afterUpload: (Usage, Usage), afterDelete: (Usage, Usage)) {
+        guard let token = Keychain.libraryDeviceToken else {
+            throw SyncFailure("this Mac has no device credential")
+        }
+        let device = try await db.queue.read { d in
+            try String.fetchOne(d, sql: "SELECT deviceID FROM sync_state")
+        }
+        guard let device else { throw SyncFailure("sync is not enabled") }
+        let base = Settings.shared.libraryEndpoint
+            .appendingPathComponent("api/library/blob/orig/STAGE4MULTIPART/1/\(device)")
+
+        func send(_ method: String, _ query: [URLQueryItem], _ body: Data? = nil) async throws -> Data {
+            var components = URLComponents(url: base, resolvingAgainstBaseURL: false)!
+            components.queryItems = query.isEmpty ? nil : query
+            var request = URLRequest(url: components.url!)
+            request.httpMethod = method
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "authorization")
+            if let body {
+                request.httpBody = body
+                request.setValue("application/json", forHTTPHeaderField: "content-type")
+            }
+            let (data, response) = try await URLSession.shared.data(for: request)
+            try HTTPTransport.check(response, data)
+            return data
+        }
+        func begin() async throws -> String {
+            let data = try await send("POST", [URLQueryItem(name: "uploads", value: nil)])
+            guard let id = (try JSONSerialization.jsonObject(with: data) as? [String: Any])?["uploadId"]
+                as? String else { throw SyncFailure("no uploadId: \(String(decoding: data, as: UTF8.self))") }
+            return id
+        }
+        func part(_ uploadId: String, _ number: Int, _ bytes: Data) async throws -> [String: Any] {
+            let data = try await send("PUT", [URLQueryItem(name: "uploadId", value: uploadId),
+                                              URLQueryItem(name: "part", value: "\(number)")], bytes)
+            return (try JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+        }
+
+        let big = Data((0..<(5 * 1024 * 1024)).map { UInt8(truncatingIfNeeded: $0 &* 31) })
+        let abandoned = try await begin()
+        _ = try await part(abandoned, 1, big)                 // the app quits here
+        let uploadId = try await begin()
+        _ = try await part(uploadId, 1, big)
+        let first = try await part(uploadId, 1, big)          // the response was lost; sent again
+        let last = try await part(uploadId, 2, Data("end".utf8))
+        let parts = try JSONSerialization.data(withJSONObject: ["parts": [first, last]])
+        _ = try await send("POST", [URLQueryItem(name: "uploadId", value: uploadId),
+                                    URLQueryItem(name: "complete", value: nil)], parts)
+        let afterUpload = (try await usage(reconcile: false), try await usage(reconcile: true))
+
+        _ = try await send("DELETE", [])
+        let afterDelete = (try await usage(reconcile: false), try await usage(reconcile: true))
+        return (afterUpload, afterDelete)
     }
 
     /// Downloads the largest recording of at least `minBytes` whose bytes the server holds,

@@ -293,6 +293,12 @@ async function handleBlob(
   if (request.method === "POST" && url.searchParams.has("uploads")) {
     if (existing) return json({ key, exists: true });
     const upload = await env.BUCKET.createMultipartUpload(key);
+    // A device restarted mid-upload starts over under the same key; the upload it left is
+    // aborted and its parts credited, so they are neither stored nor charged twice.
+    const replaced = await quotaFor(env, owner).beginMultipart(key, upload.uploadId);
+    if (replaced) {
+      await env.BUCKET.resumeMultipartUpload(key, replaced).abort().catch(() => {});
+    }
     return json({ key, uploadId: upload.uploadId });
   }
 
@@ -306,10 +312,10 @@ async function handleBlob(
         return json({ error: "bad part number" }, 400);
       }
       const body = await request.arrayBuffer();
-      // Parts occupy storage from the moment they land, so they are charged as they arrive.
-      // An abandoned upload is then already counted; R2 expires incomplete uploads, and
-      // `?reconcile=1` recomputes from what is actually held (F76).
-      const quotaError = await quotaFor(env, owner).chargeLibrary(body.byteLength);
+      // Parts occupy storage from the moment they land, so their bytes are charged as they
+      // arrive. They are not objects yet; completing the upload counts it once.
+      const quotaError = await quotaFor(env, owner)
+        .chargePart(key, uploadId, partNumber, body.byteLength);
       if (quotaError) return json({ error: quotaError }, 429);
       const part = await upload.uploadPart(partNumber, body);
       return json({ partNumber: part.partNumber, etag: part.etag });
@@ -324,6 +330,7 @@ async function handleBlob(
       }
       try {
         const object = await upload.complete(parts);
+        await quotaFor(env, owner).completeMultipart(key);
         return json({ key, bytes: object.size });
       } catch (error) {
         return json({ error: `could not complete: ${String(error)}` }, 409);
