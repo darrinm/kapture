@@ -66,6 +66,11 @@ export interface AppendOutcome {
   assigned: { opID: string; seq: number }[];
   rejected: { opID: string; code: RejectionCode; reason: string }[];
   head: number;
+  /**
+   * Objects kept at an earlier delete for a fork that no longer uses them. The route deletes
+   * them and returns their space, and does not pass this to the client.
+   */
+  released?: string[];
 }
 
 /**
@@ -144,6 +149,23 @@ CREATE TABLE IF NOT EXISTS tombstones (
   blindedID TEXT PRIMARY KEY,
   seq       INTEGER NOT NULL,
   expires   INTEGER NOT NULL
+);
+
+-- F128: a fork keeps its bytes under the capture it forked from. These rows say which objects
+-- another capture still uses, so deleting that capture's bytes (F107) leaves them. A capture's
+-- rows are replaced by each op it pushes, since every op carries all of its blob references.
+CREATE TABLE IF NOT EXISTS blob_refs (
+  referrer TEXT NOT NULL,
+  key      TEXT NOT NULL,
+  owner    TEXT NOT NULL,
+  PRIMARY KEY (referrer, key)
+);
+CREATE INDEX IF NOT EXISTS blob_refs_owner ON blob_refs (owner);
+
+-- Objects kept at a delete because a fork still used them. When the last reference goes, the
+-- object is released for deletion.
+CREATE TABLE IF NOT EXISTS retained_blobs (
+  key TEXT PRIMARY KEY
 );
 
 -- F134: F108 dates sweep eligibility from the server's trash time and F45 forbids trusting the
@@ -261,6 +283,7 @@ export class LibraryLog extends DurableObject<Env> {
 
     const assigned: { opID: string; seq: number }[] = [];
     const rejected: { opID: string; code: RejectionCode; reason: string }[] = [];
+    const released: string[] = [];
     const now = Date.now();
 
     this.ctx.storage.transactionSync(() => {
@@ -342,11 +365,64 @@ export class LibraryLog extends DurableObject<Env> {
             op.blindedID, seq, now + OPID_RETENTION_MS,
           );
         }
+        // F128: what this capture now uses from other captures' prefixes. A deleted capture
+        // uses nothing.
+        const uses = op.kind === "delete" ? [] : (op.requires ?? [])
+          .filter((ref) => ref.capture !== undefined && ref.capture !== op.blindedID)
+          .map((ref) => ({
+            key: blobKey(owner, ref.purpose, ref.capture!, ref.revision, ref.writer),
+            owner: ref.capture!,
+          }));
+        released.push(...this.replaceReferences(op.blindedID, uses));
         assigned.push({ opID: op.opID, seq });
       }
     });
 
-    return { assigned, rejected, head: this.head() };
+    return { assigned, rejected, head: this.head(), released };
+  }
+
+  /**
+   * Record what `referrer` uses now, and return any object kept for it at an earlier delete
+   * that nothing uses any more. Runs inside `append`'s transaction.
+   */
+  private replaceReferences(referrer: string, uses: { key: string; owner: string }[]): string[] {
+    const before = this.sql()
+      .exec<{ key: string }>("SELECT key FROM blob_refs WHERE referrer = ?", referrer)
+      .toArray().map((row) => row.key);
+    this.sql().exec("DELETE FROM blob_refs WHERE referrer = ?", referrer);
+    for (const use of uses) {
+      this.sql().exec("INSERT OR IGNORE INTO blob_refs (referrer, key, owner) VALUES (?, ?, ?)",
+                      referrer, use.key, use.owner);
+    }
+    const still = new Set(uses.map((use) => use.key));
+    const released: string[] = [];
+    for (const key of before) {
+      if (still.has(key)) continue;
+      const retained = this.sql()
+        .exec("SELECT 1 FROM retained_blobs WHERE key = ?", key).toArray().length > 0;
+      const used = this.sql()
+        .exec("SELECT 1 FROM blob_refs WHERE key = ?", key).toArray().length > 0;
+      if (retained && !used) {
+        this.sql().exec("DELETE FROM retained_blobs WHERE key = ?", key);
+        released.push(key);
+      }
+    }
+    return released;
+  }
+
+  /**
+   * A capture's bytes are about to be deleted (F107). Returns the objects under its prefix that
+   * another capture still uses, which the delete must leave, and remembers them so they are
+   * released when the last of those captures stops using them.
+   */
+  async retainForDelete(owner: string): Promise<string[]> {
+    const keys = this.sql()
+      .exec<{ key: string }>("SELECT DISTINCT key FROM blob_refs WHERE owner = ?", owner)
+      .toArray().map((row) => row.key);
+    for (const key of keys) {
+      this.sql().exec("INSERT OR IGNORE INTO retained_blobs (key) VALUES (?)", key);
+    }
+    return keys;
   }
 
   async changes(since: number, limit = MAX_PAGE) {

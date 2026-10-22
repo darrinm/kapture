@@ -210,3 +210,72 @@ describe("F54, F87 — multipart upload through R2's own API", () => {
     expect((await started.json() as { exists: boolean }).exists).toBe(true);
   });
 });
+
+describe("F128 — a fork's bytes outlive the capture it forked from", () => {
+  // A fork keeps its bytes under the capture it forked from. The delete of that capture
+  // removed its whole prefix, the fork's content included, and every later push of the fork
+  // was refused as missing-blob.
+  let seq = 0;
+  function op(blindedID: string, kind: string, requires: object[] = [], observed = 0) {
+    seq += 1;
+    return { opID: `01JBQP${String(seq).padStart(20, "0")}`, blindedID, v: 1, kind,
+             requires, observed, ciphertext: btoa(`${kind}-${blindedID}`) };
+  }
+  async function push(auth: Record<string, string>, ops: object[]) {
+    const response = await call("/api/library/ops", {
+      method: "POST", headers: { ...auth, "content-type": "application/json" },
+      body: JSON.stringify({ ops }),
+    }, enabled());
+    return await response.json() as { assigned: unknown[]; head: number; released?: unknown };
+  }
+  /** The GET's status, with its body read so no R2 object is left open at teardown. */
+  async function statusOf(path: string, auth: Record<string, string>) {
+    const response = await call(path, { headers: auth }, enabled());
+    await response.arrayBuffer();
+    return response.status;
+  }
+  const original = { purpose: "blob", revision: 1, writer: ULID_A, capture: "PARENT1" };
+  const parentPath = `/api/library/blob/blob/PARENT1/1/${ULID_A}`;
+
+  async function forkOfADeletedParent() {
+    const token = await device();
+    const auth = { authorization: `Bearer ${token}` };
+    await call(parentPath, { method: "PUT", headers: auth, body: "edit" }, enabled());
+    await push(auth, [op("PARENT1", "upsert", [original])]);
+    await push(auth, [op("FORK1", "upsert", [original])]);   // the fork names PARENT1's bytes
+    const trashed = await push(auth, [op("PARENT1", "trash", [original])]);
+    const deleted = await push(auth, [op("PARENT1", "delete", [], trashed.head)]);
+    return { auth, deleted };
+  }
+
+  it("leaves the bytes a fork uses when its parent is deleted", async () => {
+    const { auth, deleted } = await forkOfADeletedParent();
+    expect(deleted.assigned).toHaveLength(1);
+    expect(deleted.released).toBeUndefined();                // never sent to a client
+    expect(await statusOf(parentPath, auth)).toBe(200);
+    const again = await push(auth, [op("FORK1", "upsert", [original])]);
+    expect(again.assigned).toHaveLength(1);                  // not missing-blob
+  });
+
+  it("deletes them, and returns the space, when the fork is deleted too", async () => {
+    const { auth } = await forkOfADeletedParent();
+    const trashed = await push(auth, [op("FORK1", "trash", [original])]);
+    await push(auth, [op("FORK1", "delete", [], trashed.head)]);
+
+    expect(await statusOf(parentPath, auth)).toBe(404);
+    const usage = await (await call("/api/library/usage", { headers: auth }, enabled())).json();
+    expect(usage).toEqual({ storedBytes: 0, storedObjects: 0 });
+  });
+
+  it("deletes them when the fork is edited and no longer uses them", async () => {
+    const { auth } = await forkOfADeletedParent();
+    const own = { purpose: "blob", revision: 2, writer: ULID_A, capture: "FORK1" };
+    await call(`/api/library/blob/blob/FORK1/2/${ULID_A}`,
+               { method: "PUT", headers: auth, body: "fork edit" }, enabled());
+    await push(auth, [op("FORK1", "upsert", [own])]);
+
+    expect(await statusOf(parentPath, auth)).toBe(404);
+    const usage = await (await call("/api/library/usage", { headers: auth }, enabled())).json();
+    expect(usage).toEqual({ storedBytes: "fork edit".length, storedObjects: 1 });
+  });
+});

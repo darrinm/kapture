@@ -12,7 +12,8 @@ import {
   Env, SECURITY_HEADERS, authorize, bearerToken, json, newToken, sha256Hex,
 } from "./common";
 import {
-  blobKey, libraryEnabled, libraryLogFor, ownerPrefix, snapshotKey, type OpEnvelope,
+  blobKey, libraryEnabled, libraryLogFor, ownerPrefix, snapshotKey, type LibraryLog,
+  type OpEnvelope,
 } from "./library";
 import { quotaFor } from "./quota";
 
@@ -179,10 +180,13 @@ export async function handleLibrary(
     const admitted = new Set(outcome.assigned.map((a) => a.opID));
     for (const op of ops) {
       if (op.kind === "delete" && admitted.has(op.opID)) {
-        await deleteCaptureBytes(env, owner, op.blindedID);
+        await deleteCaptureBytes(env, owner, op.blindedID, log);
       }
     }
-    return json(outcome, outcome.rejected.length > 0 && outcome.assigned.length === 0 ? 409 : 200);
+    // Objects a fork kept alive past its parent's delete, now used by nothing (F128).
+    const { released, ...reply } = outcome;
+    if (released && released.length > 0) await deleteObjects(env, owner, released);
+    return json(reply, reply.rejected.length > 0 && reply.assigned.length === 0 ? 409 : 200);
   }
 
   // ---- snapshot (F102) ---------------------------------------------------
@@ -349,7 +353,11 @@ async function handleBlob(
 }
 
 /** Every stored revision of a capture, in every purpose, and the space it held (F20, F107). */
-async function deleteCaptureBytes(env: Env, owner: string, blindedID: string): Promise<void> {
+async function deleteCaptureBytes(env: Env, owner: string, blindedID: string,
+                                  log: DurableObjectStub<LibraryLog>): Promise<void> {
+  // F128: a fork keeps its bytes under the capture it forked from, so those objects are left
+  // for as long as a fork uses them. Deleting the whole prefix deleted the fork's content.
+  const kept = new Set(await log.retainForDelete(blindedID));
   let bytes = 0;
   let objects = 0;
   for (const purpose of ["blob", "thumb", "orig"]) {
@@ -358,12 +366,26 @@ async function deleteCaptureBytes(env: Env, owner: string, blindedID: string): P
       const listed = await env.BUCKET.list({
         prefix: `${ownerPrefix(owner)}${purpose}/${blindedID}/`, cursor,
       });
-      const keys = listed.objects.map((object) => object.key);
-      for (const object of listed.objects) { bytes += object.size; objects += 1; }
-      if (keys.length > 0) await env.BUCKET.delete(keys);
+      const doomed = listed.objects.filter((object) => !kept.has(object.key));
+      for (const object of doomed) { bytes += object.size; objects += 1; }
+      if (doomed.length > 0) await env.BUCKET.delete(doomed.map((object) => object.key));
       cursor = listed.truncated ? listed.cursor : undefined;
     } while (cursor);
   }
+  if (objects > 0) await quotaFor(env, owner).creditLibrary(bytes, objects);
+}
+
+/** Delete these objects and return their space. */
+async function deleteObjects(env: Env, owner: string, keys: string[]): Promise<void> {
+  let bytes = 0;
+  let objects = 0;
+  for (const key of keys) {
+    const head = await env.BUCKET.head(key);
+    if (!head) continue;
+    bytes += head.size;
+    objects += 1;
+  }
+  await env.BUCKET.delete(keys);
   if (objects > 0) await quotaFor(env, owner).creditLibrary(bytes, objects);
 }
 
