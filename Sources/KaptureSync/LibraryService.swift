@@ -269,11 +269,18 @@ public actor LibraryService {
         timer?.cancel()
         timer = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(300))
+                try? await Task.sleep(for: await self?.timerInterval() ?? .seconds(300))
                 if Task.isCancelled { return }
                 await self?.syncNow()
             }
         }
+    }
+
+    /// Every five minutes, except while this Mac waits for approval. Approval happens on another
+    /// Mac, and at five minutes a just-approved Mac sat idle for up to that long before it
+    /// noticed (stage 5). Asking is one request, and the wait lasts only until someone approves.
+    func timerInterval() -> Duration {
+        state == .awaitingApproval ? .seconds(15) : .seconds(300)
     }
 
     /// The synced thumbnail for a capture, for a capture whose own file is not on this Mac.

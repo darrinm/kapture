@@ -136,6 +136,35 @@ final class LibraryServiceTests: XCTestCase {
         XCTAssertTrue(LibraryApproval.isApproved)
     }
 
+    func testAMacWaitingForApprovalAsksAgainSoon() async throws {
+        // Stage 5: approved on the other Mac, the MacBook went on waiting for its five-minute timer.
+        Settings.shared.libraryEnabled = true
+        let previousKey = Keychain.libraryKey
+        let previousToken = Keychain.libraryDeviceToken
+        let previousApproval = LibraryApproval.isApproved
+        LibraryService.createKey()
+        Keychain.libraryDeviceToken = "pending-credential"
+        LibraryApproval.isApproved = false
+        defer {
+            Keychain.libraryKey = previousKey
+            Keychain.libraryDeviceToken = previousToken
+            LibraryApproval.isApproved = previousApproval
+        }
+
+        let gate = ApprovalGate()
+        let service = LibraryService()
+        _ = await service.start(db: database, deviceID: ULID.generate(),
+                                transport: GatedTransport(gate: gate))
+        let waiting = await service.timerInterval()
+        XCTAssertEqual(waiting, .seconds(15))
+
+        await gate.approve()
+        await service.syncNow()
+        let approved = await service.timerInterval()
+        XCTAssertEqual(approved, .seconds(300), "back to every five minutes once approved")
+        await service.stop()
+    }
+
     // MARK: - keys and the recovery code
 
     func testTheRecoveryCodeCarriesTheLibraryBetweenMacs() throws {

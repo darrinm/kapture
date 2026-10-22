@@ -50,6 +50,21 @@ enum Diagnostics {
         let sem = DispatchSemaphore(value: 0)
         Task {
             do {
+                // Stage 5: list the owner's devices, and approve one by its exact device ID.
+                if CommandLine.arguments.contains("--devices") {
+                    let transport = try LibraryCheck.transport()
+                    if let i = CommandLine.arguments.firstIndex(of: "--approve"),
+                       CommandLine.arguments.count > i + 1 {
+                        try await transport.approve(deviceID: CommandLine.arguments[i + 1])
+                        print("approved \(CommandLine.arguments[i + 1])")
+                    }
+                    for device in try await transport.devices() {
+                        print("\(device.deviceID)  \(device.approved ? "approved" : "PENDING ")  "
+                              + "\(device.fingerprint)  \(device.name)"
+                              + (device.current ? "  (this Mac)" : ""))
+                    }
+                    sem.signal(); return
+                }
                 if CommandLine.arguments.contains("--multipart") {
                     let result = try await LibraryCheck.multipartRestartCheck(db: KaptureCore.Database())
                     for (label, (counter, actual)) in [("after upload", result.afterUpload),

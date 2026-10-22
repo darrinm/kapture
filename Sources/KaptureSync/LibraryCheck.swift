@@ -37,6 +37,14 @@ public enum LibraryCheck {
         return try JSONDecoder().decode(Usage.self, from: data)
     }
 
+    /// This Mac's transport, for the device list and approval during stage 5.
+    public static func transport() throws -> HTTPTransport {
+        guard let token = Keychain.libraryDeviceToken else {
+            throw SyncFailure("this Mac has no device credential")
+        }
+        return HTTPTransport(endpoint: Settings.shared.libraryEndpoint, deviceToken: token)
+    }
+
     /// The multipart path that drifted in stage 4, against the real server: an upload started,
     /// abandoned after one part and started again under the same key (an app restart), a part
     /// sent twice (a lost response), then completed and deleted. Returns the counter and R2's
