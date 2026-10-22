@@ -411,5 +411,6 @@ MainActor.assumeIsolated {
     let delegate = AppDelegate()
     app.delegate = delegate
     app.setActivationPolicy(.accessory)   // menu bar only, no dock icon
+    app.mainMenu = EditMenu.make()        // ⌘V and friends in text fields; never displayed
     withExtendedLifetime(delegate) { app.run() }
 }
