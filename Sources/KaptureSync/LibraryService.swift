@@ -78,6 +78,11 @@ public actor LibraryService {
     private var timer: Task<Void, Never>?
     private var changeObserver: NSObjectProtocol?
     private var db: KaptureCore.Database?
+    /// One sync pass and one upload drain at a time. The actor is reentrant at every network
+    /// await, so without these the five-minute timer and each new capture started another drain
+    /// over the same queue while a long seed was still uploading.
+    private var syncing = false
+    private var draining = false
     private(set) public var state: LibraryState = .disabled
     private(set) public var lastSync: Date?
     private(set) public var lastError: String?
@@ -233,9 +238,10 @@ public actor LibraryService {
         installChangeObserver(for: db)
         state = local
         startTimer()
-        // An unapproved Mac asks once now, so a fresh approval and "Check again" both take
-        // effect without waiting for the five-minute timer.
-        if state == .awaitingApproval { await syncNow() }
+        // F28: on enable, not five minutes later. Creating a library, joining one, "Check
+        // again" on an unapproved Mac and launch all come through here, and each should take
+        // effect at once.
+        await syncNow()
         return state
     }
 
@@ -335,11 +341,25 @@ public actor LibraryService {
 
     /// Upload what is due, then queue each row that names it. Bytes go first because F32 refuses
     /// an op naming a revision the server does not yet hold.
-    func drainUploads() async {
-        guard state == .ready, let store, let blobs, let transport,
-              let identity = try? store.identity() else { return }
+    ///
+    /// Takes the next due capture each time rather than a list made at the start, so a capture
+    /// queued mid-drain (priority 0) goes ahead of a seed's backlog. Stops after `budget` and
+    /// returns true when due work remains, so the caller can push the rows uploaded so far.
+    /// Returns false at once when another drain is running; that drain picks up anything new.
+    @discardableResult
+    func drainUploads(budget: Duration = .seconds(60)) async -> Bool {
+        guard state == .ready, !draining, let store, let blobs, let transport,
+              let identity = try? store.identity() else { return false }
+        draining = true
+        defer { draining = false }
         let root = Settings.shared.libraryRoot
-        for captureID in (try? store.dueUploads()) ?? [] {
+        let deadline = ContinuousClock.now + budget
+        // Each capture is tried once per drain, so one whose deferral could not be recorded
+        // cannot be retried in a loop.
+        var tried = Set<String>()
+        while let captureID = ((try? store.dueUploads()) ?? []).first(where: { !tried.contains($0) }) {
+            if ContinuousClock.now >= deadline { return true }
+            tried.insert(captureID)
             do {
                 guard let content = try store.currentContent(of: captureID) else {
                     try store.dropUpload(captureID)        // the capture is gone
@@ -369,6 +389,7 @@ public actor LibraryService {
                 Log.store.error("library upload failed, will retry: \(error)")
             }
         }
+        return false
     }
 
     /// Queue a change to the row with no bytes to move: a status, a rename, OCR text.
@@ -463,11 +484,24 @@ public actor LibraryService {
 
     @discardableResult
     public func syncNow() async -> SyncSummary? {
-        guard let engine else { return nil }
-        if state == .ready {
-            seedIfNeeded()
-            await drainUploads()
+        guard let engine, !syncing else { return nil }
+        syncing = true
+        defer { syncing = false }
+        if state == .ready { seedIfNeeded() }
+        // F65: rows first. A seed's ops carry no bytes, so they go up in minutes and the other
+        // Mac sees the whole library while the bytes take hours. Each slice of uploads is then
+        // followed by a push of the rows that name what it uploaded.
+        var summary = await pushAndPull(engine)
+        while summary != nil, state == .ready, await drainUploads() {
+            summary = await pushAndPull(engine)
         }
+        if summary != nil, state == .ready { summary = await pushAndPull(engine) }
+        if summary != nil { await fetchThumbnails() }
+        return summary
+    }
+
+    /// One exchange with the log, and what it says about this Mac's approval.
+    private func pushAndPull(_ engine: SyncEngine) async -> SyncSummary? {
         do {
             let summary = try await engine.syncOnce()
             lastSync = Date()
@@ -476,7 +510,6 @@ public actor LibraryService {
             // only way back to `.ready` from `.awaitingApproval`.
             LibraryApproval.isApproved = true
             state = .ready
-            await fetchThumbnails()
             return summary
         } catch let failure as SyncFailure {
             lastError = failure.description

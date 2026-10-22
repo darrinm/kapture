@@ -280,6 +280,19 @@ final class SeedingServiceTests: XCTestCase {
         await service.stop()
     }
 
+    func testStartingAReadyLibrarySyncsAtOnce() async throws {
+        // F28: on enable. Creating a library ends in start(); before this, the first sync waited
+        // for the five-minute timer, so a new library sat idle with nothing seeded.
+        let service = LibraryService()
+        let store = SyncStore(db: library.db, crypto: LibraryCrypto(key: LibraryService.existingKey()!))
+        _ = await service.start(db: library.db, deviceID: deviceID,
+                                transport: FlakyTransport(blobs: FlakyBlobs(failures: 0),
+                                                          log: FakeLog(), writer: deviceID))
+
+        XCTAssertTrue(try store.isSeeded(), "the first sync ran inside start")
+        await service.stop()
+    }
+
     func testAPulledThumbnailIsFetchedForTheGrid() async throws {
         // Another Mac's capture: a row naming a thumbnail, sealed with the shared key.
         let crypto = LibraryCrypto(key: LibraryService.existingKey()!)
@@ -314,4 +327,84 @@ final class SeedingServiceTests: XCTestCase {
         try? FileManager.default.removeItem(at: LibraryService.thumbnailURL(for: "THEIRS"))
         await service.stop()
     }
+
+    func testASeedsRowsReachTheLogBeforeAnyOfItsBytes() async throws {
+        // F65: rows first. The seed's ops name no bytes, so they go up before the upload drain,
+        // which for a real library takes hours.
+        _ = try preexistingCapture()
+        let events = TransportEvents()
+        let service = LibraryService()
+        _ = await service.start(db: library.db, deviceID: deviceID, transport: ObservedTransport(
+            inner: FlakyTransport(blobs: FlakyBlobs(failures: 0), log: FakeLog(), writer: deviceID),
+            events: events))
+
+        await service.confirmSeed()
+
+        let order = await events.order
+        let firstPush = try XCTUnwrap(order.firstIndex(of: "push"), "the seed was pushed")
+        let firstPut = try XCTUnwrap(order.firstIndex(of: "put"), "and its bytes uploaded")
+        XCTAssertLessThan(firstPush, firstPut)
+        await service.stop()
+    }
+
+    func testOnlyOneUploadDrainRunsAtATime() async throws {
+        // The timer and every new capture start a drain; with a long seed in progress they
+        // used to upload the same queue side by side.
+        _ = try preexistingCapture()
+        let store = SyncStore(db: library.db, crypto: LibraryCrypto(key: LibraryService.existingKey()!))
+        let events = TransportEvents()
+        let service = LibraryService()
+        _ = await service.start(db: library.db, deviceID: deviceID, transport: ObservedTransport(
+            inner: FlakyTransport(blobs: FlakyBlobs(failures: 0), log: FakeLog(), writer: deviceID),
+            events: events, putDelay: .milliseconds(100)))
+        _ = try store.seed(deviceID: deviceID, observed: 0)
+
+        async let first = service.drainUploads()
+        async let second = service.drainUploads()
+        _ = await (first, second)
+
+        let maxInFlight = await events.maxInFlight
+        let puts = await events.order.filter { $0 == "put" }.count
+        XCTAssertEqual(maxInFlight, 1, "no two uploads at once")
+        XCTAssertEqual(puts, 2, "the bytes and the thumbnail, each once")
+        await service.stop()
+    }
 }
+
+/// The order in which a transport was asked to push ops and to upload bytes.
+actor TransportEvents {
+    var order: [String] = []
+    var inFlight = 0
+    var maxInFlight = 0
+
+    func record(_ event: String) { order.append(event) }
+    func begin() { inFlight += 1; maxInFlight = max(maxInFlight, inFlight) }
+    func end() { inFlight -= 1 }
+}
+
+struct ObservedTransport: LibraryTransport {
+    let inner: FlakyTransport
+    let events: TransportEvents
+    var putDelay: Duration = .zero
+
+    func changes(since: Int64, limit: Int) async throws -> ChangesPage {
+        try await inner.changes(since: since, limit: limit)
+    }
+    func push(_ ops: [OutgoingOp]) async throws -> PushOutcome {
+        if !ops.isEmpty { await events.record("push") }
+        return try await inner.push(ops)
+    }
+    func snapshotClaim(supportsV: Int, seq: Int64) async throws -> Bool { false }
+    func putBlob(_ data: Data, at locator: BlobLocatorRef) async throws {
+        await events.begin()
+        await events.record("put")
+        try? await Task.sleep(for: putDelay)
+        await events.end()
+        try await inner.putBlob(data, at: locator)
+    }
+    func getBlob(_ locator: BlobLocatorRef) async throws -> Data { try await inner.getBlob(locator) }
+    func putSnapshot(_ data: Data, seq: Int64) async throws {}
+    func getSnapshot(seq: Int64, writer: String) async throws -> Data { Data() }
+    func acquireSweepLease(windowMs: Int64) async throws -> SweepLease { SweepLease(granted: false) }
+}
+

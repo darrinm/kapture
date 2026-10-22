@@ -159,6 +159,35 @@ final class SyncEngineTests: XCTestCase {
 
     // MARK: - push and pull through the engine
 
+    func testOneSyncPushesTheWholeOutboxNotOneBatch() async throws {
+        // A seed queues one op per capture. At 100 ops a sync, 250 took three syncs, fifteen
+        // minutes on the timer, before the other Mac saw the whole library.
+        let log = FakeLog()
+        let engine = SyncEngine(store: store, transport: FakeTransport(log: log, writer: deviceID),
+                                deviceID: deviceID)
+        for i in 0..<250 { try queue(makeRow(name: "shot \(i).png")) }
+
+        let summary = try await engine.syncOnce()
+
+        XCTAssertEqual(summary.pushed, 250)
+        XCTAssertTrue(try store.pending().isEmpty)
+        let stored = await log.stored.count
+        XCTAssertEqual(stored, 250)
+    }
+
+    func testARejectedBatchEndsThePushInsteadOfRepeating() async throws {
+        let log = FakeLog()
+        await log.setRejection("quota exceeded")
+        let engine = SyncEngine(store: store, transport: FakeTransport(log: log, writer: deviceID),
+                                deviceID: deviceID)
+        for i in 0..<150 { try queue(makeRow(name: "shot \(i).png")) }
+
+        let summary = try await engine.syncOnce()
+
+        XCTAssertEqual(summary.pushed, 0)
+        XCTAssertEqual(try store.pending().count, 0, "every op is deferred, none is due again yet")
+    }
+
     func testPushThenPullRoundTripsARowThroughEncryption() async throws {
         let log = FakeLog()
         let engine = SyncEngine(store: store, transport: FakeTransport(log: log, writer: deviceID), deviceID: deviceID)

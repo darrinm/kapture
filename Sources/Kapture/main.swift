@@ -33,7 +33,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             Task {
                 let deviceID = LibraryDeviceID.current()
                 _ = await LibraryService.shared.start(db: db, deviceID: deviceID)
-                await LibraryService.shared.syncNow()
             }
             EditorController.shared.onFlattened = { id in
                 OverlayController.shared.showCard(recordID: id)

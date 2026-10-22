@@ -90,10 +90,24 @@ public actor SyncEngine {
 
     // MARK: - Push (F30, F31, F32)
 
+    /// Pushes the whole outbox, 100 ops a call (the server's limit per request). One batch per
+    /// sync left a seed of 500 rows taking five syncs, 25 minutes on the timer, to reach the log.
     func push() async throws -> Int {
+        var pushed = 0
+        while true {
+            let (assigned, settled) = try await pushBatch()
+            pushed += assigned
+            // Every op in a batch is assigned, dropped or deferred, so the next batch is new
+            // work; a batch the server settled none of would only repeat.
+            if settled == 0 { return pushed }
+        }
+    }
+
+    /// One push call: how many ops the log assigned, and how many it answered at all.
+    private func pushBatch() async throws -> (assigned: Int, settled: Int) {
         guard try store.identity() != nil else { throw SyncFailure("sync is not enabled") }
         let pending = try store.pending(limit: 100)
-        guard !pending.isEmpty else { return 0 }
+        guard !pending.isEmpty else { return (0, 0) }
 
         let outgoing = pending.map { entry in
             // `observed` is the seq the op was decided against and nothing else (F106). Raising
@@ -118,7 +132,7 @@ public actor SyncEngine {
                 try store.deferEntry(rejection.opID, error: rejection.reason, after: 60)
             }
         }
-        return outcome.assigned.count
+        return (outcome.assigned.count, outcome.assigned.count + outcome.rejected.count)
     }
 }
 
