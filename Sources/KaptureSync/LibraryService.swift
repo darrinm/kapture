@@ -86,6 +86,8 @@ public actor LibraryService {
     private(set) public var state: LibraryState = .disabled
     private(set) public var lastSync: Date?
     private(set) public var lastError: String?
+    private var lastAttempt: Date?
+    private var activity = SyncActivity.idle
 
     public init() {}
 
@@ -283,6 +285,23 @@ public actor LibraryService {
         state == .awaitingApproval ? .seconds(15) : .seconds(300)
     }
 
+    /// What the library is doing and how far it has to go, for the Settings pane.
+    public func progress() -> SyncProgress {
+        var progress = SyncProgress()
+        progress.activity = activity
+        progress.lastSync = lastSync
+        progress.lastAttempt = lastAttempt
+        progress.lastError = lastError
+        guard let store else { return progress }
+        try? store.progressCounts(into: &progress)
+        // Every thumbnail this Mac has, its own or downloaded, is a file in one directory, so
+        // counting the directory is cheaper than asking about each capture every two seconds.
+        let onDisk = (try? FileManager.default.contentsOfDirectory(
+            atPath: Self.thumbnailDirectory().path))?.count ?? 0
+        progress.thumbnailsMissing = max(0, progress.thumbnailsMissing - onDisk)
+        return progress
+    }
+
     /// The synced thumbnail for a capture, for a capture whose own file is not on this Mac.
     public static func thumbnailURL(for captureID: String) -> URL {
         thumbnailDirectory().appendingPathComponent("\(captureID).jpg")
@@ -367,6 +386,9 @@ public actor LibraryService {
         while let captureID = ((try? store.dueUploads()) ?? []).first(where: { !tried.contains($0) }) {
             if ContinuousClock.now >= deadline { return true }
             tried.insert(captureID)
+            activity = .uploading(((try? store.currentContent(of: captureID))?.relPath as NSString?)?
+                .lastPathComponent ?? captureID)
+            defer { activity = .idle }
             do {
                 guard let content = try store.currentContent(of: captureID) else {
                     try store.dropUpload(captureID)        // the capture is gone
@@ -480,7 +502,10 @@ public actor LibraryService {
     /// runs unboundedly long on a ten-thousand capture bootstrap.
     func fetchThumbnails(limit: Int = 500) async {
         guard state == .ready, let blobs, let transport else { return }
-        for captureID in (try? blobs.missingThumbnails(limit: limit)) ?? [] {
+        let missing = (try? blobs.missingThumbnails(limit: limit)) ?? []
+        if !missing.isEmpty { activity = .downloadingThumbnails }
+        defer { if activity == .downloadingThumbnails { activity = .idle } }
+        for captureID in missing {
             do {
                 try await blobs.fetchThumbnail(captureID, using: transport)
             } catch {
@@ -509,6 +534,9 @@ public actor LibraryService {
 
     /// One exchange with the log, and what it says about this Mac's approval.
     private func pushAndPull(_ engine: SyncEngine) async -> SyncSummary? {
+        activity = .exchanging
+        lastAttempt = Date()
+        defer { activity = .idle }
         do {
             let summary = try await engine.syncOnce()
             lastSync = Date()

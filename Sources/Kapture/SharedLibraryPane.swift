@@ -26,6 +26,8 @@ final class SharedLibraryModel: ObservableObject {
     @Published var fingerprint: String?
     /// Local captures the library has never seen, waiting for F72's confirmation.
     @Published var pendingSeed = 0
+    /// What the library is doing now, polled while the pane is open.
+    @Published var progress = SyncProgress()
 
     var hasKey: Bool { LibraryService.hasKey }
     var isEnrolled: Bool { LibraryService.isEnrolled }
@@ -35,6 +37,29 @@ final class SharedLibraryModel: ObservableObject {
         guard state == .ready else { return }
         devices = (try? await LibraryService.shared.devices()) ?? []
         pendingSeed = LibrarySeed.isConfirmed ? 0 : await LibraryService.shared.pendingSeedCount()
+    }
+
+    /// Polled every two seconds while the pane is open. The device list costs a request, so it
+    /// is refreshed every fifth time: often enough that a Mac asking to join appears here with
+    /// its Approve button without reopening the pane.
+    func watch() async {
+        var tick = 0
+        while !Task.isCancelled {
+            state = await LibraryService.shared.currentState()
+            progress = await LibraryService.shared.progress()
+            if state == .ready, tick % 5 == 0 {
+                devices = (try? await LibraryService.shared.devices()) ?? devices
+            }
+            tick += 1
+            try? await Task.sleep(for: .seconds(2))
+        }
+    }
+
+    func syncNow() async {
+        busy = true
+        await LibraryService.shared.syncNow()
+        busy = false
+        progress = await LibraryService.shared.progress()
     }
 
     /// F72: the person agreed to add this Mac's captures to the shared library.
@@ -152,6 +177,7 @@ struct SharedLibraryPane: View {
         .formStyle(.grouped)
         .padding(.top, 4)
         .task { await model.restart() }
+        .task(id: enabled) { if enabled { await model.watch() } }
         .onChange(of: enabled) { _, _ in Task { await model.restart() } }
         .sheet(isPresented: $showingRecovery) { recoverySheet }
     }
@@ -218,7 +244,7 @@ struct SharedLibraryPane: View {
     // MARK: - Waiting for approval (F113)
 
     @ViewBuilder private var awaitingSection: some View {
-        Section("Waiting for approval") {
+        Section {
             Text("Approve this Mac from one you have already set up, or from the admin "
                  + "dashboard.")
             if let fingerprint = model.fingerprint {
@@ -226,14 +252,93 @@ struct SharedLibraryPane: View {
                     Text(fingerprint).monospaced()
                 }
             }
+            LabeledContent("Last asked") {
+                Text(Self.ago(model.progress.lastAttempt)).foregroundStyle(.secondary)
+            }
             Button("Check again") { Task { await model.restart() } }
                 .disabled(model.busy)
+        } header: {
+            Text("Waiting for approval")
+        } footer: {
+            Text("This Mac asks again every 15 seconds, so it starts syncing shortly after it is "
+                 + "approved.")
+                .font(.caption).foregroundStyle(.secondary)
         }
+    }
+
+    // MARK: - Status
+
+    @ViewBuilder private var statusSection: some View {
+        let p = model.progress
+        Section {
+            LabeledContent("Now") { Text(Self.describe(p)).foregroundStyle(.secondary) }
+            LabeledContent("Last synced") {
+                HStack {
+                    Text(Self.ago(p.lastSync)).foregroundStyle(.secondary)
+                    Button("Sync now") { Task { await model.syncNow() } }
+                        .disabled(model.busy || p.activity != .idle)
+                }
+            }
+            LabeledContent("In the shared library") {
+                Text("\(p.inLog) of \(p.captures) captures").foregroundStyle(.secondary)
+            }
+            if p.uploadsWaiting > 0 {
+                LabeledContent("Still to upload") {
+                    Text("\(p.uploadsWaiting) capture\(p.uploadsWaiting == 1 ? "" : "s"), "
+                         + Self.bytes(p.uploadBytesWaiting)).foregroundStyle(.secondary)
+                }
+            }
+            if p.outbox > 0 {
+                LabeledContent("Changes to send") {
+                    Text("\(p.outbox)").foregroundStyle(.secondary)
+                }
+            }
+            if p.thumbnailsMissing > 0 {
+                LabeledContent("Thumbnails to download") {
+                    Text("\(p.thumbnailsMissing)").foregroundStyle(.secondary)
+                }
+            }
+            LabeledContent("Full files on this Mac") {
+                Text("\(p.captures - p.notOnThisMac) of \(p.captures)").foregroundStyle(.secondary)
+            }
+            if let error = p.lastError {
+                Label("Last sync failed: \(error)", systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.red)
+            }
+        } header: {
+            Text("Status")
+        } footer: {
+            Text("A capture whose full file is not on this Mac shows its thumbnail and downloads "
+                 + "when you open it.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private static func describe(_ p: SyncProgress) -> String {
+        switch p.activity {
+        case .exchanging: return "Exchanging changes with the server…"
+        case .uploading(let name): return "Uploading \(name)…"
+        case .downloadingThumbnails: return "Downloading thumbnails…"
+        case .idle:
+            if p.uploadsWaiting > 0 || p.outbox > 0 { return "Waiting to sync" }
+            return p.lastSync == nil ? "Not synced yet" : "Up to date"
+        }
+    }
+
+    private static func ago(_ date: Date?) -> String {
+        guard let date else { return "never" }
+        if Date().timeIntervalSince(date) < 5 { return "just now" }
+        return RelativeDateTimeFormatter().localizedString(for: date, relativeTo: Date())
+    }
+
+    private static func bytes(_ count: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: count, countStyle: .file)
     }
 
     // MARK: - Running
 
     @ViewBuilder private var readySection: some View {
+        statusSection
         if model.pendingSeed > 0 {
             Section {
                 Text("This Mac has \(model.pendingSeed) capture\(model.pendingSeed == 1 ? "" : "s") "

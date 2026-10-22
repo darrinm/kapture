@@ -328,6 +328,31 @@ final class SeedingServiceTests: XCTestCase {
         await service.stop()
     }
 
+    func testProgressReportsWhatTheSeedHasLeftToDo() async throws {
+        // Stage 5: the pane said nothing about a 9 GB seed. These are the numbers it shows.
+        _ = try preexistingCapture()
+        let service = LibraryService()
+        _ = await service.start(db: library.db, deviceID: deviceID,
+                                transport: FlakyTransport(blobs: FlakyBlobs(failures: 0),
+                                                          log: FakeLog(), writer: deviceID))
+        let before = await service.progress()
+        XCTAssertEqual(before.captures, 1)
+        XCTAssertEqual(before.inLog, 0, "not added until the person confirms (F72)")
+        XCTAssertNotNil(before.lastSync)
+
+        await service.confirmSeed()
+
+        let after = await service.progress()
+        XCTAssertEqual(after.inLog, 1)
+        XCTAssertEqual(after.uploadsWaiting, 0)
+        XCTAssertEqual(after.outbox, 0)
+        XCTAssertEqual(after.notOnThisMac, 0)
+        XCTAssertEqual(after.thumbnailsMissing, 0, "this Mac's own thumbnail counts as present")
+        XCTAssertEqual(after.activity, .idle)
+        XCTAssertNil(after.lastError)
+        await service.stop()
+    }
+
     func testASeedsRowsReachTheLogBeforeAnyOfItsBytes() async throws {
         // F65: rows first. The seed's ops name no bytes, so they go up before the upload drain,
         // which for a real library takes hours.
