@@ -372,10 +372,10 @@ final class DurablePublishingTests: XCTestCase {
         }
     }
 
-    func testADiscardReachesTheOutboxAsATrashOp() async throws {
+    func testADiscardReachesTheLogAsATrashOp() async throws {
         let service = LibraryService()
-        let store = SyncStore(db: library.db, crypto: LibraryCrypto(key: LibraryService.existingKey()!))
-        let transport = FlakyTransport(blobs: FlakyBlobs(failures: 0), log: FakeLog(), writer: deviceID)
+        let log = FakeLog()
+        let transport = FlakyTransport(blobs: FlakyBlobs(failures: 0), log: log, writer: deviceID)
         _ = await service.start(db: library.db, deviceID: deviceID, transport: transport)
         let (record, _) = try library.storePNG(png, width: 1, height: 1, sourceApp: nil,
                                                windowTitle: nil, screenID: nil)
@@ -383,9 +383,38 @@ final class DurablePublishingTests: XCTestCase {
 
         try library.discard(record)
 
-        try await eventually { try store.pending().contains { $0.kind == .trash } }
-        XCTAssertTrue(try store.pending().contains { $0.kind == .trash },
+        // Pushed as part of the discard, not left for the five-minute timer.
+        var kinds: [String] = []
+        for _ in 0..<120 {
+            kinds = await log.stored.map(\.op.kind)
+            if kinds.contains("trash") { break }
+            try? await Task.sleep(for: .milliseconds(25))
+        }
+        XCTAssertTrue(kinds.contains("trash"),
                       "without a trash op the server never marks it, and nothing ever sweeps it")
+        await service.stop()
+    }
+
+    func testANewCapturesRowReachesTheLogWithoutWaitingForTheTimer() async throws {
+        // Stage 5: the MacBook uploaded a new capture's bytes at once, and the row naming them
+        // sat in the outbox until the five-minute timer.
+        let service = LibraryService()
+        let log = FakeLog()
+        let transport = FlakyTransport(blobs: FlakyBlobs(failures: 0), log: log, writer: deviceID)
+        _ = await service.start(db: library.db, deviceID: deviceID, transport: transport)
+
+        let (record, _) = try library.storePNG(png, width: 1, height: 1, sourceApp: nil,
+                                               windowTitle: nil, screenID: nil)
+
+        let crypto = LibraryCrypto(key: LibraryService.existingKey()!)
+        var named = false
+        for _ in 0..<120 {
+            named = await log.stored.contains { $0.op.blindedID == crypto.blind(record.id)
+                                                && !$0.op.requires.isEmpty }
+            if named { break }
+            try? await Task.sleep(for: .milliseconds(25))
+        }
+        XCTAssertTrue(named, "the row naming the uploaded bytes is in the log, with no syncNow")
         await service.stop()
     }
 

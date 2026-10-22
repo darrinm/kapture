@@ -348,11 +348,16 @@ public actor LibraryService {
 
     // MARK: - Publishing (§6.3, §8)
 
-    /// Queue a capture's bytes for upload and try now.
+    /// Queue a capture's bytes for upload and sync now.
     ///
     /// The queue is durable. An upload that fails, or whose response is lost, stays queued and
     /// is retried on the next sync; before, it was logged and the capture never reached the
     /// log at all.
+    ///
+    /// A whole sync pass, not just the upload drain: the drain queues the row that names the
+    /// bytes, and only a push sends it. With the drain alone a new capture's bytes reached the
+    /// server at once and its row waited for the five-minute timer (stage 5). A pass already
+    /// running picks the capture up instead, since its drain takes the next due item each time.
     public func publish(captureID: String) async {
         guard state == .ready, let store else { return }
         do {
@@ -362,7 +367,7 @@ public actor LibraryService {
             Log.store.error("library publish failed to queue: \(error)")
             return
         }
-        await drainUploads()
+        await syncNow()
     }
 
     /// Upload what is due, then queue each row that names it. Bytes go first because F32 refuses
@@ -429,7 +434,10 @@ public actor LibraryService {
                                         deviceID: identity.deviceID)
         } catch {
             Log.store.error("library status publish failed: \(error)")
+            return
         }
+        // Sent now rather than on the five-minute timer, as for a new capture.
+        await syncNow()
     }
 
     /// Bring a capture's bytes here before anything reads its file (F48).
