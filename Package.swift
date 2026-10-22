@@ -50,5 +50,7 @@ let package = Package(
                     path: "Tests/KaptureEditorTests"),
         .testTarget(name: "KaptureDesignTests", dependencies: ["KaptureDesign"],
                     path: "Tests/KaptureDesignTests"),
+        .testTarget(name: "KaptureRecordingTests", dependencies: ["KaptureCore", "KaptureRecording"],
+                    path: "Tests/KaptureRecordingTests"),
     ]
 )
