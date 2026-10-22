@@ -56,7 +56,7 @@ final class BlobWiringTests: XCTestCase {
                                 createdAt: Date(timeIntervalSince1970: 1_700_000_000),
                                 width: 4, height: 4, bytes: 6, name: "\(id).png",
                                 contentHash: "h")
-            try store.upsert(row, in: d, acknowledged: false)
+            _ = try store.upsert(row, in: d, acknowledged: false)
         }
         let url = root.appendingPathComponent("2023/11/\(id).png")
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
@@ -120,7 +120,7 @@ final class BlobWiringTests: XCTestCase {
                                        capture: "BLINDED")])
         let store = self.store!
         try database.queue.write { d in
-            try store.upsert(incoming, in: d, acknowledged: true)
+            _ = try store.upsert(incoming, in: d, acknowledged: true)
         }
 
         XCTAssertEqual(try blobs.state(of: "FROMAWAY"), .remote)
@@ -136,7 +136,7 @@ final class BlobWiringTests: XCTestCase {
             width: 4, height: 4, bytes: 0, name: "none.png")
         let store = self.store!
         try database.queue.write { d in
-            try store.upsert(incoming, in: d, acknowledged: true)
+            _ = try store.upsert(incoming, in: d, acknowledged: true)
         }
 
         XCTAssertEqual(try blobs.state(of: "NOBYTES"), .local)

@@ -80,7 +80,7 @@ final class SweepTests: XCTestCase {
                                 createdAt: Date(timeIntervalSince1970: 1_700_000_000),
                                 width: 1, height: 1, bytes: bytes, name: "\(id).png",
                                 contentHash: "h")
-            try store.upsert(row, in: d, acknowledged: acknowledged)
+            _ = try store.upsert(row, in: d, acknowledged: acknowledged)
             try d.execute(sql: """
                 INSERT INTO blob_cache (captureId, purpose, revision, writer, owningCapture, bytes, lastOpenedAt)
                 VALUES (?, 'blob', 1, ?, ?, ?, ?)

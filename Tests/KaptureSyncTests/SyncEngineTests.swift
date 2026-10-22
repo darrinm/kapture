@@ -123,7 +123,7 @@ final class SyncEngineTests: XCTestCase {
         let store = target ?? self.store!
         let writer = writer ?? deviceID
         try store.db.queue.write { d in
-            try store.upsert(row, in: d, acknowledged: false)
+            _ = try store.upsert(row, in: d, acknowledged: false)
             try store.enqueue(row, kind: kind, observed: observed, deviceID: writer, in: d)
         }
     }

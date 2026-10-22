@@ -137,7 +137,7 @@ final class SeedingStoreTests: XCTestCase {
             let row = SyncedRow(captureID: id, lamport: 1, deviceID: "", kind: .screenshot,
                                 status: status, createdAt: Date(timeIntervalSince1970: createdAt),
                                 width: 1, height: 1, bytes: 1, name: "\(id).png")
-            try store.upsert(row, in: d, acknowledged: acknowledged)
+            _ = try store.upsert(row, in: d, acknowledged: acknowledged)
         }
     }
 

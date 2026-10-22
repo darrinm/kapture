@@ -81,7 +81,7 @@ final class BlobStoreTests: XCTestCase {
                             width: 10, height: 10, bytes: bytes, name: "\(id).png",
                             contentHash: "h")
         try database.queue.write { d in
-            try store.upsert(row, in: d, acknowledged: acknowledged)
+            _ = try store.upsert(row, in: d, acknowledged: acknowledged)
             try d.execute(sql: "UPDATE captures SET blobState = ? WHERE id = ?",
                           arguments: [state.rawValue, id])
             try d.execute(sql: """
@@ -105,7 +105,7 @@ final class BlobStoreTests: XCTestCase {
                                 kind: .screenshot, status: .kept,
                                 createdAt: Date(timeIntervalSince1970: 1_700_000_000),
                                 width: 1, height: 1, bytes: 0, name: "\(captureID).png")
-            try store.upsert(row, in: d, acknowledged: true)
+            _ = try store.upsert(row, in: d, acknowledged: true)
         }
     }
 
