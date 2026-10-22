@@ -7,8 +7,7 @@ public final class Database: Sendable {
     let operationLock = NSRecursiveLock()
 
     public init(directory: URL? = nil) throws {
-        let dir = directory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Kapture")
+        let dir = directory ?? Settings.shared.dataDirectory
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         queue = try DatabaseQueue(path: dir.appendingPathComponent("library.sqlite").path)
         try migrate()

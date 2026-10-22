@@ -25,6 +25,8 @@
   "vars": {
     // the owner allowed to delete anyone's share
     "ADMIN_OWNER": "darrin",
+    // owners allowed the shared-library routes (F118); the author pays for the bytes
+    "LIBRARY_OWNERS": "darrin",
     // where /download and /appcast.xml redirect; point this at your own releases
     "RELEASES_BASE": "https://github.com/darrinm/kapture/releases",
     // Cloudflare Access guards /admin. The Worker verifies the JWT itself rather than trusting

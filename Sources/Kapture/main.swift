@@ -281,6 +281,12 @@ if CommandLine.arguments.contains("--ingest-now") {
     Diagnostics.runIngestNow()
 }
 
+// Shared-library check for rollout stage 4: usage counter against R2, and a large recording's
+// round trip. Read-only, so it can run beside the app.
+if CommandLine.arguments.contains("--library-check") {
+    Diagnostics.runLibraryCheck()
+}
+
 // GIF-exporter smoke mode: converts the given movie and prints the result.
 // Driven by scripts/gif-test.command — that script is the entry point, this is the harness.
 if let i = CommandLine.arguments.firstIndex(of: "--gif-test"), CommandLine.arguments.count > i + 1 {

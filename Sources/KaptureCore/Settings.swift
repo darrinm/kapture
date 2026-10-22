@@ -15,6 +15,16 @@ public struct Settings {
         set { d.set(newValue.path, forKey: "libraryRoot") }
     }
 
+    /// Where the index and derived data live: Application Support/Kapture unless
+    /// `dataDirectory` is set. Setting it, with `libraryRoot`, lets a second build run against a
+    /// copy of the library without touching the first build's index (shared-library rollout,
+    /// stage 4).
+    public var dataDirectory: URL {
+        if let path = d.string(forKey: "dataDirectory") { return URL(fileURLWithPath: path) }
+        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Kapture")
+    }
+
     public var exportLocation: URL {
         get {
             if let path = d.string(forKey: "exportLocation") { return URL(fileURLWithPath: path) }

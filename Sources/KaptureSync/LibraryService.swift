@@ -277,9 +277,7 @@ public actor LibraryService {
 
     /// Derived data lives beside the index, not in the user's folder of real files.
     static func thumbnailDirectory() -> URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory,
-                                            in: .userDomainMask)[0]
-        return base.appendingPathComponent("Kapture/Thumbnails")
+        Settings.shared.dataDirectory.appendingPathComponent("Thumbnails")
     }
 
     // MARK: - Hearing about changes

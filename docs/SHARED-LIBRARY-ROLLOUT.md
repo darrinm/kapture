@@ -137,6 +137,17 @@ Point a Mac at a **copy** of `~/Pictures/Kapture`, not the real one. First enabl
 add `"LIBRARY_OWNERS": "darrin"` to `vars` in `wrangler.jsonc` and deploy, so a later deploy
 does not switch the library off again.
 
+The test build is separate from the installed app in three ways:
+- `KAPTURE_BUNDLE_ID=sh.kapture.app.synctest scripts/bundle.sh` gives it its own settings
+  domain and TCC grants.
+- Its `libraryRoot` and `dataDirectory` defaults point at the copy and at a copy of the index
+  taken with `sqlite3 .backup`, so the installed app's index never sees the sync migrations.
+- An Apple Development build has no keychain entitlement, so its library key and device
+  credential stay on this Mac.
+
+`Kapture --library-check` compares the stored-byte counter with `?reconcile=1`, and downloads
+and compares the largest uploaded recording over 90 MB. It is read-only.
+
 Watch for what Miniflare cannot tell you: R2 conditional-put semantics under F22/F99, Durable
 Object SQLite behaviour as the op table grows, the multipart path at a real recording's size
 (nothing has ever moved a file over 90 MB), and whether the stored-byte counter matches what R2
