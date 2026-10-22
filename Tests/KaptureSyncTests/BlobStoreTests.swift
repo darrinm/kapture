@@ -220,6 +220,37 @@ final class BlobStoreTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))
     }
 
+    func testEvictionSkipsACaptureWhoseEditIsWaitingToUpload() throws {
+        // An edit to an acknowledged capture is queued for upload, and its locator still names
+        // the previous revision. The file is the only copy of the edit.
+        let file = try insert("EDITED", bytes: 500, opened: Date(timeIntervalSince1970: 1))
+        try store.queueUpload("EDITED")
+
+        let plan = try blobs.planEviction(ceilingBytes: 0)
+
+        XCTAssertTrue(plan.evicted.isEmpty)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))
+    }
+
+    func testAnEditDuringAnUploadKeepsItsQueueEntryAndQueuesNoRow() throws {
+        try insert("RACE", bytes: 100)
+        try store.queueUpload("RACE")
+        // The upload of revision 0 finishes after an edit has moved the capture to revision 1.
+        try database.queue.write { d in
+            try d.execute(sql: "UPDATE captures SET contentRevision = 1 WHERE id = 'RACE'")
+        }
+
+        try store.completeUpload("RACE", revision: 0, observed: 0, deviceID: deviceID)
+
+        XCTAssertEqual(try store.queuedUploads(), ["RACE"], "revision 1 still has to upload")
+        XCTAssertFalse(try store.hasPending(), "no row pairs revision 1 with revision 0's bytes")
+
+        try store.completeUpload("RACE", revision: 1, observed: 0, deviceID: deviceID)
+
+        XCTAssertEqual(try store.queuedUploads(), [])
+        XCTAssertTrue(try store.hasPending())
+    }
+
     func testCarryingOutAPlanRemovesTheFileAndMarksTheRowRemote() throws {
         let file = try insert("GOING", bytes: 100, opened: Date(timeIntervalSince1970: 1))
 

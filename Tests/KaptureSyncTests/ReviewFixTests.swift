@@ -121,6 +121,43 @@ final class ReviewFixTests: XCTestCase {
                           "a fetch would otherwise overwrite an unrelated file")
     }
 
+    func testANameThatIsADotNeverBecomesTheShardDirectory() throws {
+        for name in [".", ""] {
+            let derived = SyncStore.derivedRelPath(for: row("DOTTED", name: name))
+            XCTAssertTrue(derived.hasSuffix("/DOTTED"), "\"\(name)\" became \(derived)")
+        }
+    }
+
+    // MARK: - Review of 2026-10-21: synced thumbnails follow the log
+
+    func testAThumbnailForAnOlderRevisionIsRemovedWhenTheLocatorChanges() throws {
+        let thumbs = directory.appendingPathComponent("Thumbnails")
+        try FileManager.default.createDirectory(at: thumbs, withIntermediateDirectories: true)
+        let store = SyncStore(db: database, crypto: crypto, root: root, thumbnailDirectory: thumbs)
+        let first = BlobLocator(revision: 1, writer: otherDevice, capture: "BLINDED")
+        var result = MergeResult()
+        result.upserts = [row("EDITED", blobs: [.thumb: first]), row("GONE", blobs: [.thumb: first])]
+        try store.apply(result, cursor: nil, deviceID: deviceID)
+        let edited = thumbs.appendingPathComponent("EDITED.jpg")
+        let gone = thumbs.appendingPathComponent("GONE.jpg")
+        try Data("old".utf8).write(to: edited)
+        try Data("old".utf8).write(to: gone)
+
+        // The same locator again leaves the file; a new revision's locator or a delete removes it.
+        try store.apply(result, cursor: nil, deviceID: deviceID)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: edited.path))
+
+        let second = BlobLocator(revision: 2, writer: otherDevice, capture: "BLINDED")
+        result = MergeResult()
+        result.upserts = [row("EDITED", blobs: [.thumb: second])]
+        result.deletions = ["GONE"]
+        try store.apply(result, cursor: nil, deviceID: deviceID)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: edited.path),
+                       "missingThumbnails fetches only a file that is not there")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: gone.path))
+    }
+
     // MARK: - Finding 7: a pulled deletion takes its bytes with it
 
     func testAPulledDeletionRemovesTheFileSidecarAndLocators() throws {

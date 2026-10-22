@@ -95,11 +95,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     /// Sweep once, through whichever mechanism owns deletion right now.
+    ///
+    /// A Mac with the toggle on that has never enrolled has nothing in the log, so its trash is
+    /// still its own to sweep. Testing the toggle alone left such a Mac with no sweep at all:
+    /// `sweepNow` does nothing until the library is ready.
     nonisolated static func sweep(_ library: Library?) async {
-        if Settings.shared.libraryEnabled {
-            await LibraryService.shared.sweepNow()
-        } else {
+        switch LibraryService.localState() {
+        case .disabled, .needsSetup:
             library?.sweepTrash()
+        case .locked, .awaitingApproval, .ready:
+            await LibraryService.shared.sweepNow()
         }
     }
 

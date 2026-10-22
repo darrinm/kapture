@@ -224,6 +224,11 @@ public struct BlobStore: Sendable {
     /// Two things are never evicted: a capture whose bytes the server has not acknowledged
     /// (F52), because the local copy is the only copy, and anything still named by an unsynced
     /// `.originals/` entry. Eviction is for bytes that can be fetched again, and nothing else.
+    ///
+    /// A capture in `upload_queue` is excluded as well. An edit to an acknowledged capture is
+    /// queued there, and its `blob_cache` locator still names the previous revision until the
+    /// upload completes. Evicting it deleted the only copy of the edit, and the drain then
+    /// pushed the new revision's row with the old revision's locator.
     public func planEviction(ceilingBytes: Int) throws -> EvictionPlan {
         try db.queue.read { d in
             let rows = try Row.fetchAll(d, sql: """
@@ -232,6 +237,7 @@ public struct BlobStore: Sendable {
                 JOIN blob_cache b ON b.captureId = c.id AND b.purpose = 'blob'
                 WHERE c.blobState = 'local' AND c.acknowledged = 1
                   AND c.id NOT IN (SELECT captureId FROM sync_outbox)
+                  AND c.id NOT IN (SELECT captureId FROM upload_queue)
                   AND c.id NOT IN (SELECT captureId FROM blocked_captures)
                 ORDER BY b.lastOpenedAt ASC NULLS FIRST
                 """)

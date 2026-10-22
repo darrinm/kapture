@@ -60,11 +60,17 @@ public struct SyncStore: Sendable {
     /// The library folder. With it, a deletion pulled from the log removes the file it names as
     /// well as the row (F7). Without it — the tests that only exercise rows — the file is left.
     public let root: URL?
+    /// Where synced thumbnails are kept (`BlobStore.thumbnailDirectory`). With it, applying a
+    /// merge removes a thumbnail whose locator changed or whose capture was deleted, so the next
+    /// `fetchThumbnails` downloads the current one. Without it, thumbnail files are left alone.
+    public let thumbnailDirectory: URL?
 
-    public init(db: KaptureCore.Database, crypto: LibraryCrypto, root: URL? = nil) {
+    public init(db: KaptureCore.Database, crypto: LibraryCrypto, root: URL? = nil,
+                thumbnailDirectory: URL? = nil) {
         self.db = db
         self.crypto = crypto
         self.root = root
+        self.thumbnailDirectory = thumbnailDirectory
     }
 
     /// What this build can apply: payload versions and op kinds together (F135).
@@ -371,10 +377,21 @@ public struct SyncStore: Sendable {
 
     /// Leave the queue and enter the outbox in one transaction (F29). Two transactions would let
     /// a crash between them remove the upload and never queue the row that names it.
-    public func completeUpload(_ captureID: String, observed: Int64, deviceID: String) throws {
+    ///
+    /// `revision` is the revision whose bytes were uploaded. An edit committed during the upload
+    /// re-queues the capture under the same `upload_queue` entry. In that case the entry stays
+    /// for the next drain and no row is queued, because the row would carry the new revision
+    /// with the uploaded revision's locator.
+    public func completeUpload(_ captureID: String, revision: Int64, observed: Int64,
+                               deviceID: String) throws {
         try db.queue.write { d in
+            guard let record = try CaptureRecord.fetchOne(d, key: captureID) else {
+                try d.execute(sql: "DELETE FROM upload_queue WHERE captureId = ?",
+                              arguments: [captureID])
+                return
+            }
+            guard record.contentRevision == revision else { return }
             try d.execute(sql: "DELETE FROM upload_queue WHERE captureId = ?", arguments: [captureID])
-            guard let record = try CaptureRecord.fetchOne(d, key: captureID) else { return }
             var row = try self.row(for: record, in: d)
             row.lamport = try self.nextLamport(in: d)
             row.deviceID = deviceID
@@ -533,16 +550,26 @@ public struct SyncStore: Sendable {
         // Files are removed after the transaction commits: the filesystem is not
         // transactional, and removing a file whose row then failed to delete would leave a
         // row pointing at nothing.
-        let removed = try db.queue.write { d -> [String] in
+        let (removed, staleThumbnails) = try db.queue.write { d -> ([String], [String]) in
             var removedPaths: [String] = []
+            // `missingThumbnails` checks only whether `<id>.jpg` exists. A thumbnail fetched for
+            // an older revision would stay in the grid after another Mac's edit, and a deleted
+            // capture's thumbnail would stay on disk, unless the file is removed here.
+            var staleThumbnails: [String] = []
             // A fork is minted here and has never been near the log. Marking it acknowledged
             // would make F130 read its absence from the next snapshot as a delete and remove
             // the edit this device just rescued.
             let forks = Set(result.forks)
             for row in result.upserts {
+                if thumbnailDirectory != nil, let incoming = row.blobs[.thumb],
+                   let held = try blobLocators(for: row.captureID, in: d)[.thumb],
+                   incoming != held {
+                    staleThumbnails.append(row.captureID)
+                }
                 try upsert(row, in: d, acknowledged: !forks.contains(row.captureID))
             }
             for captureID in result.deletions {
+                staleThumbnails.append(captureID)
                 if let relPath = try String.fetchOne(
                     d, sql: "SELECT relPath FROM captures WHERE id = ?", arguments: [captureID]) {
                     removedPaths.append(relPath)
@@ -562,9 +589,15 @@ public struct SyncStore: Sendable {
                 try d.execute(sql: "UPDATE sync_state SET cursor = ? WHERE id = 1",
                               arguments: [cursor])
             }
-            return removedPaths
+            return (removedPaths, staleThumbnails)
         }
         removeFiles(atRelPaths: removed)
+        if let thumbnailDirectory {
+            for captureID in staleThumbnails {
+                try? FileManager.default.removeItem(
+                    at: thumbnailDirectory.appendingPathComponent("\(captureID).jpg"))
+            }
+        }
     }
 
     /// A deleted capture's file, its sidecar, and the pre-edit original the sidecar names.
@@ -688,10 +721,13 @@ public struct SyncStore: Sendable {
     static func derivedRelPath(for row: SyncedRow) -> String {
         // The name is sanitized to a single component: an op is attacker-controlled if a device
         // credential leaks (§13), and a name carrying a separator would escape the shard.
-        let safe = row.name
+        var safe = row.name
             .replacingOccurrences(of: "/", with: "-")
             .replacingOccurrences(of: "\\", with: "-")
             .replacingOccurrences(of: "..", with: "-")
+        // An empty name or "." makes the path the shard directory itself. A later delete or
+        // eviction of that capture then removes the directory and every capture in it.
+        if safe.isEmpty || safe == "." { safe = row.captureID }
         return "\(shardFormatter.string(from: row.createdAt))/\(safe)"
     }
 }

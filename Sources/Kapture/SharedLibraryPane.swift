@@ -71,8 +71,12 @@ final class SharedLibraryModel: ObservableObject {
     }
 
     /// Create the library here and enrol this Mac as its first device.
+    ///
+    /// The service is not started here. Starting it runs a whole sync pass, which seeds and
+    /// uploads this Mac's captures, and F16 requires the recovery code on screen before the
+    /// first upload. The pane starts the service when the recovery sheet is dismissed.
     func create(ownerToken: String, deviceName: String) async {
-        await run {
+        await run(restartAfter: false) {
             let (result, code) = try await LibraryService.createLibrary(
                 ownerToken: ownerToken, deviceName: deviceName)
             self.recoveryCode = code
@@ -116,12 +120,13 @@ final class SharedLibraryModel: ObservableObject {
         await refresh()
     }
 
-    private func run(_ body: @escaping () async throws -> Void) async {
+    private func run(restartAfter: Bool = true,
+                     _ body: @escaping () async throws -> Void) async {
         busy = true
         error = nil
         do {
             try await body()
-            await restart()
+            if restartAfter { await restart() }
         } catch let failure as SyncFailure {
             error = failure.description
         } catch {
@@ -142,6 +147,8 @@ struct SharedLibraryPane: View {
     @State private var typedRecoveryCode = ""
     @State private var wroteItDown = false
     @State private var showingRecovery = false
+    /// Set when a library was just created: dismissing the recovery sheet starts the service.
+    @State private var startAfterRecovery = false
 
     private var deviceName: String { Host.current().localizedName ?? "This Mac" }
 
@@ -179,7 +186,11 @@ struct SharedLibraryPane: View {
         .task { await model.restart() }
         .task(id: enabled) { if enabled { await model.watch() } }
         .onChange(of: enabled) { _, _ in Task { await model.restart() } }
-        .sheet(isPresented: $showingRecovery) { recoverySheet }
+        .sheet(isPresented: $showingRecovery, onDismiss: {
+            guard startAfterRecovery else { return }
+            startAfterRecovery = false
+            Task { await model.restart() }
+        }) { recoverySheet }
     }
 
     // MARK: - Not set up yet
@@ -193,7 +204,10 @@ struct SharedLibraryPane: View {
                 Button("Create a library here") {
                     Task {
                         await model.create(ownerToken: ownerToken, deviceName: deviceName)
-                        if model.recoveryCode != nil { showingRecovery = true }
+                        if model.recoveryCode != nil {
+                            startAfterRecovery = true
+                            showingRecovery = true
+                        }
                     }
                 }
                 .disabled(ownerToken.isEmpty || model.busy)

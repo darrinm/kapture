@@ -218,7 +218,8 @@ public actor LibraryService {
 
         let root = Settings.shared.libraryRoot
         let crypto = LibraryCrypto(key: key)
-        let store = SyncStore(db: db, crypto: crypto, root: root)
+        let store = SyncStore(db: db, crypto: crypto, root: root,
+                              thumbnailDirectory: Self.thumbnailDirectory())
         if ((try? store.identity()) ?? nil) == nil {
             _ = try? store.enable(deviceID: deviceID)
         }
@@ -414,8 +415,8 @@ public actor LibraryService {
                                                         using: transport)
                     }
                 }
-                try store.completeUpload(captureID, observed: identity.cursor,
-                                         deviceID: identity.deviceID)
+                try store.completeUpload(captureID, revision: content.revision,
+                                         observed: identity.cursor, deviceID: identity.deviceID)
                 lastError = nil
             } catch {
                 try? store.deferUpload(captureID, error: String(describing: error))

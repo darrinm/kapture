@@ -100,6 +100,45 @@ public struct CaptureRecord: Codable, Sendable, FetchableRecord, PersistableReco
     }
 }
 
+extension CaptureRecord {
+    /// Decodes a record whose shared-library fields may be absent.
+    ///
+    /// `op_journal` stores each pending `FileOperation` as JSON, record included. A plan written
+    /// by a build before migration v7 has no `lamport`, `blobState` or `acknowledged` key, and
+    /// the synthesized decoder throws `keyNotFound` for a non-optional property even when it has
+    /// a default value. Recovery treats that `DecodingError` as permanent and quarantines the
+    /// entry, so the capture stayed blocked after the upgrade.
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        kind = try c.decode(CaptureKind.self, forKey: .kind)
+        status = try c.decode(CaptureStatus.self, forKey: .status)
+        createdAt = try c.decode(Date.self, forKey: .createdAt)
+        trashedAt = try c.decodeIfPresent(Date.self, forKey: .trashedAt)
+        width = try c.decode(Int.self, forKey: .width)
+        height = try c.decode(Int.self, forKey: .height)
+        bytes = try c.decode(Int.self, forKey: .bytes)
+        relPath = try c.decode(String.self, forKey: .relPath)
+        sourceApp = try c.decodeIfPresent(String.self, forKey: .sourceApp)
+        windowTitle = try c.decodeIfPresent(String.self, forKey: .windowTitle)
+        screenID = try c.decodeIfPresent(Int.self, forKey: .screenID)
+        fastID = try c.decode(String.self, forKey: .fastID)
+        contentRevision = try c.decodeIfPresent(Int64.self, forKey: .contentRevision) ?? 0
+        contentHash = try c.decodeIfPresent(String.self, forKey: .contentHash)
+        aiState = try c.decode(AIState.self, forKey: .aiState)
+        summary = try c.decodeIfPresent(String.self, forKey: .summary)
+        shareURL = try c.decodeIfPresent(String.self, forKey: .shareURL)
+        shareStale = try c.decode(Bool.self, forKey: .shareStale)
+        durationS = try c.decodeIfPresent(Double.self, forKey: .durationS)
+        lamport = try c.decodeIfPresent(Int64.self, forKey: .lamport) ?? 0
+        syncDeviceID = try c.decodeIfPresent(String.self, forKey: .syncDeviceID)
+        forkedFrom = try c.decodeIfPresent(String.self, forKey: .forkedFrom)
+        blobState = try c.decodeIfPresent(String.self, forKey: .blobState) ?? "local"
+        parentHash = try c.decodeIfPresent(String.self, forKey: .parentHash)
+        acknowledged = try c.decodeIfPresent(Bool.self, forKey: .acknowledged) ?? false
+    }
+}
+
 /// Crockford-base32 ULID: sortable, unique, no deps.
 public enum ULID {
     private static let alphabet = Array("0123456789ABCDEFGHJKMNPQRSTVWXYZ")
