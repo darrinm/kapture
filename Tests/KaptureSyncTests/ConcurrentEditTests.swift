@@ -151,6 +151,72 @@ final class ConcurrentEditTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: forkFile), studioEdit, "the edit is on disk as the fork")
     }
 
+    // MARK: - Renames (G2)
+
+    func relPath(of id: String, on mac: Mac) throws -> String? {
+        try mac.library.db.queue.read {
+            try String.fetchOne($0, sql: "SELECT relPath FROM captures WHERE id = ?", arguments: [id])
+        }
+    }
+
+    func testARenameReachesTheOtherMacAndMovesItsFile() async throws {
+        // Renames stayed on the Mac that made them, and the other Mac's next push of the capture
+        // sent the old name back to the log with a newer lamport.
+        let studio = try mac("studio", deviceID: "01JBAAAAAAAAAAAAAAAAAAAAAA")
+        let macbook = try mac("macbook", deviceID: "01JBBBBBBBBBBBBBBBBBBBBBBB")
+        let bytes = try png(red: 0.1)
+        let (record, _) = try studio.library.storePNG(bytes, width: 8, height: 8, sourceApp: nil,
+                                                      windowTitle: nil, screenID: nil)
+        try await publish(record.id, from: studio)
+        _ = try await macbook.engine.syncOnce()
+        try fetched(record.id, bytes: bytes, on: macbook)
+
+        XCTAssertTrue(studio.library.applyName(record.id, baseName: "invoice march", tags: [],
+                                               summary: "an invoice", aiState: .namedLocal))
+        try await publish(record.id, from: studio)
+        _ = try await macbook.engine.syncOnce()
+
+        let path = try XCTUnwrap(try relPath(of: record.id, on: macbook))
+        XCTAssertEqual((path as NSString).lastPathComponent, "invoice march.png")
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: macbook.library.root.appendingPathComponent(path).path), "the file moved with it")
+
+        // The MacBook's next push carries the new name, not the old one.
+        try await publish(record.id, from: macbook)
+        _ = try await studio.engine.syncOnce()
+        XCTAssertEqual(try relPath(of: record.id, on: studio).map { ($0 as NSString).lastPathComponent },
+                       "invoice march.png")
+    }
+
+    func testANameThatHadToBeSuffixedHereIsNotRenamedOnEveryPull() async throws {
+        let studio = try mac("studio", deviceID: "01JBAAAAAAAAAAAAAAAAAAAAAA")
+        let macbook = try mac("macbook", deviceID: "01JBBBBBBBBBBBBBBBBBBBBBBB")
+        let (record, _) = try studio.library.storePNG(try png(red: 0.1), width: 8, height: 8,
+                                                      sourceApp: nil, windowTitle: nil, screenID: nil)
+        try await publish(record.id, from: studio)
+        _ = try await macbook.engine.syncOnce()
+        let first = try XCTUnwrap(try relPath(of: record.id, on: macbook))
+
+        // A capture of the MacBook's own takes the name the Studio's capture is about to get.
+        XCTAssertTrue(studio.library.applyName(record.id, baseName: "taken", tags: [],
+                                               summary: "", aiState: .namedLocal))
+        let blocker = macbook.library.root
+            .appendingPathComponent((first as NSString).deletingLastPathComponent)
+            .appendingPathComponent("taken.png")
+        try FileManager.default.createDirectory(at: blocker.deletingLastPathComponent(),
+                                                withIntermediateDirectories: true)
+        try Data("mine".utf8).write(to: blocker)
+        try await publish(record.id, from: studio)
+        _ = try await macbook.engine.syncOnce()
+        let suffixed = try XCTUnwrap(try relPath(of: record.id, on: macbook))
+        XCTAssertEqual((suffixed as NSString).lastPathComponent, "taken 2.png")
+
+        // The same name pulled again leaves it where it is.
+        try await publish(record.id, from: studio)
+        _ = try await macbook.engine.syncOnce()
+        XCTAssertEqual(try relPath(of: record.id, on: macbook), suffixed)
+    }
+
     struct UploadState {
         var forkBlobState = "", forkRelPath = "", originalBlobState = ""
         var forkQueued = false, originalQueued = false, forkLocators = 0

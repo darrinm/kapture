@@ -571,6 +571,7 @@ public struct SyncStore: Sendable {
             // fork's: its file moves to the fork, which uploads under its own key, and the
             // original is fetched again from the server.
             var unuploaded: [(fork: String, original: String, relPath: String)] = []
+            var renames: [(from: String, to: String)] = []
             for row in result.upserts where forks.contains(row.captureID) {
                 guard let original = row.forkedFrom,
                       let local = try CaptureRecord.fetchOne(d, key: original),
@@ -586,7 +587,9 @@ public struct SyncStore: Sendable {
                    incoming != held {
                     staleThumbnails.append(row.captureID)
                 }
-                try upsert(row, in: d, acknowledged: !forks.contains(row.captureID))
+                if let rename = try upsert(row, in: d, acknowledged: !forks.contains(row.captureID)) {
+                    renames.append(rename)
+                }
             }
             for captureID in result.deletions {
                 staleThumbnails.append(captureID)
@@ -601,7 +604,9 @@ public struct SyncStore: Sendable {
                               arguments: [captureID])
             }
             for row in result.outbox {
-                try upsert(row, in: d, acknowledged: false)
+                if let rename = try upsert(row, in: d, acknowledged: false) {
+                    renames.append(rename)
+                }
                 try enqueue(row, kind: .upsert, observed: cursor ?? 0,
                             deviceID: deviceID, in: d)
             }
@@ -627,7 +632,9 @@ public struct SyncStore: Sendable {
                 try d.execute(sql: "UPDATE sync_state SET cursor = ? WHERE id = 1",
                               arguments: [cursor])
             }
-            return (removedPaths, staleThumbnails, moves)
+            // An unuploaded edit moves first: it was recorded at the original's path from before
+            // any rename in this same page.
+            return (removedPaths, staleThumbnails, moves + renames)
         }
         removeFiles(atRelPaths: removed)
         moveFiles(moves)
@@ -672,7 +679,9 @@ public struct SyncStore: Sendable {
 
     /// Write one synced row into `captures`, deriving the device-local fields rather than
     /// taking them from the log (F83): `relPath` is this Mac's, not the sender's.
-    func upsert(_ row: SyncedRow, in d: GRDB.Database, acknowledged: Bool) throws {
+    @discardableResult
+    func upsert(_ row: SyncedRow, in d: GRDB.Database, acknowledged: Bool) throws
+        -> (from: String, to: String)? {
         // Fetch the whole record and write the whole record. The hand-written INSERT this
         // replaces named 26 columns in three lists that had to stay aligned by eye, and it
         // duplicated a schema `CaptureRecord` already describes.
@@ -718,6 +727,18 @@ public struct SyncStore: Sendable {
         } else if let incoming = row.blobs[.blob], incoming != heldBlob {
             record.blobState = BlobState.remote.rawValue
         }
+
+        // A rename on another Mac (G2). The row's name is this Mac's file name, so a pulled
+        // name that differs is renamed here, in the same directory. Left alone, the old name
+        // stayed in the grid and went back to the log with this Mac's next push.
+        var rename: (from: String, to: String)?
+        if let existing {
+            let target = try renamedRelPath(existing.relPath, to: row, in: d)
+            if target != existing.relPath {
+                rename = (existing.relPath, target)
+                record.relPath = target
+            }
+        }
         try record.save(d)
 
         // The locators themselves (F23, F129). Without them a capture pulled from another Mac
@@ -740,6 +761,36 @@ public struct SyncStore: Sendable {
             ON CONFLICT(captureId) DO UPDATE SET
               name = excluded.name, summary = excluded.summary, ocr = excluded.ocr
             """, arguments: [row.captureID, row.name, row.summary ?? "", row.ocr ?? ""])
+        return rename
+    }
+
+    /// `relPath` with its file name replaced by the row's, in the same directory (a trashed
+    /// capture stays in `.trash/`). Returns `relPath` itself when the name already matches, or
+    /// when the only names free are suffixed forms and `relPath` is already one of them, so a
+    /// Mac that had to suffix a name does not rename it again on every pull.
+    func renamedRelPath(_ relPath: String, to row: SyncedRow, in d: GRDB.Database) throws -> String {
+        let name = Self.safeName(for: row)
+        let current = relPath as NSString
+        guard current.lastPathComponent != name else { return relPath }
+        let directory = current.deletingLastPathComponent
+        let base = directory.isEmpty ? name : "\(directory)/\(name)"
+        func taken(_ candidate: String) throws -> Bool {
+            if candidate == relPath { return false }
+            if try Bool.fetchOne(d, sql: "SELECT EXISTS(SELECT 1 FROM captures WHERE relPath = ?)",
+                                 arguments: [candidate]) == true { return true }
+            if let root, FileManager.default.fileExists(
+                atPath: root.appendingPathComponent(candidate).path) { return true }
+            return false
+        }
+        guard try taken(base) else { return base }
+        let ns = base as NSString
+        let ext = ns.pathExtension
+        let stem = ext.isEmpty ? base : ns.deletingPathExtension
+        for n in 2...10_000 {
+            let candidate = ext.isEmpty ? "\(stem) \(n)" : "\(stem) \(n).\(ext)"
+            if try !taken(candidate) { return candidate }
+        }
+        return relPath
     }
 
     /// A path for a capture this Mac has never held, free both in the index and on disk.
@@ -772,15 +823,18 @@ public struct SyncStore: Sendable {
     /// This Mac's path for a capture it has never held: the sharded directory its date implies,
     /// with the log's name. F83 keeps paths local, so nothing here consults the sender's.
     static func derivedRelPath(for row: SyncedRow) -> String {
-        // The name is sanitized to a single component: an op is attacker-controlled if a device
-        // credential leaks (§13), and a name carrying a separator would escape the shard.
-        var safe = row.name
+        "\(shardFormatter.string(from: row.createdAt))/\(safeName(for: row))"
+    }
+
+    /// The row's name as one path component. An op is attacker-controlled if a device
+    /// credential leaks (§13), and a name carrying a separator would escape its directory.
+    static func safeName(for row: SyncedRow) -> String {
+        let safe = row.name
             .replacingOccurrences(of: "/", with: "-")
             .replacingOccurrences(of: "\\", with: "-")
             .replacingOccurrences(of: "..", with: "-")
-        // An empty name or "." makes the path the shard directory itself. A later delete or
-        // eviction of that capture then removes the directory and every capture in it.
-        if safe.isEmpty || safe == "." { safe = row.captureID }
-        return "\(shardFormatter.string(from: row.createdAt))/\(safe)"
+        // An empty name or "." makes the path the directory itself. A later delete or eviction
+        // of that capture then removes the directory and every capture in it.
+        return safe.isEmpty || safe == "." ? row.captureID : safe
     }
 }
