@@ -336,15 +336,17 @@ public struct SyncStore: Sendable {
     /// Queue a capture's bytes for upload. Keyed by capture, so a second edit before the first
     /// upload drains replaces the entry rather than queuing a stale revision behind it.
     public func queueUpload(_ captureID: String) throws {
-        try db.queue.write { d in
-            try d.execute(sql: """
-                INSERT INTO upload_queue (captureId, queuedAt, attempts, nextAttemptAt, lastError, priority)
-                VALUES (?, ?, 0, NULL, NULL, 0)
-                ON CONFLICT(captureId) DO UPDATE SET
-                  queuedAt = excluded.queuedAt, attempts = 0, nextAttemptAt = NULL, lastError = NULL,
-                  priority = 0
-                """, arguments: [captureID, Date()])
-        }
+        try db.queue.write { d in try queueUpload(captureID, in: d) }
+    }
+
+    func queueUpload(_ captureID: String, in d: GRDB.Database) throws {
+        try d.execute(sql: """
+            INSERT INTO upload_queue (captureId, queuedAt, attempts, nextAttemptAt, lastError, priority)
+            VALUES (?, ?, 0, NULL, NULL, 0)
+            ON CONFLICT(captureId) DO UPDATE SET
+              queuedAt = excluded.queuedAt, attempts = 0, nextAttemptAt = NULL, lastError = NULL,
+              priority = 0
+            """, arguments: [captureID, Date()])
     }
 
     /// Live changes before seeded ones, and within each the newest capture first (F65): the
@@ -550,7 +552,8 @@ public struct SyncStore: Sendable {
         // Files are removed after the transaction commits: the filesystem is not
         // transactional, and removing a file whose row then failed to delete would leave a
         // row pointing at nothing.
-        let (removed, staleThumbnails) = try db.queue.write { d -> ([String], [String]) in
+        let (removed, staleThumbnails, moves) = try db.queue.write {
+            d -> ([String], [String], [(from: String, to: String)]) in
             var removedPaths: [String] = []
             // `missingThumbnails` checks only whether `<id>.jpg` exists. A thumbnail fetched for
             // an older revision would stay in the grid after another Mac's edit, and a deleted
@@ -560,6 +563,23 @@ public struct SyncStore: Sendable {
             // would make F130 read its absence from the next snapshot as a delete and remove
             // the edit this device just rescued.
             let forks = Set(result.forks)
+
+            // A fork of this Mac's edit whose bytes have not uploaded yet. The fork inherits the
+            // local row's locators, which still name the bytes from before the edit, and the
+            // edited file is still at the original's path, where the queued upload would send
+            // it as the original's new revision over the other Mac's edit. The edit is the
+            // fork's: its file moves to the fork, which uploads under its own key, and the
+            // original is fetched again from the server.
+            var unuploaded: [(fork: String, original: String, relPath: String)] = []
+            for row in result.upserts where forks.contains(row.captureID) {
+                guard let original = row.forkedFrom,
+                      let local = try CaptureRecord.fetchOne(d, key: original),
+                      local.contentHash != nil, local.contentHash == row.contentHash,
+                      try Int.fetchOne(d, sql: "SELECT count(*) FROM upload_queue WHERE captureId = ?",
+                                       arguments: [original]) ?? 0 > 0 else { continue }
+                unuploaded.append((row.captureID, original, local.relPath))
+            }
+
             for row in result.upserts {
                 if thumbnailDirectory != nil, let incoming = row.blobs[.thumb],
                    let held = try blobLocators(for: row.captureID, in: d)[.thumb],
@@ -585,18 +605,51 @@ public struct SyncStore: Sendable {
                 try enqueue(row, kind: .upsert, observed: cursor ?? 0,
                             deviceID: deviceID, in: d)
             }
+            var moves: [(from: String, to: String)] = []
+            for edit in unuploaded {
+                guard let forkPath = try String.fetchOne(
+                    d, sql: "SELECT relPath FROM captures WHERE id = ?", arguments: [edit.fork])
+                else { continue }
+                try d.execute(sql: "DELETE FROM blob_cache WHERE captureId = ?",
+                              arguments: [edit.fork])
+                try d.execute(sql: "DELETE FROM sync_outbox WHERE captureId = ?",
+                              arguments: [edit.fork])
+                try d.execute(sql: "UPDATE captures SET blobState = 'local' WHERE id = ?",
+                              arguments: [edit.fork])
+                try d.execute(sql: "UPDATE captures SET blobState = 'remote' WHERE id = ?",
+                              arguments: [edit.original])
+                try d.execute(sql: "DELETE FROM upload_queue WHERE captureId = ?",
+                              arguments: [edit.original])
+                try queueUpload(edit.fork, in: d)
+                moves.append((edit.relPath, forkPath))
+            }
             if let cursor {
                 try d.execute(sql: "UPDATE sync_state SET cursor = ? WHERE id = 1",
                               arguments: [cursor])
             }
-            return (removedPaths, staleThumbnails)
+            return (removedPaths, staleThumbnails, moves)
         }
         removeFiles(atRelPaths: removed)
+        moveFiles(moves)
         if let thumbnailDirectory {
             for captureID in staleThumbnails {
                 try? FileManager.default.removeItem(
                     at: thumbnailDirectory.appendingPathComponent("\(captureID).jpg"))
             }
+        }
+    }
+
+    /// An unuploaded edit's file and sidecar, from the original's path to its fork's.
+    func moveFiles(_ moves: [(from: String, to: String)]) {
+        guard let root else { return }
+        let files = FileManager.default
+        for move in moves {
+            let source = root.appendingPathComponent(move.from)
+            let target = root.appendingPathComponent(move.to)
+            try? files.createDirectory(at: target.deletingLastPathComponent(),
+                                       withIntermediateDirectories: true)
+            try? files.moveItem(at: Sidecar.url(for: source), to: Sidecar.url(for: target))
+            try? files.moveItem(at: source, to: target)
         }
     }
 

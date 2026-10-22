@@ -117,6 +117,63 @@ final class ConcurrentEditTests: XCTestCase {
                           "the original and the fork hold the two different edits")
     }
 
+    func testAnEditNotYetUploadedBecomesTheForkWithItsOwnBytes() async throws {
+        // The app's path: an edit queues its upload, and a sync pulls the other Mac's edit
+        // before the drain sends it. The fork inherited the pre-edit locators, and the queued
+        // upload would have sent this Mac's edit as the original's next revision, over the
+        // other Mac's.
+        let studio = try mac("studio", deviceID: "01JBAAAAAAAAAAAAAAAAAAAAAA")
+        let macbook = try mac("macbook", deviceID: "01JBBBBBBBBBBBBBBBBBBBBBBB")
+        let original = try png(red: 0.1)
+        let (record, _) = try studio.library.storePNG(original, width: 8, height: 8, sourceApp: nil,
+                                                      windowTitle: nil, screenID: nil)
+        try await publish(record.id, from: studio)
+        _ = try await macbook.engine.syncOnce()
+        try fetched(record.id, bytes: original, on: macbook)
+
+        try macbook.library.applyEdit(record.id, flattenedPNG: try png(red: 0.5), layersJSON: "[]",
+                                      width: 8, height: 8)
+        try await publish(record.id, from: macbook)
+        let studioEdit = try png(red: 0.9)
+        try studio.library.applyEdit(record.id, flattenedPNG: studioEdit, layersJSON: "[]",
+                                     width: 8, height: 8)
+        try studio.store.queueUpload(record.id)          // what publish does on an edit
+        _ = try await studio.engine.syncOnce()           // pulls the MacBook's edit first
+
+        let fork = try XCTUnwrap(try forks(of: record.id, on: studio).first)
+        let state = try uploadState(on: studio, fork: fork.captureID, original: record.id)
+        XCTAssertEqual(state.forkBlobState, "local")
+        XCTAssertEqual(state.forkQueued, true, "the fork uploads the edit under its own key")
+        XCTAssertEqual(state.forkLocators, 0, "not the pre-edit bytes it inherited")
+        XCTAssertEqual(state.originalQueued, false, "the edit no longer goes up as the original")
+        XCTAssertEqual(state.originalBlobState, "remote", "the original is fetched again")
+        let forkFile = studio.library.root.appendingPathComponent(state.forkRelPath)
+        XCTAssertEqual(try Data(contentsOf: forkFile), studioEdit, "the edit is on disk as the fork")
+    }
+
+    struct UploadState {
+        var forkBlobState = "", forkRelPath = "", originalBlobState = ""
+        var forkQueued = false, originalQueued = false, forkLocators = 0
+    }
+
+    func uploadState(on mac: Mac, fork: String, original: String) throws -> UploadState {
+        try mac.library.db.queue.read { d in
+            var state = UploadState()
+            let forkRow = try Row.fetchOne(d, sql: "SELECT blobState, relPath FROM captures WHERE id = ?",
+                                           arguments: [fork])
+            state.forkBlobState = forkRow?["blobState"] ?? ""
+            state.forkRelPath = forkRow?["relPath"] ?? ""
+            state.originalBlobState = try String.fetchOne(
+                d, sql: "SELECT blobState FROM captures WHERE id = ?", arguments: [original]) ?? ""
+            let queued = try String.fetchAll(d, sql: "SELECT captureId FROM upload_queue")
+            state.forkQueued = queued.contains(fork)
+            state.originalQueued = queued.contains(original)
+            state.forkLocators = try Int.fetchOne(
+                d, sql: "SELECT count(*) FROM blob_cache WHERE captureId = ?", arguments: [fork]) ?? 0
+            return state
+        }
+    }
+
     func testASecondEditOnOneSideStillForksAgainstTheOther() async throws {
         // Stage 5 exactly: the MacBook saved twice, so it reached revision 2 while the Studio
         // was at 1. Different revisions, so only the parent hash shows they diverged (F112).
