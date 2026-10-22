@@ -13,12 +13,20 @@
   "r2_buckets": [{ "binding": "BUCKET", "bucket_name": "kapture-shares" }],
   "kv_namespaces": [{ "binding": "QUOTAS", "id": "7b8c352113924566884294c22a72a659" }],
   "durable_objects": {
-    "bindings": [{ "name": "QUOTA_COUNTERS", "class_name": "QuotaCounter" }]
+    "bindings": [
+      { "name": "QUOTA_COUNTERS", "class_name": "QuotaCounter" },
+      { "name": "LIBRARY_LOGS", "class_name": "LibraryLog" }
+    ]
   },
-  "migrations": [{ "tag": "v1-quota-counter", "new_sqlite_classes": ["QuotaCounter"] }],
+  "migrations": [
+    { "tag": "v1-quota-counter", "new_sqlite_classes": ["QuotaCounter"] },
+    { "tag": "v2-library-log", "new_sqlite_classes": ["LibraryLog"] }
+  ],
   "vars": {
     // the owner allowed to delete anyone's share
     "ADMIN_OWNER": "darrin",
+    // owners allowed the shared-library routes (F118); the author pays for the bytes
+    "LIBRARY_OWNERS": "darrin",
     // where /download and /appcast.xml redirect; point this at your own releases
     "RELEASES_BASE": "https://github.com/darrinm/kapture/releases",
     // Cloudflare Access guards /admin. The Worker verifies the JWT itself rather than trusting

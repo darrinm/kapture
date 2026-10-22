@@ -123,7 +123,7 @@ struct SecretField: View {
 
 struct SettingsView: View {
     enum Tab: Hashable, CaseIterable, Identifiable {
-        case general, overlay, recording, library, shortcuts, sharing
+        case general, overlay, recording, library, shortcuts, sharing, sharedLibrary
         var id: Self { self }
 
         var title: String {
@@ -134,6 +134,7 @@ struct SettingsView: View {
             case .library: "Library"
             case .shortcuts: "Shortcuts"
             case .sharing: "Sharing"
+            case .sharedLibrary: "Shared Library"
             }
         }
 
@@ -145,6 +146,7 @@ struct SettingsView: View {
             case .library: "sparkles"
             case .shortcuts: "command"
             case .sharing: "link"
+            case .sharedLibrary: "arrow.triangle.2.circlepath"
             }
         }
     }
@@ -232,6 +234,7 @@ struct SettingsView: View {
         case .library: intelligence
         case .shortcuts: shortcuts
         case .sharing: sharing
+        case .sharedLibrary: sharedLibrary
         }
     }
 
@@ -340,6 +343,10 @@ struct SettingsView: View {
         .formStyle(.grouped)
         .padding(.top, 4)
     }
+
+    /// Settings › Shared Library. The pane itself lives in `SharedLibraryPane.swift`: it owns
+    /// enrolment, the recovery code and the device list, which need state of their own.
+    var sharedLibrary: some View { SharedLibraryPane() }
 
     var shortcuts: some View {
         Form {

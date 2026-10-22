@@ -6,6 +6,7 @@ import KaptureDesign
 import KaptureEditor
 import KaptureRecording
 import KaptureIntelligence
+import KaptureSync
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
@@ -25,6 +26,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             Task {
                 await IngestQueue.shared.configure(library: library)
                 await IngestQueue.shared.resume()   // pick up jobs left by a previous run
+            }
+            // The shared library, off unless it has been enabled (G6). `start` returns without
+            // doing anything when the feature is off, so an install that never enables it pays
+            // nothing — including the sweep, which stays entirely local in that case.
+            Task {
+                let deviceID = LibraryDeviceID.current()
+                _ = await LibraryService.shared.start(db: db, deviceID: deviceID)
             }
             EditorController.shared.onFlattened = { id in
                 OverlayController.shared.showCard(recordID: id)
@@ -73,11 +81,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         ShortcutConflictWatch.shared.start()
         Clipboard.followLibraryMoves()
 
-        // trash sweep at launch + every 6h (7-day retention)
+        // Trash sweep at launch + every 6h (7-day retention).
+        //
+        // One decision, made here rather than inside either sweeper: with the shared library on,
+        // deleting belongs to the log — only the lease holder may issue a delete, and the seven
+        // days are the server's to count (F43, F44, F45). Two Macs both running the local sweep
+        // against one library would delete captures the other had just restored.
         let library = CaptureCoordinator.shared.library
-        Task.detached(priority: .utility) { library?.sweepTrash() }
+        Task.detached(priority: .utility) { await AppDelegate.sweep(library) }
         Timer.scheduledTimer(withTimeInterval: 6 * 3600, repeats: true) { _ in
-            Task.detached(priority: .utility) { library?.sweepTrash() }
+            Task.detached(priority: .utility) { await AppDelegate.sweep(library) }
+        }
+    }
+
+    /// Sweep once, through whichever mechanism owns deletion right now.
+    ///
+    /// A Mac with the toggle on that has never enrolled has nothing in the log, so its trash is
+    /// still its own to sweep. Testing the toggle alone left such a Mac with no sweep at all:
+    /// `sweepNow` does nothing until the library is ready.
+    nonisolated static func sweep(_ library: Library?) async {
+        switch LibraryService.localState() {
+        case .disabled, .needsSetup:
+            library?.sweepTrash()
+        case .locked, .awaitingApproval, .ready:
+            await LibraryService.shared.sweepNow()
         }
     }
 
@@ -256,6 +283,12 @@ if CommandLine.arguments.contains("--tcc-check") {
 // with --dry-run previews the names naming would produce. Driven by scripts/test-ingest.command.
 if CommandLine.arguments.contains("--ingest-now") {
     Diagnostics.runIngestNow()
+}
+
+// Shared-library check for rollout stage 4: usage counter against R2, and a large recording's
+// round trip. Read-only, so it can run beside the app.
+if CommandLine.arguments.contains("--library-check") {
+    Diagnostics.runLibraryCheck()
 }
 
 // GIF-exporter smoke mode: converts the given movie and prints the result.

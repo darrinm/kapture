@@ -165,4 +165,52 @@ public enum Keychain {
         get { get(shareAccount) }
         set { set(newValue, for: shareAccount) }
     }
+
+    // MARK: - Shared library (docs/SHARED-LIBRARY.md §4.1, §3.2)
+
+    private static let libraryKeyAccount = "library-key"
+    private static let libraryDeviceAccount = "library-device-token"
+
+    public static var hasLibraryKey: Bool { has(libraryKeyAccount) }
+    public static var libraryKeyStorage: Storage { storage(libraryKeyAccount) }
+
+    /// The library key, base64, synchronized through iCloud Keychain (F11).
+    ///
+    /// It travels the way the share token already does, which is what makes a second Mac work
+    /// without a paste. Losing it loses the library outright — F16 — so the recovery code (F85)
+    /// is the only other copy, and it exists outside the Keychain by design.
+    public static var libraryKey: String? {
+        get { get(libraryKeyAccount) }
+        set { set(newValue, for: libraryKeyAccount) }
+    }
+
+    /// This Mac's device credential. Deliberately *not* synchronized: F7 makes it per-Mac, so
+    /// revoking one device cannot be undone by another Mac restoring the same Keychain.
+    ///
+    /// It uses the local-only accessors rather than `get`/`set`, which promote a device-only
+    /// item to a synchronized one when they find it. That promotion is right for the share
+    /// token and wrong here — it would hand every Mac the same credential and make F8's
+    /// revocation meaningless.
+    public static var libraryDeviceToken: String? {
+        get { getLocalOnly(libraryDeviceAccount) }
+        set { setLocalOnly(newValue, for: libraryDeviceAccount) }
+    }
+
+    private static func setLocalOnly(_ value: String?, for account: String) {
+        guard let value, !value.isEmpty else {
+            SecItemDelete(query(account, synchronizable: false) as CFDictionary)
+            return
+        }
+        _ = write(Data(value.utf8), for: account, synchronizable: false)
+    }
+
+    private static func getLocalOnly(_ account: String) -> String? {
+        var q = query(account, synchronizable: false)
+        q[kSecReturnData as String] = true
+        q[kSecMatchLimit as String] = kSecMatchLimitOne
+        var item: CFTypeRef?
+        guard SecItemCopyMatching(q as CFDictionary, &item) == errSecSuccess,
+              let data = item as? Data else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
 }

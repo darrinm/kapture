@@ -15,6 +15,16 @@ public struct Settings {
         set { d.set(newValue.path, forKey: "libraryRoot") }
     }
 
+    /// Where the index and derived data live: Application Support/Kapture unless
+    /// `dataDirectory` is set. Setting it, with `libraryRoot`, lets a second build run against a
+    /// copy of the library without touching the first build's index (shared-library rollout,
+    /// stage 4).
+    public var dataDirectory: URL {
+        if let path = d.string(forKey: "dataDirectory") { return URL(fileURLWithPath: path) }
+        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Kapture")
+    }
+
     public var exportLocation: URL {
         get {
             if let path = d.string(forKey: "exportLocation") { return URL(fileURLWithPath: path) }
@@ -125,6 +135,40 @@ public struct Settings {
             return url
         }
         set { d.set(newValue.absoluteString, forKey: "shareEndpoint") }
+    }
+
+    /// Where the shared library syncs (docs/SHARED-LIBRARY.md §12.4 F120, F121).
+    ///
+    /// Defaults to the share endpoint, because the same Worker serves both. It is a separate
+    /// setting because the library is self-hosted for everyone but the author (F118), and
+    /// Settings states which endpoint it will upload to before the feature is enabled.
+    public var libraryEndpoint: URL {
+        get {
+            guard let raw = d.string(forKey: "libraryEndpoint"), let url = URL(string: raw),
+                  url.scheme == "https"
+            else { return shareEndpoint }
+            return url
+        }
+        set { d.set(newValue.absoluteString, forKey: "libraryEndpoint") }
+    }
+
+    /// Off until deliberately enabled (G6). A library that is never enabled behaves exactly as
+    /// it does today, including the flock and the local sweep.
+    public var libraryEnabled: Bool {
+        get { d.bool(forKey: "libraryEnabled") }
+        set { d.set(newValue, forKey: "libraryEnabled") }
+    }
+
+    /// How much of the library this Mac keeps on disk (F51). Zero means keep everything.
+    ///
+    /// Defaults to keeping everything, and the Settings pane reads this same constant. They
+    /// disagreed — the pane showed "Everything" while this fell back to 20 GB — so a user who
+    /// never touched the picker got eviction under a screen promising no file would be removed.
+    public static let libraryCacheGBDefault = 0
+
+    public var libraryCacheBytes: Int {
+        let gb = d.object(forKey: "libraryCacheGB") as? Int ?? Self.libraryCacheGBDefault
+        return gb <= 0 ? .max : gb * 1024 * 1024 * 1024
     }
 
     /// Put the link on the clipboard as soon as a share finishes — the reason to share is almost

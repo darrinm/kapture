@@ -7,8 +7,7 @@ public final class Database: Sendable {
     let operationLock = NSRecursiveLock()
 
     public init(directory: URL? = nil) throws {
-        let dir = directory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Kapture")
+        let dir = directory ?? Settings.shared.dataDirectory
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         queue = try DatabaseQueue(path: dir.appendingPathComponent("library.sqlite").path)
         try migrate()
@@ -113,6 +112,95 @@ public final class Database: Sendable {
             // query that must leave such a capture alone joins against it, so the rule cannot
             // drift between five pasted copies.
             try db.execute(sql: "CREATE VIEW blocked_captures AS SELECT DISTINCT captureId FROM op_journal")
+        }
+        // The shared library (docs/SHARED-LIBRARY.md §10.1). Additive only — new tables, and new
+        // columns that are nullable or defaulted — which is what lets a build predating it open
+        // the database without erasing anything (F79). `eraseDatabaseOnSchemaChange` is never
+        // set here, and F79 makes that a requirement rather than an accident.
+        migrator.registerMigration("v7-shared-library") { db in
+            try db.alter(table: "captures") {
+                $0.add(column: "lamport", .integer).notNull().defaults(to: 0)
+                $0.add(column: "syncDeviceID", .text)
+                $0.add(column: "forkedFrom", .text)
+                $0.add(column: "blobState", .text).notNull().defaults(to: "local")
+                $0.add(column: "parentHash", .text)
+                // F130: whether the log has ever acknowledged this row. Absence from a later
+                // snapshot means deletion for an acknowledged row and only-local for the rest.
+                $0.add(column: "acknowledged", .boolean).notNull().defaults(to: false)
+            }
+            try db.create(table: "sync_state") { t in
+                t.column("id", .integer).primaryKey()       // single row
+                t.column("deviceID", .text).notNull()
+                t.column("cursor", .integer).notNull().defaults(to: 0)
+                t.column("keyID", .text)
+                t.column("enabledAt", .datetime)
+                t.column("capabilities", .text).notNull().defaults(to: "")
+            }
+            // F29: an op is written here in the same transaction as the row it describes. This
+            // is the local durability boundary, the way op_journal is for file operations, and
+            // it carries the same retry columns v6 gave op_journal.
+            try db.create(table: "sync_outbox") { t in
+                t.column("opID", .text).primaryKey()
+                t.column("captureId", .text).notNull()
+                t.column("kind", .text).notNull()
+                t.column("payload", .blob).notNull()
+                t.column("requires", .text).notNull().defaults(to: "[]")
+                t.column("observed", .integer).notNull().defaults(to: 0)
+                t.column("v", .integer).notNull().defaults(to: 1)
+                t.column("queuedAt", .datetime).notNull()
+                t.column("attempts", .integer).notNull().defaults(to: 0)
+                t.column("nextAttemptAt", .datetime)
+                t.column("lastError", .text)
+            }
+            // F104, F135: ops this build could not apply, replayed when its capabilities widen.
+            try db.create(table: "skipped_ops") { t in
+                t.column("seq", .integer).primaryKey()
+                t.column("v", .integer).notNull()
+                t.column("kind", .text).notNull()
+                t.column("noticedAt", .datetime).notNull()
+            }
+            try db.create(table: "blob_cache") { t in
+                t.column("captureId", .text).notNull()
+                t.column("purpose", .text).notNull()
+                t.column("revision", .integer).notNull()
+                t.column("writer", .text).notNull()
+                t.column("owningCapture", .text).notNull()
+                t.column("bytes", .integer).notNull().defaults(to: 0)
+                t.column("lastOpenedAt", .datetime)
+                t.primaryKey(["captureId", "purpose"])
+            }
+        }
+        // The seq of the newest snapshot this device wrote, so "ops since the last snapshot"
+        // (F33) can be computed rather than guessed. Its own migration because v7 has already
+        // been applied to databases on this branch.
+        migrator.registerMigration("v8-snapshot-cursor") { db in
+            try db.alter(table: "sync_state") {
+                $0.add(column: "lastSnapshotSeq", .integer).notNull().defaults(to: 0)
+            }
+        }
+        // Captures whose bytes are waiting to upload. An upload that fails, or whose response is
+        // lost, used to be logged and forgotten, so the capture never reached the log. Now it
+        // stays here and is retried on the next sync, with the same backoff columns the outbox
+        // and the journal carry.
+        migrator.registerMigration("v9-upload-queue") { db in
+            try db.create(table: "upload_queue") { t in
+                t.column("captureId", .text).primaryKey()
+                t.column("queuedAt", .datetime).notNull()
+                t.column("attempts", .integer).notNull().defaults(to: 0)
+                t.column("nextAttemptAt", .datetime)
+                t.column("lastError", .text)
+            }
+        }
+        // Seeding (shared-library §11.1). A priority so a seed of thousands of old captures
+        // never queues a new screenshot behind it, and the moment this Mac's existing library
+        // was handed to the log, so seeding runs once rather than on every launch.
+        migrator.registerMigration("v10-seeding") { db in
+            try db.alter(table: "upload_queue") {
+                $0.add(column: "priority", .integer).notNull().defaults(to: 0)
+            }
+            try db.alter(table: "sync_state") {
+                $0.add(column: "seededAt", .datetime)
+            }
         }
         try migrator.migrate(queue)
     }

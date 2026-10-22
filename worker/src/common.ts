@@ -2,11 +2,19 @@
 // import the other, and so there is exactly one definition of how a token is checked.
 
 import type { QuotaCounter } from "./quota";
+import type { LibraryLog } from "./library";
 
 export interface Env {
   QUOTA_COUNTERS: DurableObjectNamespace<QuotaCounter>;
+  LIBRARY_LOGS: DurableObjectNamespace<LibraryLog>;
   BUCKET: R2Bucket;
   QUOTAS: KVNamespace;
+  /**
+   * Comma-separated owners allowed to use the shared-library routes, empty by default
+   * (shared-library §2 D2 F118). The author pays for the bytes, so the hosted deployment serves
+   * exactly one owner; anyone else runs their own Worker.
+   */
+  LIBRARY_OWNERS?: string;
   /**
    * Seed only: JSON of `{ "<owner>": "<sha256 hex of token>" }`.
    *
@@ -36,6 +44,8 @@ export interface Owner {
   hash: string;
   createdAt: string;
   note?: string;
+  // Shared-library device credentials are not kept here. This table is in KV, which is
+  // eventually consistent, and they live in the owner's LibraryLog Durable Object instead.
 }
 
 export type OwnerTable = Record<string, Owner>;
@@ -135,9 +145,12 @@ export async function ownerForToken(token: string, env: Env): Promise<string | n
 
 /** The owner named by an Authorization header, or null. */
 export async function authorize(request: Request, env: Env): Promise<string | null> {
+  return ownerForToken(bearerToken(request), env);
+}
+
+export function bearerToken(request: Request): string {
   const header = request.headers.get("authorization") ?? "";
-  const token = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
-  return ownerForToken(token, env);
+  return header.startsWith("Bearer ") ? header.slice(7).trim() : "";
 }
 
 /** Owner names are used in URLs, HTML and KV keys, so keep them boring. */

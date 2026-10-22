@@ -22,6 +22,9 @@ export default defineWorkersConfig({
             ACCESS_TEAM_DOMAIN: "",
             ACCESS_AUD: "",
             ADMIN_EMAIL: "",
+            // wrangler.jsonc allowlists the hosted deployment's owner. The suite starts from the
+            // default-off state F118 specifies and turns the routes on per test.
+            LIBRARY_OWNERS: "",
           },
         },
       },

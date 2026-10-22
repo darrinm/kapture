@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import GRDB
 
@@ -35,6 +36,31 @@ public struct FileMove: Sendable {
     }
 }
 
+/// What happened to a capture, posted once the change has committed.
+///
+/// One notification for every way a capture changes, because the shared library publishing
+/// from individual call sites missed most of them: only new screenshots reached the log, while
+/// recordings, GIF exports, discards, restores, renames and edits never did.
+public struct CaptureChange: Sendable {
+    public enum Kind: Sendable, Equatable {
+        /// A new capture: its bytes and its row.
+        case created
+        /// New pixels for an existing capture — an edit or a trim — at a new revision.
+        case contentReplaced
+        /// The row changed and the bytes did not: a rename, a status, a share link, OCR text.
+        case metadata
+        case trashed
+        case restored
+    }
+    public let captureID: String
+    public let kind: Kind
+
+    public init(captureID: String, kind: Kind) {
+        self.captureID = captureID
+        self.kind = kind
+    }
+}
+
 /// Delivers every `Library.fileDidMove` to `body` on the main actor until it is deallocated.
 public final class FileMoveObserver {
     private let token: NSObjectProtocol
@@ -59,6 +85,18 @@ public final class Library: @unchecked Sendable {
     /// observer that needs another thread hops itself; `FileMoveObserver` hops to the main actor.
     public static let fileDidMove = Notification.Name("Library.fileDidMove")
     public static let fileMoveKey = "move"
+
+    /// Posted after a capture change commits, with a `CaptureChange` under `captureChangeKey`.
+    /// Like `fileDidMove`, it is posted synchronously on the operation's thread; an observer
+    /// that touches the database hops to its own context first.
+    public static let captureDidChange = Notification.Name("Library.captureDidChange")
+    public static let captureChangeKey = "change"
+
+    func postChange(_ captureID: String, _ kind: CaptureChange.Kind) {
+        NotificationCenter.default.post(
+            name: Library.captureDidChange, object: self,
+            userInfo: [Library.captureChangeKey: CaptureChange(captureID: captureID, kind: kind)])
+    }
 
     public let db: Database
     public let root: URL
@@ -281,6 +319,7 @@ public final class Library: @unchecked Sendable {
     }
 
     public func setStatus(_ id: String, _ status: CaptureStatus) throws {
+        defer { postChange(id, .metadata) }
         try withOperation(for: id) {
             try db.queue.write { d in
                 try d.execute(sql: "UPDATE captures SET status = ? WHERE id = ?", arguments: [status.rawValue, id])
@@ -303,7 +342,8 @@ public final class Library: @unchecked Sendable {
     /// A stale link is retained for revocation, but must never be reused as the current share.
     @discardableResult
     public func setShareLink(_ id: String, url: String?, revision: Int64? = nil) throws -> Bool {
-        try withOperation(for: id) {
+        defer { postChange(id, .metadata) }
+        return try withOperation(for: id) {
             try db.queue.write { d in
                 guard let record = try CaptureRecord.fetchOne(d, key: id) else { return false }
                 let current = url == nil || record.contentRevision == revision
@@ -394,8 +434,28 @@ public final class Library: @unchecked Sendable {
         var record = current
         var sidecar = try Sidecar.readIfPresent(for: url(for: record)) ?? Sidecar(for: record)
         sidecar.annotations = .init(original: try originalPath(for: record), layersJSON: layersJSON)
+        // The shared library's only evidence that two Macs edited one capture concurrently
+        // (F81, F112): the same revision with different hashes, or a parent hash the other side
+        // does not have. Nothing set either before, so every concurrent edit resolved by order
+        // and one Mac's annotation was lost (rollout stage 5). The parent is hashed from the file
+        // when this capture has never been edited, which gives both Macs the same parent.
+        let parent = current.contentHash ?? Library.sha256(of: url(for: current))
         record.markContentReplaced()
+        record.parentHash = parent
+        record.contentHash = Library.sha256(of: staged)
         try commit(FileOperation(op: op, source: rel(staged), record: record, sidecar: sidecar))
+    }
+
+    /// Hex SHA-256 of a file, read in 1 MB chunks so a long recording is never held whole. Nil
+    /// when the file cannot be read.
+    public static func sha256(of url: URL) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while let chunk = try? handle.read(upToCount: 1 << 20), !chunk.isEmpty {
+            hasher.update(data: chunk)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
     /// The image the editor should open: pristine original if one exists, else the file itself.
@@ -472,6 +532,14 @@ public final class Library: @unchecked Sendable {
     }
 
     /// Retry interrupted sweeps and retain the row/sidecar until every referenced file is gone.
+    /// Delete trash older than `days`, unconditionally.
+    ///
+    /// Whether this Mac is *allowed* to delete is not this method's question — with the shared
+    /// library on, deleting is the log's decision and only the sweep-lease holder may make it
+    /// (shared-library §7.4 F43, F44). That choice belongs to whoever installs the schedule, so
+    /// it lives at the composition point rather than being re-tested here on every run. A guard
+    /// inside this method would also have covered only the public entry point, leaving the
+    /// internal overload below to delete anyway.
     public func sweepTrash(olderThanDays days: Int = 7) {
         sweepTrash(olderThanDays: days, removing: removeIfPresent)
     }

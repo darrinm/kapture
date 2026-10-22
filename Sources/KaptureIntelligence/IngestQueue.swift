@@ -163,7 +163,7 @@ public actor IngestQueue {
         let wantsAPI = naming && !(Keychain.anthropicKey ?? "").isEmpty
         let url = library.url(for: record)
         let result = await Task.detached(priority: .utility) { () -> (text: String, jpeg: Data?) in
-            guard let image = OverlayPosterDecoder.decode(url) else { return ("", nil) }
+            guard let image = await OverlayPosterDecoder.decode(url) else { return ("", nil) }
             return (OCRService.indexText(for: image), wantsAPI ? ImageEncoding.jpegData(image) : nil)
         }.value
 
@@ -202,7 +202,7 @@ public actor IngestQueue {
             // the handoff missed (a restart between the stages): encode once, off this actor
             let url = library.url(for: record)
             jpeg = await Task.detached(priority: .utility) { () -> Data? in
-                guard let image = OverlayPosterDecoder.decode(url) else { return nil }
+                guard let image = await OverlayPosterDecoder.decode(url) else { return nil }
                 return ImageEncoding.jpegData(image)
             }.value
         } else {
@@ -233,13 +233,13 @@ public actor IngestQueue {
 /// Decoding a library file to a CGImage: stills directly, movies via their first frame
 /// (NSImage returns nil for .mp4, which silently skipped every recording).
 public enum OverlayPosterDecoder {
-    public static func decode(_ url: URL) -> CGImage? {
+    public static func decode(_ url: URL) async -> CGImage? {
         if let still = NSImage(contentsOf: url)?.cgImage(forProposedRect: nil, context: nil, hints: nil) {
             return still
         }
         let generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
         generator.appliesPreferredTrackTransform = true
         generator.maximumSize = CGSize(width: 1600, height: 1600)
-        return try? generator.copyCGImage(at: .zero, actualTime: nil)
+        return try? await generator.image(at: .zero).image
     }
 }

@@ -72,6 +72,32 @@ M5 remaining: no release has been cut yet — that needs a Developer ID certific
 notarization secrets listed in [`RELEASING.md`](RELEASING.md), so `/download` and the appcast
 still 404.
 
+## M6 status (It follows you)
+
+Done: one library per person, shared by every Mac that person signs in on. Rows, names and
+recognized text sync through a per-owner Durable Object log; thumbnails and bytes follow, with
+originals fetched on open and a cache ceiling. Everything is encrypted on the Mac before it is
+uploaded — the server holds ciphertext and blinded ids, and can read nothing. Conflicts fork
+rather than discard, the trash sweep moves behind a server lease so two Macs cannot delete each
+other's restores, and a delete is conditional on the log. Enabled for one allowlisted owner;
+anyone else runs their own Worker.
+
+The design and its two adversarial reviews are in
+[`SHARED-LIBRARY.md`](SHARED-LIBRARY.md) — 139 numbered requirements, and a record of the twelve
+blocking errors the reviews found, because most of them read as perfectly reasonable rules.
+
+M6 remaining: the library grid does not yet badge a remote or forked capture, and the admin
+dashboard does not yet list devices for approval — enrolment approval works over the API but has
+no UI. Neither blocks syncing.
+
+A review of the finished branch found twelve defects, most of them in the seams between pieces
+that each passed their own tests: an enrolment id that differed from the one ops were signed
+with, two URLs whose query strings were percent-encoded into the path, a single undecryptable op
+that wedged the cursor forever, and — the one worth remembering — a byte path that was wired
+nowhere. `BlobStore` was complete and tested, and nothing called it, so no op ever named a blob
+and the server's dependency check had nothing to check. Unit tests on both sides of a seam say
+nothing about the seam.
+
 Architecture and staging follow the implementation spec (v2.1); deviations: SwiftPM-only for
 now (no .xcodeproj — `scripts/bundle.sh` assembles the app), KeyboardShortcuts dep deferred
 until the Settings UI lands (Carbon direct in the meantime).

@@ -130,4 +130,25 @@ final class RevisionTests: XCTestCase {
         XCTAssertFalse(try lib.setShareLink(record.id, url: "https://kapture.sh/old", revision: record.contentRevision))
         XCTAssertEqual(try stored(lib, record.id).contentRevision, 1)
     }
+
+    /// A journal plan written before migration v7 has none of the shared-library keys. It must
+    /// still decode, or recovery quarantines the entry and the capture stays blocked.
+    func testARecordEncodedWithoutTheSharedLibraryFieldsStillDecodes() throws {
+        let record = CaptureRecord(kind: .screenshot, width: 1, height: 1, bytes: 1,
+                                   relPath: "a.png", fastID: "1:1:1")
+        var json = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: JSONEncoder().encode(record)) as? [String: Any])
+        for key in ["lamport", "syncDeviceID", "forkedFrom", "blobState", "parentHash",
+                    "acknowledged"] {
+            json.removeValue(forKey: key)
+        }
+
+        let decoded = try JSONDecoder().decode(
+            CaptureRecord.self, from: JSONSerialization.data(withJSONObject: json))
+
+        XCTAssertEqual(decoded.id, record.id)
+        XCTAssertEqual(decoded.lamport, 0)
+        XCTAssertEqual(decoded.blobState, "local")
+        XCTAssertFalse(decoded.acknowledged)
+    }
 }

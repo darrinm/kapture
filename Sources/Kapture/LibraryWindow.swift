@@ -5,6 +5,7 @@ import AppKit
 import QuickLookThumbnailing
 import Quartz
 import KaptureCore
+import KaptureSync
 import KaptureEditor
 import KaptureDesign
 import KaptureIntelligence
@@ -437,8 +438,20 @@ final class LibraryGridView: NSView {
         return cache
     }()
 
+    /// The content revision is in the key as well as `fastID`: a capture pulled from another Mac
+    /// has no `fastID` here, and without the revision an edit made there would keep showing
+    /// the old cached thumbnail.
     private static func thumbKey(_ record: CaptureRecord) -> String {
-        "\(record.id):\(record.fastID)"
+        "\(record.id):\(record.fastID):\(record.contentRevision)"
+    }
+
+    /// What to draw a capture from. Its own file when it is here; otherwise the thumbnail synced
+    /// from the Mac that made it (F47), so the grid is complete before any bytes are fetched.
+    private func thumbnailSource(_ record: CaptureRecord) -> URL {
+        let own = library.url(for: record)
+        guard record.blobState != "local" else { return own }
+        let synced = LibraryService.thumbnailURL(for: record.id)
+        return FileManager.default.fileExists(atPath: synced.path) ? synced : own
     }
 
     init(library: Library) {
@@ -683,7 +696,7 @@ final class LibraryGridView: NSView {
         thumbTask?.cancel()
 
         let jobs = order.map { (index: $0, key: Self.thumbKey(items[$0].record),
-                                url: library.url(for: items[$0].record)) }
+                                url: thumbnailSource(items[$0].record)) }
         let size = CGSize(width: 480, height: 480)
         let scale = backingScale
         let limit = thumbsInFlight
@@ -805,13 +818,39 @@ final class LibraryGridView: NSView {
     private func select(_ i: Int) {
         selected = items[i].record.id
         reveal(i)
+        fetchForPreview(items[i].record)
     }
 
     // MARK: actions
+
+    /// Bring a capture's bytes here before anything reads its file (F48).
+    ///
+    /// A capture from another Mac is `remote` until it is opened. Without this, opening,
+    /// copying, revealing, sharing or previewing it read a path with nothing at it.
+    private func ensureLocal(_ record: CaptureRecord) async -> Bool {
+        do {
+            _ = try await LibraryService.shared.materialize(captureID: record.id)
+            return true
+        } catch {
+            Toast.show(error, while: "Downloading")
+            return false
+        }
+    }
+
+    /// Run `body` once the capture's bytes are here.
+    private func withBytes(_ record: CaptureRecord, _ body: @escaping @MainActor () -> Void) {
+        Task { @MainActor in
+            guard await ensureLocal(record) else { return }
+            body()
+        }
+    }
+
     private func open(_ record: CaptureRecord) {
-        if record.canTrim { TrimmerController.shared.open(recordID: record.id) }
-        else if record.canAnnotate { EditorController.shared.open(recordID: record.id) }
-        else { NSWorkspace.shared.open(library.url(for: record)) }
+        withBytes(record) { [self] in
+            if record.canTrim { TrimmerController.shared.open(recordID: record.id) }
+            else if record.canAnnotate { EditorController.shared.open(recordID: record.id) }
+            else { NSWorkspace.shared.open(library.url(for: record)) }
+        }
     }
 
     private func discard(_ record: CaptureRecord) {
@@ -857,16 +896,16 @@ final class LibraryGridView: NSView {
     @objc private func openSelected() { if let r = selectedRecord { open(r) } }
     @objc private func copySelected() {
         guard let r = selectedRecord else { return }
-        Clipboard.write(url: library.url(for: r))
+        withBytes(r) { [self] in Clipboard.write(url: library.url(for: r)) }
     }
     @objc private func revealSelected() {
         guard let r = selectedRecord else { return }
-        NSWorkspace.shared.activateFileViewerSelecting([library.url(for: r)])
+        withBytes(r) { [self] in NSWorkspace.shared.activateFileViewerSelecting([library.url(for: r)]) }
     }
     @objc private func discardSelected() { if let r = selectedRecord { discard(r) } }
     @objc private func shareSelected() {
         guard let r = selectedRecord else { return }
-        ShareCoordinator.shared.share(r)
+        withBytes(r) { ShareCoordinator.shared.share(r) }
     }
     @objc private func unshareSelected() {
         guard let r = selectedRecord else { return }
@@ -901,7 +940,18 @@ final class LibraryGridView: NSView {
     private func toggleQuickLook() {
         guard let panel = QLPreviewPanel.shared() else { return }
         if previewing { panel.orderOut(nil) }
-        else if selectedIndex != nil { panel.makeKeyAndOrderFront(nil) }
+        else if let record = selectedRecord {
+            withBytes(record) { panel.makeKeyAndOrderFront(nil) }
+        }
+    }
+
+    /// The panel asks for a URL synchronously, so a remote capture it moves onto is fetched
+    /// behind it and the panel reloads once the bytes land.
+    private func fetchForPreview(_ record: CaptureRecord) {
+        guard previewing else { return }
+        withBytes(record) { [self] in
+            if previewing { QLPreviewPanel.shared()?.reloadData() }
+        }
     }
 
     func closeQuickLook() {

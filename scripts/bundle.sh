@@ -15,6 +15,10 @@ BUILD="${KAPTURE_BUILD:-1}"
 PUBLIC_ED_KEY="${KAPTURE_PUBLIC_ED_KEY:-}"
 # a fork points this at its own appcast; the app derives its download page from it too
 FEED_URL="${KAPTURE_FEED_URL:-https://kapture.sh/appcast.xml}"
+# A second identifier gives a test build its own settings domain and TCC grants, so it can run
+# against a copy of the library beside the real app's data (shared-library rollout, stage 4).
+# Keychain-entitled (Developer ID) builds must keep the default: the access group is tied to it.
+BUNDLE_ID="${KAPTURE_BUNDLE_ID:-sh.kapture.app}"
 
 # -warnings-as-errors: project warnings fail the build (dependencies are unaffected)
 # the rpath lets the executable find Sparkle.framework once it is inside the bundle
@@ -52,7 +56,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>CFBundleIdentifier</key><string>sh.kapture.app</string>
+  <key>CFBundleIdentifier</key><string>${BUNDLE_ID}</string>
   <key>CFBundleName</key><string>Kapture</string>
   <key>CFBundleDisplayName</key><string>Kapture</string>
   <key>CFBundleExecutable</key><string>Kapture</string>

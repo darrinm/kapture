@@ -51,6 +51,17 @@ public struct CaptureRecord: Codable, Sendable, FetchableRecord, PersistableReco
     public var shareStale: Bool
     public var durationS: Double?   // recordings
 
+    // The shared library's columns (migration v7). They live here rather than in raw SQL in
+    // KaptureSync so one fetch reads a whole capture: without them every read of a synced row
+    // needed a second query against the row it had just loaded.
+    public var lamport: Int64 = 0
+    public var syncDeviceID: String?
+    public var forkedFrom: String?
+    public var blobState: String = "local"
+    public var parentHash: String?
+    /// Whether the log has ever acknowledged this row (F130).
+    public var acknowledged: Bool = false
+
     public init(id: String = ULID.generate(), kind: CaptureKind, status: CaptureStatus = .staged,
                 createdAt: Date = Date(), width: Int, height: Int, bytes: Int, relPath: String,
                 sourceApp: String? = nil, windowTitle: String? = nil, screenID: Int? = nil,
@@ -86,6 +97,45 @@ public struct CaptureRecord: Codable, Sendable, FetchableRecord, PersistableReco
         shareStale = shareURL != nil
         summary = nil
         aiState = .none
+    }
+}
+
+extension CaptureRecord {
+    /// Decodes a record whose shared-library fields may be absent.
+    ///
+    /// `op_journal` stores each pending `FileOperation` as JSON, record included. A plan written
+    /// by a build before migration v7 has no `lamport`, `blobState` or `acknowledged` key, and
+    /// the synthesized decoder throws `keyNotFound` for a non-optional property even when it has
+    /// a default value. Recovery treats that `DecodingError` as permanent and quarantines the
+    /// entry, so the capture stayed blocked after the upgrade.
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        kind = try c.decode(CaptureKind.self, forKey: .kind)
+        status = try c.decode(CaptureStatus.self, forKey: .status)
+        createdAt = try c.decode(Date.self, forKey: .createdAt)
+        trashedAt = try c.decodeIfPresent(Date.self, forKey: .trashedAt)
+        width = try c.decode(Int.self, forKey: .width)
+        height = try c.decode(Int.self, forKey: .height)
+        bytes = try c.decode(Int.self, forKey: .bytes)
+        relPath = try c.decode(String.self, forKey: .relPath)
+        sourceApp = try c.decodeIfPresent(String.self, forKey: .sourceApp)
+        windowTitle = try c.decodeIfPresent(String.self, forKey: .windowTitle)
+        screenID = try c.decodeIfPresent(Int.self, forKey: .screenID)
+        fastID = try c.decode(String.self, forKey: .fastID)
+        contentRevision = try c.decodeIfPresent(Int64.self, forKey: .contentRevision) ?? 0
+        contentHash = try c.decodeIfPresent(String.self, forKey: .contentHash)
+        aiState = try c.decode(AIState.self, forKey: .aiState)
+        summary = try c.decodeIfPresent(String.self, forKey: .summary)
+        shareURL = try c.decodeIfPresent(String.self, forKey: .shareURL)
+        shareStale = try c.decode(Bool.self, forKey: .shareStale)
+        durationS = try c.decodeIfPresent(Double.self, forKey: .durationS)
+        lamport = try c.decodeIfPresent(Int64.self, forKey: .lamport) ?? 0
+        syncDeviceID = try c.decodeIfPresent(String.self, forKey: .syncDeviceID)
+        forkedFrom = try c.decodeIfPresent(String.self, forKey: .forkedFrom)
+        blobState = try c.decodeIfPresent(String.self, forKey: .blobState) ?? "local"
+        parentHash = try c.decodeIfPresent(String.self, forKey: .parentHash)
+        acknowledged = try c.decodeIfPresent(Bool.self, forKey: .acknowledged) ?? false
     }
 }
 
