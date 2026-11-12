@@ -30,12 +30,7 @@ final class TrimmerController {
         playerView.player = AVPlayer(url: url)
         playerView.controlsStyle = .floating
 
-        let aspect = record.height > 0 ? CGFloat(record.width) / CGFloat(record.height) : 16.0 / 9
-        let maxSize = NSScreen.main?.visibleFrame.size ?? CGSize(width: 1440, height: 900)
-        let w = min(CGFloat(record.width) / 2, maxSize.width * 0.7)
-        let h = w / aspect
-
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: max(560, w), height: max(320, h)),
+        let window = NSWindow(contentRect: NSRect(origin: .zero, size: playerWindowSize(for: record)),
                               styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         window.title = (record.relPath as NSString).lastPathComponent
         window.contentView = playerView

@@ -17,6 +17,18 @@ final class CaptureActionTests: XCTestCase {
         super.tearDown()
     }
 
+    /// A GIF is a recording to the eye, but AVFoundation cannot decode a frame from one.
+    func testOnlyRecordingsOfferFrameGrabbing() {
+        func record(_ kind: CaptureKind) -> CaptureRecord {
+            CaptureRecord(kind: kind, createdAt: Date(), width: 1, height: 1, bytes: 1,
+                          relPath: "x", sourceApp: nil, fastID: "")
+        }
+        XCTAssertTrue(record(.recording).canGrabFrames)
+        XCTAssertFalse(record(.gif).canGrabFrames)
+        XCTAssertFalse(record(.screenshot).canGrabFrames)
+        XCTAssertFalse(record(.text).canGrabFrames)
+    }
+
     /// Upgrading must not silently change what happens after a capture: someone who had
     /// copy-to-clipboard on keeps it, and someone who had it off does not suddenly get it.
     func testMigratesTheOldCopyAfterCaptureFlag() {

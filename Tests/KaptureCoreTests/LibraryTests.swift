@@ -25,6 +25,16 @@ final class LibraryTests: XCTestCase {
         XCTAssertEqual(journal, 0)
     }
 
+    /// A grabbed frame has no corner card, so it is stored kept in the same write as its row.
+    func testStorePNGCanStoreAKeptCapture() throws {
+        let (lib, dir) = try makeTempLibrary()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let (record, _) = try lib.storePNG(Data([1, 2, 3]), width: 10, height: 5, sourceApp: nil,
+                                           windowTitle: nil, screenID: nil, status: .kept)
+        XCTAssertEqual(record.status, .kept)
+        XCTAssertEqual(try self.record(lib, record.id).status, .kept)
+    }
+
     func testStatusTransition() throws {
         let (lib, dir) = try makeTempLibrary()
         defer { try? FileManager.default.removeItem(at: dir) }

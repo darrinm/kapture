@@ -18,6 +18,15 @@ public enum Tokens {
         return String(format: "%d:%02d", s / 60, s % 60)
     }
 
+    /// `duration` plus hundredths, for a frame-accurate readout: whole seconds cannot tell two
+    /// adjacent frames apart. Truncating, like `duration`.
+    /// A non-finite time (an item that has not loaded) reads as zero.
+    public static func timecode(_ seconds: Double) -> String {
+        let seconds = seconds.isFinite ? max(0, seconds) : 0
+        let hundredths = Int(seconds * 100) % 100
+        return duration(seconds) + String(format: ".%02d", hundredths)
+    }
+
     // MARK: Spacing & radius
     public static let cornerMargin: CGFloat = 16
     public static let stackGap: CGFloat = 8
