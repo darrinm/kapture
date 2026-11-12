@@ -85,6 +85,8 @@ public struct CaptureRecord: Codable, Sendable, FetchableRecord, PersistableReco
     public var canAnnotate: Bool { kind == .screenshot }
     /// GIF export reads a movie; a GIF is already one.
     public var canExportGIF: Bool { kind == .recording }
+    /// Frame grabbing decodes a movie through AVFoundation, which does not read GIFs.
+    public var canGrabFrames: Bool { kind == .recording }
     /// Neither in the trash nor being swept: the states an operation may act on.
     public var isLive: Bool { status != .trashed && status != .sweeping }
 

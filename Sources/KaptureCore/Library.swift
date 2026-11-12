@@ -301,15 +301,19 @@ public final class Library: @unchecked Sendable {
         }
     }
 
+    /// `status` is `.staged` for a capture that gets a corner card. A capture stored without a
+    /// card passes `.kept`, in the same write, so no failure can leave it staged with nothing
+    /// to keep or discard it.
     public func storePNG(_ data: Data, width: Int, height: Int,
-                         sourceApp: String?, windowTitle: String?, screenID: Int?) throws -> (CaptureRecord, URL) {
+                         sourceApp: String?, windowTitle: String?, screenID: Int?,
+                         status: CaptureStatus = .staged) throws -> (CaptureRecord, URL) {
         let staged = try stageData(data)   // off the lock, as in storeMovie
         defer { removeUnjournaledStage(staged) }
         return try withOperation {
             let now = Date()
             let target = try availableURL(in: try shardDir(for: now),
                 base: Library.templatedName(kind: "capture", at: now), ext: "png")
-            var record = CaptureRecord(kind: .screenshot, createdAt: now, width: width, height: height,
+            var record = CaptureRecord(kind: .screenshot, status: status, createdAt: now, width: width, height: height,
                 bytes: data.count, relPath: rel(target), sourceApp: sourceApp, windowTitle: windowTitle,
                 screenID: screenID, fastID: "")
             try commit(FileOperation(op: .write, source: rel(staged), record: record, sidecar: Sidecar(for: record)))

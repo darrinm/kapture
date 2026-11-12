@@ -43,6 +43,7 @@ originals preserved in `.originals/` so every destructive edit is reversible.
 Done: screen recording of an area, window or display (ScreenCaptureKit + AVAssetWriter) with
 system audio and microphone · pause/resume, with the menu-bar timer holding while paused ·
 click and keystroke visualization drawn into the movie · trimmer · GIF export as a new capture ·
+Grab Frames (frame-step player; each grabbed frame is stored as a kept screenshot) ·
 menu-bar red dot that stops on click rather than opening a menu.
 
 ## M4 status (It remembers)

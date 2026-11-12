@@ -741,6 +741,13 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
         }
     }
 
+    /// ⌘G / "Grab Frames…": the player that stores single frames of a recording as screenshots.
+    func grabFrames() {
+        markKept()
+        FrameGrabController.shared.open(recordID: record.id)
+        fadeOut()
+    }
+
     /// ⌘E / double-click / "Edit…" — routed by what the capture can actually do. A GIF is
     /// neither trimmable nor PNG-editable, so it opens nothing rather than landing in the
     /// still editor, whose save would write PNG bytes over the .gif file.
@@ -767,7 +774,8 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
     }
 
     /// The one overlay shortcut table (used by both the click-to-key tier and the AX event
-    /// tap): space → Quick Look; ⌘⌫ discard; ⌘W keep; ⌘C copy; ⌘S save; ⌘E edit; ⌘U share.
+    /// tap): space → Quick Look; ⌘⌫ discard; ⌘W keep; ⌘C copy; ⌘S save; ⌘E edit; ⌘U share;
+    /// ⌘G grab frames (recordings only, so ⌘G passes through over any other card).
     /// Strict modifiers: space with none, letters/delete with command only.
     @discardableResult
     func performShortcut(command: Bool, keyCode: UInt16, characters: String?, plainSpace: Bool) -> Bool {
@@ -780,6 +788,7 @@ final class OverlayPanel: NSPanel, QLPreviewPanelDataSource {
         case "s": saveToExportLocation(); return true
         case "e": edit(); return true
         case "u": shareLink(); return true
+        case "g" where record.canGrabFrames: grabFrames(); return true
         default: return false
         }
     }
@@ -990,6 +999,9 @@ final class OverlayView: NSView, NSDraggingSource {
         if record.canExportGIF {
             menu.addItem(withTitle: "Convert to GIF", action: #selector(gifTapped), keyEquivalent: "").target = self
         }
+        if record.canGrabFrames {
+            menu.addItem(withTitle: "Grab Frames…", action: #selector(grabFramesTapped), keyEquivalent: "").target = self
+        }
         menu.addItem(withTitle: "Pin to Screen", action: #selector(pinTapped), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Copy", action: #selector(copyTapped), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Share Link", action: #selector(shareTapped), keyEquivalent: "").target = self
@@ -1001,6 +1013,7 @@ final class OverlayView: NSView, NSDraggingSource {
     }
     @objc func saveAsTapped() { panel.saveAs() }
     @objc func gifTapped() { panel.convertToGIF() }
+    @objc func grabFramesTapped() { panel.grabFrames() }
     @objc func revealTapped() {
         panel.markKept()
         NSWorkspace.shared.activateFileViewerSelecting([panel.fileURL])

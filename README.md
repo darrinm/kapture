@@ -35,7 +35,8 @@ aside, so a crop is never permanent.
 
 **Record** — an area, a window, or a whole display to MP4, with system audio and your
 microphone. Pause and resume mid-take. Clicks and keystrokes can be drawn into the movie. Trim
-the ends afterwards, or export the whole thing as a GIF.
+the ends afterwards, or export the whole thing as a GIF. Grab Frames steps through a recording
+frame by frame and saves any frame as a full-resolution screenshot.
 
 **Remember** — every capture is read on-device and its text indexed, so you can search your
 library for the error message you screenshotted in March. Filter by app, kind or date. With

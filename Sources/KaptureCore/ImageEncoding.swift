@@ -19,6 +19,18 @@ public enum ImageEncoding {
     /// full-screen capture lands around 100 KB instead of tens of megabytes.
     public static func jpegData(_ image: CGImage, maxEdge: CGFloat = 1024,
                                 quality: CGFloat = 0.7) -> Data? {
+        guard let scaled = downscaled(image, maxEdge: maxEdge) else { return nil }
+        let data = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(data, UTType.jpeg.identifier as CFString, 1, nil)
+        else { return nil }
+        CGImageDestinationAddImage(dest, scaled,
+                                   [kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary)
+        guard CGImageDestinationFinalize(dest) else { return nil }
+        return data as Data
+    }
+
+    /// An opaque sRGB copy whose longest edge is at most `maxEdge` pixels. Never upscales.
+    public static func downscaled(_ image: CGImage, maxEdge: CGFloat) -> CGImage? {
         let scale = min(1, maxEdge / CGFloat(max(image.width, image.height)))
         let w = max(Int(CGFloat(image.width) * scale), 1)
         let h = max(Int(CGFloat(image.height) * scale), 1)
@@ -27,13 +39,6 @@ public enum ImageEncoding {
                                   bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return nil }
         ctx.interpolationQuality = .high
         ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
-        guard let scaled = ctx.makeImage() else { return nil }
-        let data = NSMutableData()
-        guard let dest = CGImageDestinationCreateWithData(data, UTType.jpeg.identifier as CFString, 1, nil)
-        else { return nil }
-        CGImageDestinationAddImage(dest, scaled,
-                                   [kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary)
-        guard CGImageDestinationFinalize(dest) else { return nil }
-        return data as Data
+        return ctx.makeImage()
     }
 }

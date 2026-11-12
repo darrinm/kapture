@@ -875,6 +875,7 @@ final class LibraryGridView: NSView {
         } else {
             if record.canTrim { add("Trim…", #selector(openSelected)) }
             else if record.canAnnotate { add("Edit…", #selector(openSelected)) }
+            if record.canGrabFrames { add("Grab Frames…", #selector(grabFramesSelected)) }
             add("Copy", #selector(copySelected))
             add("Reveal in Finder", #selector(revealSelected))
             menu.addItem(.separator())
@@ -894,6 +895,10 @@ final class LibraryGridView: NSView {
         selectedIndex.map { items[$0].record }
     }
     @objc private func openSelected() { if let r = selectedRecord { open(r) } }
+    @objc private func grabFramesSelected() {
+        guard let r = selectedRecord else { return }
+        withBytes(r) { FrameGrabController.shared.open(recordID: r.id) }
+    }
     @objc private func copySelected() {
         guard let r = selectedRecord else { return }
         withBytes(r) { [self] in Clipboard.write(url: library.url(for: r)) }

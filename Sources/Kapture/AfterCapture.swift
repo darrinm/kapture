@@ -13,10 +13,7 @@ enum AfterCapture {
     static func run(record: CaptureRecord, url: URL, image: CGImage?) -> Bool {
         let actions = Settings.shared.afterCaptureActions
 
-        if actions.contains(.copy) {
-            Clipboard.write(url: url, image: image.map { NSImage(cgImage: $0, size: .zero) })
-        }
-        if actions.contains(.save) { save(url) }
+        copyAndSave(url: url, image: image, actions: actions)
 
         // anything that opens a window or leaves the Mac counts as acting on the capture, so it
         // stops being a staged card and gets indexed now
@@ -31,6 +28,17 @@ enum AfterCapture {
             return false      // the editor replaces the card rather than stacking on it
         }
         return true
+    }
+
+    /// The copy and save actions alone. A frame grabbed from a recording runs only these. It
+    /// has no corner card, and the pin, share and editor actions would open a window for every
+    /// grab, on top of the Grab Frames window.
+    static func copyAndSave(url: URL, image: CGImage?,
+                            actions: [CaptureAction] = Settings.shared.afterCaptureActions) {
+        if actions.contains(.copy) {
+            Clipboard.write(url: url, image: image.map { NSImage(cgImage: $0, size: .zero) })
+        }
+        if actions.contains(.save) { save(url) }
     }
 
     /// Off the main actor: this runs inside the capture's MainActor hop, and a stop-recording
