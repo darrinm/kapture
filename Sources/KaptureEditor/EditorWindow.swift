@@ -448,6 +448,7 @@ final class CanvasView: NSView, NSTextFieldDelegate {
         didSet {
             guard tool != oldValue else { return }
             liveText.resetSelection()
+            refreshLiveText()     // the first switch to the select tool starts the analysis
             needsDisplay = true   // the viewport and the Live Text overlay both depend on the tool
         }
     }
@@ -485,8 +486,9 @@ final class CanvasView: NSView, NSTextFieldDelegate {
     let liveTextClip = NSView()
     let liveText = LiveText.makeOverlay()
     private var liveTextTask: Task<Void, Never>?
-    /// The redaction rects the current analysis was made with.
-    private var liveTextRedactions: [CGRect]?
+    /// What the current analysis was made with: the covered rects, then the applied crop
+    /// (`.null` when there is none). Nil before the first analysis.
+    private(set) var liveTextCovered: [CGRect]?
 
     init(image: CGImage, layers: [Annotation]) {
         self.image = image
@@ -498,7 +500,6 @@ final class CanvasView: NSView, NSTextFieldDelegate {
         liveText.delegate = self
         liveTextClip.addSubview(liveText)
         addSubview(liveTextClip)
-        refreshLiveText()
     }
     required init?(coder: NSCoder) { fatalError() }
     override var acceptsFirstResponder: Bool { true }
@@ -1037,8 +1038,8 @@ final class CanvasView: NSView, NSTextFieldDelegate {
             applyCrop()
         } else if event.keyCode == 53, tool == .crop, cropLayerIndex != nil {   // esc removes it
             removeCrop()
-        } else if event.keyCode == 53, liveText.hasActiveTextSelection {         // esc deselects text
-            liveText.resetSelection()
+        } else if event.keyCode == 53 || event.keyCode == 51, liveText.hasActiveTextSelection {
+            liveText.resetSelection()   // esc or delete drops a text selection, never an annotation
         } else if event.keyCode == 51, tool == .select, let sel = selected {   // delete
             pushUndo()
             layers.removeAll { $0.id == sel }
@@ -1199,10 +1200,10 @@ final class CanvasView: NSView, NSTextFieldDelegate {
     // MARK: Live Text
 
     /// The overlay gets a press only where `liveTextMayBegin` allows and VisionKit has text.
-    /// Left to itself it takes every press while a selection is active, which would block
-    /// selecting and moving annotations until the text was deselected.
+    /// Without this override, the overlay receives every press while a text selection is
+    /// active, and annotations cannot be selected or moved until the text is deselected.
     override func hitTest(_ point: NSPoint) -> NSView? {
-        // VisionKit answers from private subviews of the overlay, never the overlay itself
+        // the hit view is one of VisionKit's private subviews of the overlay, not the overlay
         guard let hit = super.hitTest(point) else { return nil }
         guard hit.isDescendant(of: liveText) else { return hit }
         let viewPoint = convert(point, from: superview)
@@ -1222,13 +1223,18 @@ final class CanvasView: NSView, NSTextFieldDelegate {
         return !layers.contains { $0.hitTest(p) && !($0.tool == .crop && $0.applied == true) }
     }
 
-    /// Re-analyze when the redactions change. The old analysis goes at once: text under a new
-    /// or moved redaction must not stay selectable for the time the next pass takes.
+    /// Re-analyze when the covered regions or the applied crop change. The old analysis is
+    /// cleared at once: text under a new or moved redaction must not stay selectable for the
+    /// time the next pass takes. Nothing is analyzed until the select tool is first chosen,
+    /// because selection works with that tool only.
     private func refreshLiveText() {
-        let redactions = layers.filter(\.tool.isRedaction).map(\.rect)
-        guard redactions != liveTextRedactions else { return }
-        let first = liveTextRedactions == nil
-        liveTextRedactions = redactions
+        guard tool == .select else { return }
+        let covered = layers.filter(\.hidesText).map(\.rect)
+        let crop = layers.last { $0.tool == .crop && $0.applied == true }?.rect
+        let key = covered + [crop ?? .null]
+        guard key != liveTextCovered else { return }
+        let first = liveTextCovered == nil
+        liveTextCovered = key
         liveText.analysis = nil
         liveTextTask?.cancel()
         let base = image
@@ -1237,7 +1243,7 @@ final class CanvasView: NSView, NSTextFieldDelegate {
             if !first { try? await Task.sleep(for: .milliseconds(300)) }
             guard !Task.isCancelled else { return }
             let source = await Task.detached(priority: .userInitiated) {
-                AnnotationRenderer.liveTextSource(base: base, redactions: redactions)
+                AnnotationRenderer.liveTextSource(base: base, covered: covered, crop: crop)
             }.value
             guard let source, !Task.isCancelled else { return }
             let analysis = await LiveText.analyze(source)
@@ -1414,7 +1420,16 @@ final class CanvasView: NSView, NSTextFieldDelegate {
 }
 
 extension CanvasView: ImageAnalysisOverlayViewDelegate {
-    /// Keys belong to the canvas (delete, undo, crop's return and esc); ⌘C is handled there too.
+    /// The canvas handles every key (delete, undo, crop's return and esc) and ⌘C, so the
+    /// overlay handles none.
     func overlayView(_ overlayView: ImageAnalysisOverlayView,
                      shouldHandleKeyDownEvent event: NSEvent) -> Bool { false }
+
+    /// A text selection and an annotation selection are exclusive. A press that starts a text
+    /// selection goes to the overlay, not to mouseDown, so the annotation is deselected here.
+    func textSelectionDidChange(_ overlayView: ImageAnalysisOverlayView) {
+        guard overlayView.hasActiveTextSelection, selected != nil else { return }
+        selected = nil
+        needsDisplay = true
+    }
 }

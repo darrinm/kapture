@@ -245,10 +245,7 @@ public enum AnnotationRenderer {
     /// on-screen path in CanvasView.draw.
     public static func flatten(base: CGImage, layers: [Annotation]) -> CGImage? {
         let w = base.width, h = base.height
-        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
-                                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
-        ctx.draw(base, in: CGRect(x: 0, y: 0, width: w, height: h))
+        guard let ctx = context(drawing: base) else { return nil }
         ctx.translateBy(x: 0, y: CGFloat(h))
         ctx.scaleBy(x: 1, y: -1)
         for l in layers { l.draw(in: ctx, base: base) }
@@ -262,21 +259,36 @@ public enum AnnotationRenderer {
         return out
     }
 
-    /// The image Live Text reads in the editor: the base with every redaction rect filled solid.
-    /// The canvas draws annotations over the pristine base, so analyzing the base would let a
-    /// drag select the words a blur covers. Solid rather than the blur itself, because Vision
-    /// can still read text under a light blur. Base-sized and never cropped, so the analysis
-    /// lines up with image space. `redactions` are image-space rects (top-left origin).
-    static func liveTextSource(base: CGImage, redactions: [CGRect]) -> CGImage? {
-        guard !redactions.isEmpty else { return base }
+    /// An sRGB context the size of `base`, with `base` drawn upright. Origin bottom-left.
+    private static func context(drawing base: CGImage) -> CGContext? {
         let w = base.width, h = base.height
         guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
                                   space: CGColorSpace(name: CGColorSpace.sRGB)!,
                                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
         ctx.draw(base, in: CGRect(x: 0, y: 0, width: w, height: h))
+        return ctx
+    }
+
+    /// The image Live Text reads in the editor: the base with every text-hiding layer's rect
+    /// filled solid, and everything outside an applied crop filled solid. The canvas draws
+    /// annotations over the pristine base, so analyzing the base would let a drag select words
+    /// that a blur or a filled shape covers, or that the crop removed. A drag that starts inside
+    /// the crop can extend past its edge, so limiting where a press starts is not enough. Solid
+    /// rather than the blur itself, because Vision can still read text under a light blur.
+    /// Base-sized and never cropped, so the analysis lines up with image space. All rects are
+    /// image space (top-left origin).
+    static func liveTextSource(base: CGImage, covered: [CGRect], crop: CGRect? = nil) -> CGImage? {
+        guard !covered.isEmpty || crop != nil else { return base }
+        guard let ctx = context(drawing: base) else { return nil }
+        let h = CGFloat(base.height)
+        let flip = CGAffineTransform(a: 1, b: 0, c: 0, d: -1, tx: 0, ty: h)   // image space → context
         ctx.setFillColor(CGColor(gray: 0, alpha: 1))
-        for r in redactions {   // annotation geometry is top-left origin; the context is bottom-left
-            ctx.fill(CGRect(x: r.minX, y: CGFloat(h) - r.maxY, width: r.width, height: r.height))
+        for r in covered { ctx.fill(r.applying(flip)) }
+        if let crop {
+            // even-odd: the whole image minus the crop
+            ctx.addRect(CGRect(x: 0, y: 0, width: base.width, height: base.height))
+            ctx.addRect(crop.applying(flip))
+            ctx.fillPath(using: .evenOdd)
         }
         return ctx.makeImage()
     }
@@ -338,11 +350,26 @@ public enum AnnotationEffects {
     }
 }
 
+public extension Annotation {
+    /// Whether this layer hides what is under it from the reader: a blur, a pixelate, or a
+    /// filled rectangle or ellipse. Live Text must not select text under one.
+    var hidesText: Bool {
+        tool.isRedaction || (filled == true && (tool == .rect || tool == .ellipse))
+    }
+}
+
 public enum AnnotationCodec {
     public static func encode(_ layers: [Annotation]) -> String {
         (try? JSONEncoder().encode(layers)).flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
     }
     public static func decode(_ json: String) -> [Annotation] {
         (try? JSONDecoder().decode([Annotation].self, from: Data(json.utf8))) ?? []
+    }
+
+    /// Whether a saved layer stack hides any text. A flattened file keeps only the blurred or
+    /// covered pixels, not where they are, so a pin of it cannot exclude those regions.
+    public static func hidesText(_ json: String?) -> Bool {
+        guard let json else { return false }
+        return decode(json).contains(where: \.hidesText)
     }
 }
