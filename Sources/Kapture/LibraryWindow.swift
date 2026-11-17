@@ -847,9 +847,7 @@ final class LibraryGridView: NSView {
 
     private func open(_ record: CaptureRecord) {
         withBytes(record) { [self] in
-            if record.canTrim { TrimmerController.shared.open(recordID: record.id) }
-            else if record.canAnnotate { EditorController.shared.open(recordID: record.id) }
-            else { NSWorkspace.shared.open(library.url(for: record)) }
+            if !CaptureOpener.open(record) { NSWorkspace.shared.open(library.url(for: record)) }
         }
     }
 
@@ -873,9 +871,7 @@ final class LibraryGridView: NSView {
         if record.status == .trashed {
             add("Restore", #selector(restoreSelected))
         } else {
-            if record.canTrim { add("Trim…", #selector(openSelected)) }
-            else if record.canAnnotate { add("Edit…", #selector(openSelected)) }
-            if record.canGrabFrames { add("Grab Frames…", #selector(grabFramesSelected)) }
+            if let title = CaptureOpener.menuTitle(for: record) { add(title, #selector(openSelected)) }
             add("Copy", #selector(copySelected))
             add("Reveal in Finder", #selector(revealSelected))
             menu.addItem(.separator())
@@ -895,10 +891,6 @@ final class LibraryGridView: NSView {
         selectedIndex.map { items[$0].record }
     }
     @objc private func openSelected() { if let r = selectedRecord { open(r) } }
-    @objc private func grabFramesSelected() {
-        guard let r = selectedRecord else { return }
-        withBytes(r) { FrameGrabController.shared.open(recordID: r.id) }
-    }
     @objc private func copySelected() {
         guard let r = selectedRecord else { return }
         withBytes(r) { [self] in Clipboard.write(url: library.url(for: r)) }

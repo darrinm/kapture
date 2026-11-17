@@ -17,16 +17,17 @@ final class CaptureActionTests: XCTestCase {
         super.tearDown()
     }
 
-    /// A GIF is a recording to the eye, but AVFoundation cannot decode a frame from one.
-    func testOnlyRecordingsOfferFrameGrabbing() {
+    /// Only a recording opens the recording window. A GIF is a recording to the eye, but
+    /// AVFoundation cannot trim it or decode a frame from it.
+    func testOnlyRecordingsOpenTheRecordingWindow() {
         func record(_ kind: CaptureKind) -> CaptureRecord {
             CaptureRecord(kind: kind, createdAt: Date(), width: 1, height: 1, bytes: 1,
                           relPath: "x", sourceApp: nil, fastID: "")
         }
-        XCTAssertTrue(record(.recording).canGrabFrames)
-        XCTAssertFalse(record(.gif).canGrabFrames)
-        XCTAssertFalse(record(.screenshot).canGrabFrames)
-        XCTAssertFalse(record(.text).canGrabFrames)
+        XCTAssertTrue(record(.recording).opensRecordingWindow)
+        XCTAssertFalse(record(.gif).opensRecordingWindow)
+        XCTAssertFalse(record(.screenshot).opensRecordingWindow)
+        XCTAssertFalse(record(.text).opensRecordingWindow)
     }
 
     /// Upgrading must not silently change what happens after a capture: someone who had

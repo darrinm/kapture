@@ -263,7 +263,7 @@ public final class Library: @unchecked Sendable {
     }
 
     /// Scratch URL for work-in-progress media: `<tmp>/prefix-<ULID>.ext`. Every producer of a
-    /// temp artifact (recorder, GIF exporter, trimmer, clipboard pin) names files the same way,
+    /// temp artifact (recorder, GIF exporter, trim export, clipboard pin) names files the same way,
     /// so a stray temp file is always traceable back to the stage that wrote it.
     public static func tempURL(prefix: String, ext: String) -> URL {
         FileManager.default.temporaryDirectory

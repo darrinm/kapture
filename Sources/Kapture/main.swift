@@ -20,8 +20,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             CaptureCoordinator.shared.library = library
             OverlayController.shared.library = library
             EditorController.shared.library = library
-            TrimmerController.shared.library = library
-            FrameGrabController.shared.library = library
+            RecordingWindowController.shared.library = library
             LibraryWindowController.shared.library = library
             ShareCoordinator.shared.library = library
             Task {

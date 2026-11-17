@@ -35,9 +35,9 @@ cannot. Every layer stays editable and every edit is undoable; the untouched ori
 aside, so a crop is never permanent.
 
 **Record** — an area, a window, or a whole display to MP4, with system audio and your
-microphone. Pause and resume mid-take. Clicks and keystrokes can be drawn into the movie. Trim
-the ends afterwards, or export the whole thing as a GIF. Grab Frames steps through a recording
-frame by frame and saves any frame as a full-resolution screenshot.
+microphone. Pause and resume mid-take. Clicks and keystrokes can be drawn into the movie. Open a
+recording (double-click or ⌘E) to trim its ends or step through it frame by frame and save any
+frame as a full-resolution screenshot. Or export the whole thing as a GIF.
 
 **Remember** — every capture is read on-device and its text indexed, so you can search your
 library for the error message you screenshotted in March. Filter by app, kind or date. With

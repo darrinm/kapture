@@ -79,14 +79,13 @@ public struct CaptureRecord: Codable, Sendable, FetchableRecord, PersistableReco
     // a movie (a .gif — playable, but not PNG-editable and not trimmable) can't fall into the
     // wrong tool: the still editor's save writes PNG bytes over whatever file it opened.
 
-    /// Recordings open the native trim UI.
-    public var canTrim: Bool { kind == .recording }
+    /// Recordings open the recording window (trim and grab frames). AVFoundation does not read
+    /// GIFs, so a GIF cannot be trimmed or have a frame grabbed.
+    public var opensRecordingWindow: Bool { kind == .recording }
     /// Only stills go to the annotation editor (it flattens to PNG on save).
     public var canAnnotate: Bool { kind == .screenshot }
     /// GIF export reads a movie; a GIF is already one.
     public var canExportGIF: Bool { kind == .recording }
-    /// Frame grabbing decodes a movie through AVFoundation, which does not read GIFs.
-    public var canGrabFrames: Bool { kind == .recording }
     /// Neither in the trash nor being swept: the states an operation may act on.
     public var isLive: Bool { status != .trashed && status != .sweeping }
 
