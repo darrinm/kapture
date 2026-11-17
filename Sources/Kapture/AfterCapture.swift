@@ -32,7 +32,7 @@ enum AfterCapture {
 
     /// The copy and save actions alone. A frame grabbed from a recording runs only these. It
     /// has no corner card, and the pin, share and editor actions would open a window for every
-    /// grab, on top of the Grab Frames window.
+    /// grab, on top of the recording window.
     static func copyAndSave(url: URL, image: CGImage?,
                             actions: [CaptureAction] = Settings.shared.afterCaptureActions) {
         if actions.contains(.copy) {

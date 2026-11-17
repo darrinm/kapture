@@ -43,8 +43,9 @@ selection with the select tool (text under a redaction is excluded from the anal
 
 Done: screen recording of an area, window or display (ScreenCaptureKit + AVAssetWriter) with
 system audio and microphone · pause/resume, with the menu-bar timer holding while paused ·
-click and keystroke visualization drawn into the movie · trimmer · GIF export as a new capture ·
-Grab Frames (frame-step player; each grabbed frame is stored as a kept screenshot) ·
+click and keystroke visualization drawn into the movie · GIF export as a new capture ·
+one recording window for trimming and grabbing frames (frame-step player; each grabbed frame is
+stored as a kept screenshot) ·
 menu-bar red dot that stops on click rather than opening a menu.
 
 ## M4 status (It remembers)
