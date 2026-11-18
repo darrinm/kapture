@@ -38,8 +38,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 OverlayController.shared.showCard(recordID: id)
             }
             EditorController.shared.onSaveFailed = { _, error in Toast.show(error, while: "Saving the edit") }
-            EditorController.shared.onWindowOpened = { ActivationPolicy.acquire() }
-            EditorController.shared.onWindowClosed = { ActivationPolicy.release() }
+            EditorController.shared.onWindowOpened = { ActivationPolicy.acquire(for: $0) }
+            EditorController.shared.onWindowClosed = { ActivationPolicy.release(for: $0) }
         } catch {
             Log.shell.error("store init failed: \(error)")
             // Without a library every capture is dropped on the floor. That cannot be silent —

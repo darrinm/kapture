@@ -29,7 +29,7 @@ final class LibraryWindowController: NSObject, NSWindowDelegate {
             content?.refresh()
             observeLibrary()   // closing cancelled the last one
             window.makeKeyAndOrderFront(nil)
-            ActivationPolicy.acquire()
+            ActivationPolicy.acquire(for: window)
             return
         }
         guard let library else { return }
@@ -66,7 +66,7 @@ final class LibraryWindowController: NSObject, NSWindowDelegate {
         window = w
         grid = content.grid
         content.updateZoomAvailability()
-        ActivationPolicy.acquire()
+        ActivationPolicy.acquire(for: w)
         w.makeKeyAndOrderFront(nil)
         content.focusSearch()
         observeLibrary()
@@ -97,7 +97,7 @@ final class LibraryWindowController: NSObject, NSWindowDelegate {
         reloadDebounce?.cancel()
         reloadDebounce = nil
         grid?.closeQuickLook()
-        ActivationPolicy.release()
+        if let window = notification.object as? NSWindow { ActivationPolicy.release(for: window) }
     }
 }
 

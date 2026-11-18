@@ -17,8 +17,8 @@ public final class EditorController {
     /// the same layers by then; the shell says why.
     public var onSaveFailed: ((String, Error) -> Void)?
     /// Window lifecycle hooks — the shell uses these to toggle activation policy.
-    public var onWindowOpened: (() -> Void)?
-    public var onWindowClosed: (() -> Void)?
+    public var onWindowOpened: ((NSWindow) -> Void)?
+    public var onWindowClosed: ((NSWindow) -> Void)?
 
     public func open(recordID: String) {
         // canAnnotate, not "isn't a recording": Done flattens PNG bytes over the opened file, so
@@ -54,16 +54,18 @@ public final class EditorController {
         window.isReleasedWhenClosed = false
         windows[recordID] = window
         closeObservers[recordID] = NotificationCenter.default.addObserver(
-            forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak self] _ in
+            forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak self] note in
+            // from the notification: the window must outlive `windows[recordID] = nil` below
+            let window = note.object as? NSWindow
             Task { @MainActor in
                 self?.windows[recordID] = nil
                 if let token = self?.closeObservers.removeValue(forKey: recordID) {
                     NotificationCenter.default.removeObserver(token)
                 }
-                self?.onWindowClosed?()
+                if let window { self?.onWindowClosed?(window) }
             }
         }
-        onWindowOpened?()
+        onWindowOpened?(window)
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
     }
