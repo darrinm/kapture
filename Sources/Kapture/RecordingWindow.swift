@@ -27,13 +27,16 @@ final class RecordingWindowController {
         guard let library,
               let record = try? library.db.queue.read({ try CaptureRecord.fetchOne($0, key: recordID) }),
               record.opensRecordingWindow else { return }
-        if let existing = open[recordID] { existing.window.makeKeyAndOrderFront(nil); return }
+        if let existing = open[recordID] {
+            ActivationPolicy.acquire(for: existing.window)
+            existing.window.makeKeyAndOrderFront(nil)
+            return
+        }
         let session = RecordingWindowSession(record: record, library: library) { [weak self] in
             self?.open.removeValue(forKey: recordID)
-            ActivationPolicy.release()
         }
         open[recordID] = session
-        ActivationPolicy.acquire()
+        ActivationPolicy.acquire(for: session.window)
         session.window.makeKeyAndOrderFront(nil)
     }
 }

@@ -45,9 +45,7 @@ final class SettingsWindowController {
     func show(tab: SettingsView.Tab? = nil) {
         if let tab { selection.tab = tab }
         if let window {
-            // re-show must re-acquire — the willClose observer releases on every close,
-            // so skipping acquire here underflows the hold count and leaves the app .accessory
-            ActivationPolicy.acquire()
+            ActivationPolicy.acquire(for: window)
             window.makeKeyAndOrderFront(nil)
             return
         }
@@ -68,11 +66,7 @@ final class SettingsWindowController {
         w.center()
         w.isReleasedWhenClosed = false
         window = w
-        NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: w,
-                                               queue: .main) { _ in
-            Task { @MainActor in ActivationPolicy.release() }
-        }
-        ActivationPolicy.acquire()
+        ActivationPolicy.acquire(for: w)
         w.makeKeyAndOrderFront(nil)
     }
 }
