@@ -45,7 +45,6 @@ final class SettingsWindowController {
     func show(tab: SettingsView.Tab? = nil) {
         if let tab { selection.tab = tab }
         if let window {
-            // re-show must re-acquire: the willClose observer releases on every close
             ActivationPolicy.acquire(for: window)
             window.makeKeyAndOrderFront(nil)
             return
@@ -67,10 +66,6 @@ final class SettingsWindowController {
         w.center()
         w.isReleasedWhenClosed = false
         window = w
-        NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: w,
-                                               queue: .main) { [weak w] _ in
-            Task { @MainActor in if let w { ActivationPolicy.release(for: w) } }
-        }
         ActivationPolicy.acquire(for: w)
         w.makeKeyAndOrderFront(nil)
     }

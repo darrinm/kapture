@@ -3,27 +3,37 @@
 // recording) is open, Kapture becomes a regular app. It drops back to accessory when the last
 // one closes.
 //
-// Holds are keyed by window, not counted. `show()` on a window that is already open acquires
-// again, and the window closes only once. A counter went up on every re-show and never came
-// back to zero, which left Kapture in the Dock and the app switcher for the rest of the session.
+// Holds are keyed by window and released by the window's own willClose, so callers only
+// acquire. Re-showing an open window acquires again, and the window closes only once. A
+// counter with a release per close went up on every re-show and never came back to zero,
+// which left Kapture in the Dock and the app switcher for the rest of the session.
 import AppKit
 
 @MainActor
 enum ActivationPolicy {
-    private static var holds = Set<ObjectIdentifier>()
+    /// One willClose observer per held window.
+    private static var holds: [ObjectIdentifier: NSObjectProtocol] = [:]
 
-    /// Become a regular app while `window` is open. Acquiring the same window again only activates.
+    /// Become a regular app until `window` closes. Acquiring an open window again only activates.
     static func acquire(for window: NSWindow) {
-        holds.insert(ObjectIdentifier(window))
+        let id = ObjectIdentifier(window)
+        if holds[id] == nil {
+            holds[id] = NotificationCenter.default.addObserver(
+                forName: NSWindow.willCloseNotification, object: window, queue: .main) { _ in
+                MainActor.assumeIsolated { release(id) }
+            }
+        }
         if NSApp.activationPolicy() != .regular {
             NSApp.setActivationPolicy(.regular)
         }
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    /// Call from the window's close. Releasing a window that holds nothing does nothing.
-    static func release(for window: NSWindow) {
-        guard holds.remove(ObjectIdentifier(window)) != nil, holds.isEmpty else { return }
-        NSApp.setActivationPolicy(.accessory)
+    private static func release(_ id: ObjectIdentifier) {
+        guard let token = holds.removeValue(forKey: id) else { return }
+        NotificationCenter.default.removeObserver(token)
+        if holds.isEmpty {
+            NSApp.setActivationPolicy(.accessory)
+        }
     }
 }

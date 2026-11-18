@@ -97,7 +97,6 @@ final class LibraryWindowController: NSObject, NSWindowDelegate {
         reloadDebounce?.cancel()
         reloadDebounce = nil
         grid?.closeQuickLook()
-        if let window = notification.object as? NSWindow { ActivationPolicy.release(for: window) }
     }
 }
 

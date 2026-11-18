@@ -33,9 +33,7 @@ final class RecordingWindowController {
             return
         }
         let session = RecordingWindowSession(record: record, library: library) { [weak self] in
-            if let window = self?.open.removeValue(forKey: recordID)?.window {
-                ActivationPolicy.release(for: window)
-            }
+            self?.open.removeValue(forKey: recordID)
         }
         open[recordID] = session
         ActivationPolicy.acquire(for: session.window)

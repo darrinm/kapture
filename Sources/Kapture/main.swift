@@ -39,7 +39,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             }
             EditorController.shared.onSaveFailed = { _, error in Toast.show(error, while: "Saving the edit") }
             EditorController.shared.onWindowOpened = { ActivationPolicy.acquire(for: $0) }
-            EditorController.shared.onWindowClosed = { ActivationPolicy.release(for: $0) }
         } catch {
             Log.shell.error("store init failed: \(error)")
             // Without a library every capture is dropped on the floor. That cannot be silent —

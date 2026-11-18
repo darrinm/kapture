@@ -16,9 +16,8 @@ public final class EditorController {
     /// Called when the flatten could not be saved. The editor has already put itself back with
     /// the same layers by then; the shell says why.
     public var onSaveFailed: ((String, Error) -> Void)?
-    /// Window lifecycle hooks — the shell uses these to toggle activation policy.
+    /// Called with each new editor window. The shell makes Kapture a regular app until it closes.
     public var onWindowOpened: ((NSWindow) -> Void)?
-    public var onWindowClosed: ((NSWindow) -> Void)?
 
     public func open(recordID: String) {
         // canAnnotate, not "isn't a recording": Done flattens PNG bytes over the opened file, so
@@ -54,15 +53,12 @@ public final class EditorController {
         window.isReleasedWhenClosed = false
         windows[recordID] = window
         closeObservers[recordID] = NotificationCenter.default.addObserver(
-            forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak self] note in
-            // from the notification: the window must outlive `windows[recordID] = nil` below
-            let window = note.object as? NSWindow
+            forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak self] _ in
             Task { @MainActor in
                 self?.windows[recordID] = nil
                 if let token = self?.closeObservers.removeValue(forKey: recordID) {
                     NotificationCenter.default.removeObserver(token)
                 }
-                if let window { self?.onWindowClosed?(window) }
             }
         }
         onWindowOpened?(window)
